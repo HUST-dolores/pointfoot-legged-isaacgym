@@ -121,7 +121,6 @@ class BaseTask:
         # todo: read from config
         self.enable_viewer_sync = True
         self.viewer = None
-
         # if running with a viewer, set up keyboard shortcuts and camera
         if self.headless == False:
             # subscribe to keyboard shortcuts
@@ -349,6 +348,9 @@ class BaseTask:
         self.whole_body_mass = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
+        self.base_inertia = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False
+        )
         for i in range(self.num_envs):
             # create env instance
             env_handle = self.gym.create_env(
@@ -567,6 +569,9 @@ class BaseTask:
                 props[i].inertia.x.x *= inertia_scale
                 props[i].inertia.y.y *= inertia_scale
                 props[i].inertia.z.z *= inertia_scale
+            self.base_inertia[env_id, 0] = props[0].inertia.x.x
+            self.base_inertia[env_id, 1] = props[0].inertia.y.y
+            self.base_inertia[env_id, 2] = props[0].inertia.z.z
         return props
 
     def _step_contact_targets(self):
@@ -1379,6 +1384,10 @@ class BaseTask:
             device=self.device,
             requires_grad=False,
         )
+        # self.body_props = self
+        
+        
+        
         self.base_position = self.root_states[:, :3]
         self.last_base_position = self.base_position.clone()
         self.base_lin_vel = quat_rotate_inverse(

@@ -64,8 +64,8 @@ class Logger:
         self.plot_process.start()
 
     def _plot(self):
-        nb_rows = 3
-        nb_cols = 3
+        nb_rows = 4
+        nb_cols = 4
         fig, axs = plt.subplots(nb_rows, nb_cols)
         for key, value in self.state_log.items():
             time = np.linspace(0, len(value) * self.dt, len(value))
@@ -150,6 +150,67 @@ class Logger:
             a.plot(time, log["dof_torque"], label="measured")
         a.set(xlabel="time [s]", ylabel="Joint Torque [Nm]", title="Torque")
         a.legend()
+        # plot mass     
+        a = axs[3, 3]
+        if log["mass"]:
+            a.plot(time, log["mass"], label="Actual")
+        if log["mass_est"]:
+            a.plot(time, log["mass_est"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="mass [kg]", title="mass")
+        a.legend()
+        
+        a = axs[3, 0]
+        if log["CoM_x"]:
+            a.plot(time, log["CoM_x"], label="Actual")
+        if log["CoM_est_x"]:
+            a.plot(time, log["CoM_est_x"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="CoM_x [m]", title="CoM_x")
+        a.legend()
+
+        a = axs[3, 1]
+        if log["CoM_y"]:
+            a.plot(time, log["CoM_y"], label="Actual")
+        if log["CoM_est_y"]:
+            a.plot(time, log["CoM_est_y"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="CoM_y [m]", title="CoM_y")
+        a.legend()
+        
+        a = axs[3, 2]
+        if log["CoM_z"]:
+            a.plot(time, log["CoM_z"], label="Actual")
+        if log["CoM_est_z"]:
+            a.plot(time, log["CoM_est_z"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="CoM_z [m]", title="CoM_z")
+        a.legend()
+        
+        a = axs[0, 3]
+        if log["inertia_xx"]:
+            a.plot(time, log["inertia_xx"], label="Actual")
+        if log["inertia_est_xx"]:
+            a.plot(time, log["inertia_est_xx"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="inertia_xx [???]", title="inertia_xx")
+        a.legend()
+        
+        a = axs[1, 3]
+        if log["inertia_yy"]:
+            a.plot(time, log["inertia_yy"], label="Actual")
+        if log["inertia_est_yy"]:
+            a.plot(time, log["inertia_est_yy"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="inertia_yy [???]", title="inertia_yy")
+        a.legend()
+        
+        a = axs[2, 3]
+        if log["inertia_zz"]:
+            a.plot(time, log["inertia_zz"], label="Actual")
+        if log["inertia_est_zz"]:
+            a.plot(time, log["inertia_est_zz"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="inertia_zz [???]", title="inertia_zz")
+        a.legend()
+        
+
+        
+        
+        
         plt.show()
 
     def print_rewards(self):

@@ -120,7 +120,7 @@ def play(args):
     logger = Logger(env.dt)
     robot_index = 5  # which robot is used for logging
     joint_index = 1  # which joint is used for logging
-    stop_state_log = 100  # number of steps before plotting states
+    stop_state_log = 500  # number of steps before plotting states
     stop_rew_log = (
         env.max_episode_length + 1
     )  # number of steps before print average episode rewards
@@ -177,6 +177,15 @@ def play(args):
                     "base_vel_z": env.base_lin_vel[robot_index, 2].item(),
                     "base_vel_yaw": env.base_ang_vel[robot_index, 2].item(),
                     "power": torch.sum(env.power[robot_index, :]).item(),
+                    
+                    "mass": env.base_mass[robot_index].item(),
+                    "CoM_x": env.base_com[robot_index, 0].item(),
+                    "CoM_y": env.base_com[robot_index, 1].item(),
+                    "CoM_z": env.base_com[robot_index, 2].item(),
+                    "inertia_xx": env.base_inertia[robot_index, 0].item(),
+                    "inertia_yy": env.base_inertia[robot_index, 1].item(),
+                    "inertia_zz": env.base_inertia[robot_index, 2].item(),   
+                    
                     "contact_forces_z": env.contact_forces[
                         robot_index, env.feet_indices, 2
                     ]
@@ -194,6 +203,14 @@ def play(args):
                         / env.cfg.normalization.obs_scales.lin_vel,
                         "est_lin_vel_z": est[robot_index, 2].item()
                         / env.cfg.normalization.obs_scales.lin_vel,
+                                        
+                        "mass_est": est[robot_index, 3].item(),
+                        "CoM_est_x": est[robot_index, 4].item(),
+                        "CoM_est_y": est[robot_index, 5].item(),
+                        "CoM_est_z": est[robot_index, 6].item(),
+                        "inertia_est_xx": est[robot_index, 7].item(),
+                        "inertia_est_yy": est[robot_index, 8].item(),
+                        "inertia_est_zz": est[robot_index, 9].item(),
                     }
                 )
         elif i == stop_state_log:

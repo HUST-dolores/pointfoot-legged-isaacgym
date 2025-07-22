@@ -32,9 +32,10 @@ from legged_gym.envs.base.base_config import BaseConfig
 
 class BipedCfgWF(BaseConfig):
     class env:
-        num_envs = 8192
-        num_observations = 30 + 6 - 2 - 4 - 2  # +6 means wheel obs,-2 means sin&cos clock, -4 means gait para nums -2 means wheels pos
-        num_critic_observations = 3 + num_observations
+        num_envs = 4096
+        num_observations = 30 + 6 - 2 - 4 - 2 
+        # +6 means wheel obs,-2 means sin&cos clock, -4 means gait para nums -2 means wheels pos -2 means load estimation related
+        num_critic_observations = 3 + 7 + num_observations
         num_height_samples = 117
         num_actions = 8
         env_spacing = 3.0  # not used with heightfields/trimeshes
@@ -202,7 +203,7 @@ class BipedCfgWF(BaseConfig):
         randomize_base_com = True
         rand_com_vec = [0.03, 0.02, 0.03]
         randomize_inertia = True
-        randomize_inertia_range = [0.8, 1.2]
+        randomize_inertia_range = [0.95, 1.05]
         push_robots = True
         push_interval_s = 7
         max_push_vel_xy = 1.5
@@ -341,7 +342,7 @@ class BipedCfgPPOWF(BaseConfig):
     class MLP_Encoder:
         output_detach = True
         num_input_dim = BipedCfgWF.env.num_observations * BipedCfgWF.env.obs_history_length
-        num_output_dim = 3
+        num_output_dim = 10
         hidden_dims = [256, 128]
         activation = "elu"
         orthogonal_init = False

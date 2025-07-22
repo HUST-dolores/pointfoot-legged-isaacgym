@@ -144,7 +144,7 @@ class OnPolicyRunner:
             commands.to(self.device),
             critic_obs.to(self.device),
         )
-        # ???
+        # 转移到指定设备
         self.alg.actor_critic.train()  # switch to train mode (for dropout for example)
 
         ep_infos = []

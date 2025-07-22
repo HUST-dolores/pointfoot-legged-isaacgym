@@ -175,8 +175,7 @@ class BipedWF(BaseTask):
         # note that observation noise need to modified accordingly !!!
         dof_list = [0,1,2,4,5,6]
         dof_pos = (self.dof_pos - self.default_dof_pos)[:,dof_list]
-        # dof_pos = torch.remainder(dof_pos + self.pi, 2 * self.pi) - self.pi
-
+        # dof_pos = torch.remainder(dof_pos + self.pi, 2 * self.pi) - self.pi       
         obs_buf = torch.cat(
             (
                 self.base_ang_vel * self.obs_scales.ang_vel,
@@ -187,11 +186,16 @@ class BipedWF(BaseTask):
                 # self.clock_inputs_sin.view(self.num_envs, 1),
                 # self.clock_inputs_cos.view(self.num_envs, 1),
                 # self.gaits,
+                
             ),
             dim=-1,
         )
         critic_obs_buf = torch.cat((
-            self.base_lin_vel * self.obs_scales.lin_vel, self.obs_buf), dim=-1)
+            self.base_lin_vel * self.obs_scales.lin_vel,
+            self.base_mass.unsqueeze(-1),
+            self.base_com,
+            self.base_inertia,
+            self.obs_buf), dim=-1)
         return obs_buf, critic_obs_buf
     
     def _post_physics_step_callback(self):
