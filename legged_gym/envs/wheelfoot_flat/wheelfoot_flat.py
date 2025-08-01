@@ -43,8 +43,12 @@ class BipedWF(BaseTask):
         self._init_buffers()
         self._prepare_reward_function()
         self.init_done = True
+        print(f"=== 实际机器人类型: 轮足机器人123 ===")
+        print(f"===============================")
+
 
     def reset_idx(self, env_ids):
+    
         if len(env_ids) == 0:
             return
         # update curriculum
@@ -119,6 +123,8 @@ class BipedWF(BaseTask):
             )
             if self.cfg.domain_rand.push_robots:
                 self._push_robots()
+            if self.cfg.domain_rand.add_random_load:
+                self._add_random_load()
             self.gym.simulate(self.sim)
             if self.device == "cpu":
                 self.gym.fetch_results(self.sim, True)

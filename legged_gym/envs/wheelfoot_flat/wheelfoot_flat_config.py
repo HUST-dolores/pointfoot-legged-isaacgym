@@ -199,14 +199,18 @@ class BipedCfgWF(BaseConfig):
         randomize_restitution = True
         restitution_range = [0.0, 1.0]
         randomize_base_mass = True
-        added_mass_range = [-0.5, 2]
+        added_mass_range = [-0.5, 2]  # [kg]这个mass是初始化定义的mass，定义后不会改变。
         randomize_base_com = True
         rand_com_vec = [0.03, 0.02, 0.03]
         randomize_inertia = True
         randomize_inertia_range = [0.95, 1.05]
         push_robots = True
+        add_random_load = True
         push_interval_s = 7
+        load_interval_s = 5     
         max_push_vel_xy = 1.5
+        max_load = 5# [kg]s
+        max_com_offset = 0.01
         rand_force = False
         force_resampling_time_s = 15
         max_force = 50.0
@@ -223,7 +227,7 @@ class BipedCfgWF(BaseConfig):
         randomize_imu_offset = True
         randomize_imu_offset_range = [-1.2, 1.2]
         delay_ms_range = [0, 20]
-        max_push_vel_xy = 1.0
+
 
     class rewards:
         class scales:

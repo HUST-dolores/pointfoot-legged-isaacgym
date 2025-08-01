@@ -113,7 +113,12 @@ class BaseTask:
             self.num_envs, device=self.device, dtype=torch.bool
         )
         self.extras = {}
-
+        self.base_add_mass = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.base_add_com = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False
+        )
         # create envs, sim and viewer
         self.create_sim()
         self.gym.prepare_sim(self.sim)
@@ -262,6 +267,25 @@ class BaseTask:
             | self.edge_reset_buf
             # | self.power_limit_out_buf
         )
+        # 简单打印reset原因
+        reset_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        for env_id in reset_env_ids.tolist():
+            reasons = []
+            if self.fail_buf[env_id] > self.cfg.env.fail_to_terminal_time_s / self.dt:
+                if torch.any(
+                    torch.norm(
+                        self.contact_forces[env_id, self.termination_contact_indices, :], dim=-1
+                    ) > 10.0
+                ):
+                    reasons.append("contact_force")
+                if self.projected_gravity[env_id, 2] > -0.1:
+                    reasons.append("orientation")
+            if self.time_out_buf[env_id]:
+                reasons.append("timeout")
+            if self.edge_reset_buf[env_id]:
+                reasons.append("edge")
+            # print(f"Env {env_id} reset due to: {', '.join(reasons)}")
+        
         
     def _create_envs(self):
         """Creates environments:
@@ -549,18 +573,22 @@ class BaseTask:
         if self.cfg.domain_rand.randomize_base_com:
             if env_id == 0:
                 com_x, com_y, com_z = self.cfg.domain_rand.rand_com_vec
-                self.base_com[:, 0] = (
+                self.base_add_com[:, 0] = (
                     torch.rand(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)\
                     * (com_x * 2) - com_x)
-                self.base_com[:, 1] = (
+                self.base_add_com[:, 1] = (
                     torch.rand(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)\
                     * (com_y * 2) - com_y)
-                self.base_com[:, 2] = (
+                self.base_add_com[:, 2] = (
                     torch.rand(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)\
                     * (com_z * 2) - com_z)
-            props[0].com.x += self.base_com[env_id, 0]
-            props[0].com.y += self.base_com[env_id, 1]
-            props[0].com.z += self.base_com[env_id, 2]
+            props[0].com.x += self.base_add_com[env_id, 0]
+            props[0].com.y += self.base_add_com[env_id, 1]
+            props[0].com.z += self.base_add_com[env_id, 2]
+            self.base_com[:, 0] = props[0].com.x
+            self.base_com[:, 1] = props[0].com.y
+            self.base_com[:, 2] = props[0].com.z
+            
         if self.cfg.domain_rand.randomize_inertia:
             for i in range(len(props)):
                 low_bound, high_bound = self.cfg.domain_rand.randomize_inertia_range
@@ -1014,6 +1042,58 @@ class BaseTask:
             gymapi.ENV_SPACE,
         )
         
+    def _add_random_load(self):
+        """Randomly adds load to the robots."""
+        env_ids = (
+            (
+                self.envs_steps_buf
+                % int(self.cfg.domain_rand.load_interval_s / self.sim_params.dt)
+                == 0
+            )
+            .nonzero(as_tuple=False)
+            .flatten()
+        )
+        if len(env_ids) == 0:
+            return
+
+        max_load = self.cfg.domain_rand.max_load
+        max_CoM_offset = self.cfg.domain_rand.max_com_offset
+
+        load_mass = torch_rand_float(-max_load, max_load, (self.num_envs,1), device=self.device)
+        load_position = torch_rand_float(-max_CoM_offset, max_CoM_offset, (self.num_envs, 3), device=self.device)
+
+        # 更新质量和质心
+        for i, env_id in enumerate(env_ids):
+
+
+            # 计算新的质量和质心
+            total_mass = self.base_mass[env_id] + load_mass[i]
+            new_com = (self.base_mass[env_id] * self.base_com[env_id] + load_mass[i] * load_position[i]) / total_mass
+
+            # 更新质量和质心
+            self.base_mass[env_id] = total_mass
+            self.base_com[env_id] = new_com
+
+            # # 更新惯量（假设负载为均匀分布的球体）
+            # load_inertia = (2 / 5) * load_mass[i] * (0.1 ** 2)  # 假设负载半径为 0.1 m
+            # self.base_inertia[env_id] += load_inertia
+
+            # 同步到仿真环境
+            body_props = self.gym.get_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id])
+            
+            
+            
+            # print(f"[Before set] mass: {body_props[0].mass}, com: ({body_props[0].com.x}, {body_props[0].com.y}, {body_props[0].com.z})")
+            body_props[0].mass = self.base_mass[env_id].item()
+            body_props[0].com.x = self.base_com[env_id][0].item()
+            body_props[0].com.y = self.base_com[env_id][1].item()
+            body_props[0].com.z = self.base_com[env_id][2].item()
+    
+            # print(f"[After set] mass: {body_props[0].mass}, com: ({body_props[0].com.x}, {body_props[0].com.y}, {body_props[0].com.z})")
+    
+    
+            self.gym.set_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id], body_props, recomputeInertia=False)
+        
     def compute_observations(self):
         """Computes observations"""
         self.obs_buf, self.critic_obs_buf = self.compute_group_observations()
@@ -1162,6 +1242,8 @@ class BaseTask:
         # compute observations, rewards, resets, ...
         self.check_termination()
         self.compute_reward()
+        
+        # print("reset_buf:", self.reset_buf)
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
         self.compute_observations()  # in some cases a simulation step might be required to refresh some obs (for example body positions)

@@ -51,6 +51,8 @@ class BipedPF(BaseTask):
         self._init_buffers()
         self._prepare_reward_function()
         self.init_done = True
+        print(f"=== 实际机器人类型: 双足机器人 ===")
+        print(f"===============================")
 
     def step(self, actions):
         """Apply actions, simulate, call self.post_physics_step()
