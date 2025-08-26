@@ -196,11 +196,13 @@ class BipedWF(BaseTask):
             ),
             dim=-1,
         )
+        priv_load_feat = self._get_priv_load_features()
         critic_obs_buf = torch.cat((
             self.base_lin_vel * self.obs_scales.lin_vel,
             self.base_mass.unsqueeze(-1),
             self.base_com,
             self.base_inertia,
+            priv_load_feat,
             self.obs_buf), dim=-1)
         return obs_buf, critic_obs_buf
     

@@ -35,7 +35,7 @@ class BipedCfgWF(BaseConfig):
         num_envs = 4096
         num_observations = 30 + 6 - 2 - 4 - 2 
         # +6 means wheel obs,-2 means sin&cos clock, -4 means gait para nums -2 means wheels pos -2 means load estimation related
-        num_critic_observations = 3 + 7 + num_observations
+        num_critic_observations = 3 + 7 + num_observations + 8*4 + 1
         num_height_samples = 117
         num_actions = 8
         env_spacing = 3.0  # not used with heightfields/trimeshes
@@ -199,15 +199,20 @@ class BipedCfgWF(BaseConfig):
         randomize_restitution = True
         restitution_range = [0.0, 1.0]
         randomize_base_mass = True
-        added_mass_range = [-0.5, 2]  # [kg]这个mass是初始化定义的mass，定义后不会改变。
+        added_mass_range = [1.5, 2.5]  # [kg]这个mass是初始化定义的mass，定义后不会改变。
         randomize_base_com = True
         rand_com_vec = [0.03, 0.02, 0.03]
+        load_offset_range_xy = [0.13, 0.12]
         randomize_inertia = True
         randomize_inertia_range = [0.95, 1.05]
         push_robots = True
-        add_random_load = True
+        add_random_load = False
         push_interval_s = 7
-        load_interval_s = 5     
+        load_interval_s = [13, 15]  # 随机化 todo
+        load_duration_s = [5, 7]
+        
+        
+        
         max_push_vel_xy = 1.5
         max_load = 5# [kg]s
         max_com_offset = 0.01

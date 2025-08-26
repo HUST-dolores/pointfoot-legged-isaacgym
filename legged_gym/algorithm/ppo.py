@@ -179,6 +179,7 @@ class PPO:
         self.storage.compute_returns(last_values, self.gamma, self.lam)
 
     def update(self):
+        #初始化与数据准备
         num_updates = 0
         mean_value_loss = 0
         mean_surrogate_loss = 0
@@ -202,23 +203,26 @@ class PPO:
             old_sigma_batch,
         ) in generator:
             encoder_out_batch = self.encoder.encode(obs_history_batch)
+            # 历史观测编码
             commands_batch = group_commands_batch
+            # 控制命令
+            # 策略网络前向传播
             self.actor_critic.act(
                 torch.cat(
                     (encoder_out_batch, obs_batch, commands_batch),
                     dim=-1,
                 )
             )
-
+            # 获取当前策略的动作概率
             actions_log_prob_batch = self.actor_critic.get_actions_log_prob(
                 actions_batch
             )
-
+            # 价值网络评估
             value_batch = self.actor_critic.evaluate(critic_obs_batch)
             mu_batch = self.actor_critic.action_mean
             sigma_batch = self.actor_critic.action_std
             entropy_batch = self.actor_critic.entropy
-
+            #KL散度计算（策略变化度量）
             kl_mean = torch.tensor(0, device=self.device, requires_grad=False)
             with torch.inference_mode():
                 kl = torch.sum(
@@ -233,7 +237,7 @@ class PPO:
                 )
                 kl_mean = torch.mean(kl)
 
-            # KL
+            # 自适应学习率调整
             if self.desired_kl != None and self.schedule == "adaptive":
                 with torch.inference_mode():
                     if kl_mean > self.desired_kl * 2.0:
@@ -260,7 +264,7 @@ class PPO:
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
-            # Value function loss
+            # Value function loss价值损失
             if self.use_clipped_value_loss:
                 value_clipped = target_values_batch + (
                     value_batch - target_values_batch
@@ -272,19 +276,22 @@ class PPO:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
             entropy_batch_mean = entropy_batch.mean()
+            #总损失函数代理损失（策略优化）
+            # 价值损失（价值函数优化）
+            # 熵奖励（鼓励探索）
             loss = (
                 surrogate_loss
                 + self.value_loss_coef * value_loss
                 - self.entropy_coef * entropy_batch_mean
             )
-
+            # 学习率退火
             if self.anneal_lr:
                 frac = 1.0 - num_updates / (
                     self.num_learning_epochs * self.num_mini_batches
                 )
                 self.optimizer.param_groups[0]["lr"] = frac * self.learning_rate
 
-            # Gradient step
+            # Gradient step梯度更新梯度裁剪​
             self.optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
@@ -297,6 +304,7 @@ class PPO:
 
         num_updates_extra = 0
         mean_extra_loss = 0
+        #编码器辅助训练
         if self.extra_optimizer is not None:
             generator = self.storage.encoder_mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs
@@ -309,11 +317,10 @@ class PPO:
                 if self.encoder.is_mlp_encoder:
                     self.encoder.encode(obs_history_batch)
                     encode_batch = self.encoder.get_encoder_out()
-
-                if self.encoder.is_mlp_encoder:
-                    extra_loss = (
-                        (encode_batch[:, 0:10] - critic_obs_batch[:, 0:10]).pow(2).mean()
-                    )
+                    P = encode_batch.size(-1)
+                    # 约定：critic_obs 的前 P 维 = [前10维(3 lin vel + mass/com/inertia), priv_load_feat]
+                    target = critic_obs_batch[:, :P]
+                    extra_loss = (encode_batch - target).pow(2).mean()
                 else:
                     extra_loss = torch.zeros_like(value_loss)
 
@@ -323,7 +330,7 @@ class PPO:
 
                 num_updates_extra += 1
                 mean_extra_loss += extra_loss.item()
-
+        #性能统计与清理
         mean_value_loss /= num_updates
         if num_updates_extra > 0:
             mean_extra_loss /= num_updates

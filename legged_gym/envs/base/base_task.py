@@ -854,7 +854,9 @@ class BaseTask:
         self.rwd_angVelTrackPrev = self._reward_tracking_ang_vel()
         if "tracking_contacts_shaped_height" in self.reward_scales.keys():
             self.rwd_swingHeightPrev = self._reward_tracking_contacts_shaped_height()
-            
+        self._maybe_spawn_loads()
+        self._apply_external_wrenches()
+
     def _prepare_reward_function(self):
         """Prepares a list of reward functions, whcih will be called to compute the total reward.
         Looks for self._reward_<REWARD_NAME>, where <REWARD_NAME> are names of all non zero reward scales in the cfg.
@@ -1007,8 +1009,16 @@ class BaseTask:
                 self.cfg.commands.smooth_max_lin_vel_y,
             )
             
+    
+    
     def _push_robots(self):
-        """Random pushes the robots."""
+        """随机给机器人基座施加一个外力推挤。
+
+        触发频率：由 cfg.domain_rand.push_interval_s 与仿真步长 dt 决定（每 interval_steps 步一次）
+        力大小：基于 F = m * Δv / Δt,从 [-F, F] 中均匀采样各轴分量
+        坐标系：先在基座局部坐标系采样，再用姿态四元数旋转到世界坐标施加
+        """
+        # 找到当前步需要被推挤的环境 id（按固定间隔触发）
         env_ids = (
             (
                 self.envs_steps_buf
@@ -1020,27 +1030,150 @@ class BaseTask:
         )
         if len(env_ids) == 0:
             return
-
+        # 依据 F = m * Δv / Δt 估算最大推力上限（Δv 使用最大水平推速度上限）
         max_push_force = (
             self.base_mass.mean().item()
             * self.cfg.domain_rand.max_push_vel_xy
             / self.sim_params.dt
         )
-        self.rigid_body_external_forces[:] = 0
-        rigid_body_external_forces = torch_rand_float(
-            -max_push_force, max_push_force, (self.num_envs, 3), device=self.device
+        # # 清零外力张量（避免叠加旧帧外力）
+        # self.rigid_body_external_forces[:] = 0
+        # 在基座局部坐标系中为每个环境采样一个随机力向量 (x, y, z)，再旋到世界系后累加
+        local_forces = torch_rand_float(
+            -max_push_force, max_push_force, (len(env_ids), 3), device=self.device
         )
-        self.rigid_body_external_forces[env_ids, 0, 0:3] = quat_rotate(
-            self.base_quat[env_ids], rigid_body_external_forces[env_ids]
-        )
-        self.rigid_body_external_forces[env_ids, 0, 2] *= 0.5
+        # 将局部力旋转到世界坐标，并仅对选中的环境的基座刚体（索引 0）赋值
+        world_forces = quat_rotate(self.base_quat[env_ids], local_forces)
+        # 减小垂直分量，避免把机器人“顶飞”
+        world_forces[:, 2] *= 0.5  # 抑制竖直向分量
+        # 累加到基座（刚体索引0）
+        self.rigid_body_external_forces[env_ids, 0, 0:3] += world_forces
+        
+        
+        
+        
+        # self.gym.apply_rigid_body_force_tensors(
+        #     self.sim,
+        #     gymtorch.unwrap_tensor(self.rigid_body_external_forces),
+        #     gymtorch.unwrap_tensor(self.rigid_body_external_torques),
+        #     gymapi.ENV_SPACE,
+        # )
+        
+        
+    def _maybe_spawn_loads(self):
+        """按区间随机触发新的负载实例(可并发),为每个env分配一个空槽或替换最早到期槽。"""
+        # 到期清理（先把已经过期的负载关掉）
+        # self.load_active: torch.bool，形状 [num_envs, L]
+        # 第 i 个环境、第 j 个槽位当前是否有“激活中的负载”。    
+    
+        expired = self.load_active & (self.envs_steps_buf.unsqueeze(1) >= self.load_until_step)
+        if expired.any():
+            self.load_active[expired] = False
 
+        # 触发新负载的 env
+        env_mask = self.envs_steps_buf >= self.load_next_trigger_step
+        env_ids = env_mask.nonzero(as_tuple=False).flatten()
+        if len(env_ids) == 0:
+            return
+
+        # 预取配置
+        int_min = max(1, int(self.cfg.domain_rand.load_interval_s[0] / self.sim_params.dt))
+        int_max = max(int_min + 1, int(self.cfg.domain_rand.load_interval_s[1] / self.sim_params.dt))
+        dur_min = max(1, int(self.cfg.domain_rand.load_duration_s[0] / self.sim_params.dt))
+        dur_max = max(dur_min + 1, int(self.cfg.domain_rand.load_duration_s[1] / self.sim_params.dt))
+        mass_min, mass_max = self.cfg.domain_rand.added_mass_range
+        x_range = float(self.cfg.domain_rand.load_offset_range_xy[0])
+        y_range = float(self.cfg.domain_rand.load_offset_range_xy[1])
+        z_offset = 0.095  # 机体坐标系上方固定偏移
+
+        # 为每个触发env生成一个新负载
+        for env_id in env_ids.tolist():
+            # 选择槽位：优先空槽；若无空槽，替换最早到期槽
+            #tolist()将数组或张量转换为标准的Python列表结构。
+            active = self.load_active[env_id]
+            #提取指定环境env_id的所有槽位（共L个）的激活状态（布尔值）。
+            if (~active).any():
+            #取反后的张量是否存在至少一个True（即是否存在空闲槽位）
+                slot = (~active).nonzero(as_tuple=False).flatten()[0].item()
+            #获取所有空闲槽位（True值）的索引
+            else:
+                slot = torch.argmin(self.load_until_step[env_id]).item()
+            #无空槽时强制替换，优先淘汰最早结束的负载，最大化槽位利用率。
+            # 采样负载参数
+            duration_steps = torch.randint(dur_min, dur_max + 1, (1,), device=self.device).item()
+            #PyTorch 的 torch.randint(low, high, size)中，high参数是​​独占的​​（exclusive），即生成的整数范围为 [low, high - 1]。
+            
+            # 质量为正值（如需允许卸载/减重，可改用对称范围）
+            load_mass = torch_rand_float(mass_min, mass_max, (1, 1), device=self.device).squeeze().item()
+            # 本体坐标系偏心距
+            rx = torch_rand_float(-x_range, x_range, (1, 1), device=self.device).squeeze().item()
+            ry = torch_rand_float(-y_range, y_range, (1, 1), device=self.device).squeeze().item()
+            r_local = torch.tensor([rx, ry, z_offset], device=self.device, dtype=torch.float)
+
+            # 写入槽位
+            self.load_active[env_id, slot] = True
+            self.load_mass[env_id, slot] = load_mass
+            self.load_r_local[env_id, slot, :] = r_local
+            self.load_until_step[env_id, slot] = self.envs_steps_buf[env_id] + duration_steps
+
+            # 安排下一次触发
+            interval_steps = torch.randint(int_min, int_max + 1, (1,), device=self.device).item()
+            self.load_next_trigger_step[env_id] = self.envs_steps_buf[env_id] + interval_steps
+        
+        
+    def _accumulate_load_wrenches(self):
+        """将当前有效负载对应的重力与力矩累加到外力/外矩缓冲区。"""
+        # 有效（未过期且激活）掩码
+        active = self.load_active & (self.envs_steps_buf.unsqueeze(1) < self.load_until_step)
+        if not active.any():
+            return
+
+        idx = active.nonzero(as_tuple=False)  # [K, 2] -> (env, slot)
+        env_k = idx[:, 0]
+        # 提取参数
+        r_local_k = self.load_r_local[env_k, idx[:, 1], :]           # [K, 3]
+        mass_k = self.load_mass[env_k, idx[:, 1]]                    # [K]
+        quat_k = self.base_quat[env_k]                               # [K, 4]
+
+        # r_world = R(q) * r_local
+        # 函数里面就包含了q和q-1的计算
+        r_world_k = quat_rotate(quat_k, r_local_k)                   # [K, 3]
+
+        # F_world = m * g_world
+        g_world = self.g_world.unsqueeze(0).expand_as(r_world_k)     # [K, 3]
+        F_world_k = mass_k.unsqueeze(1) * g_world                    # [K, 3]
+
+        # τ_world = r_world × F_world
+        tau_world_k = torch.cross(r_world_k, F_world_k, dim=1)       # [K, 3]
+
+        # 按 env 汇总并累加到基座（刚体索引0）
+        forces_sum = torch.zeros(self.num_envs, 3, device=self.device)
+        torques_sum = torch.zeros(self.num_envs, 3, device=self.device)
+        #第一个参数 0表示​​操作的维度​​，即沿着张量的哪个维度进行索引累加。
+        forces_sum.index_add_(0, env_k, F_world_k)
+        torques_sum.index_add_(0, env_k, tau_world_k)
+
+        self.rigid_body_external_forces[:, 0, 0:3] += forces_sum
+        self.rigid_body_external_torques[:, 0, 0:3] += torques_sum
+
+    def _apply_external_wrenches(self):
+        """统一清零->叠加负载->叠加push->一次性apply。"""
+        # 清零缓冲
+        self.rigid_body_external_forces.zero_()
+        self.rigid_body_external_torques.zero_()
+
+        # 先负载（力+矩），再推挤（力）
+        self._accumulate_load_wrenches()
+        self._push_robots()
+
+        # 一次提交
         self.gym.apply_rigid_body_force_tensors(
             self.sim,
             gymtorch.unwrap_tensor(self.rigid_body_external_forces),
             gymtorch.unwrap_tensor(self.rigid_body_external_torques),
             gymapi.ENV_SPACE,
         )
+
         
     def _add_random_load(self):
         """Randomly adds load to the robots."""
@@ -1093,7 +1226,50 @@ class BaseTask:
     
     
             self.gym.set_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id], body_props, recomputeInertia=False)
+    def _get_priv_load_features(self):
+        """构造固定长度的负载特权向量: [count, mass_1, rx_1, ry_1, rz_1, ..., mass_L, rx_L, ry_L, rz_L]"""
+        L = self.max_concurrent_loads
+        # 当前仍在持续期内的激活掩码
+        active = self.load_active & (self.envs_steps_buf.unsqueeze(1) < self.load_until_step)  # [N, L]
+        count = active.sum(dim=1, keepdim=True).to(self.load_mass.dtype)                       # [N, 1]
+
+        # 对未激活槽位置零
+        mass = torch.where(active, self.load_mass, torch.zeros_like(self.load_mass))           # [N, L]
+        r_local = torch.where(active.unsqueeze(-1), self.load_r_local, torch.zeros_like(self.load_r_local))  # [N, L, 3]
+
+        # 可选归一化，提升学习稳定性
+        eps = 1e-6
+        mass = mass / (self._priv_mass_max + eps)
+        r_local[..., 0] = r_local[..., 0] / (self._priv_rx_max + eps)
+        r_local[..., 1] = r_local[..., 1] / (self._priv_ry_max + eps)
+        r_local[..., 2] = r_local[..., 2] / (self._priv_rz_max + eps)
+
+        feat = torch.cat([count, mass, r_local.reshape(self.num_envs, L * 3)], dim=1)         # [N, 1+L+3L]
+        # 排列为 [count, mass_1, rx_1, ry_1, rz_1, ..., mass_L, rx_L, ry_L, rz_L]
+        # 当前顺序是 [count, mass_1..mass_L, rx_1,ry_1,rz_1, ..., rx_L,ry_L,rz_L]
+        # 若需插入式排列，可重排：
+        N = feat.size(0)
+        mass_flat = mass  # [N, L]
+        r_flat = r_local.view(N, L, 3)
+        interleaved = torch.empty((N, L, 4), device=self.device, dtype=feat.dtype)
+        interleaved[:, :, 0] = mass_flat
+        interleaved[:, :, 1:] = r_flat
+        interleaved = interleaved.view(N, L * 4)  # [N, 4L]
+        feat = torch.cat([count, interleaved], dim=1)  # [N, 1+4L]
+        return feat
+    
+    
+    
+    
+    
+    
+    
         
+        
+        
+        
+        
+    
     def compute_observations(self):
         """Computes observations"""
         self.obs_buf, self.critic_obs_buf = self.compute_group_observations()
@@ -1484,6 +1660,38 @@ class BaseTask:
         self.rigid_body_external_torques = torch.zeros(
             (self.num_envs, self.num_bodies, 3), device=self.device, requires_grad=False
         )
+            # 重力向量（世界系，含幅值）
+        self.g_world = torch.tensor(
+            [self.sim_params.gravity.x, self.sim_params.gravity.y, self.sim_params.gravity.z],
+            device=self.device, dtype=torch.float
+        )
+        self.max_concurrent_loads = 8
+        L = self.max_concurrent_loads
+        self.load_active = torch.zeros((self.num_envs, L), dtype=torch.bool, device=self.device)
+        self.load_until_step = torch.zeros((self.num_envs, L), dtype=torch.long, device=self.device)
+        self.load_mass = torch.zeros((self.num_envs, L), dtype=torch.float, device=self.device)
+        self.load_r_local = torch.zeros((self.num_envs, L, 3), dtype=torch.float, device=self.device)
+        self.load_next_trigger_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # 特权信息维度：count(1) + 每槽位[质量1 + r_local(3)]*L
+        self.priv_load_dim = 1 + L * 4
+        # 归一化参数（用于特权编码，可按需要调整）
+        self._priv_mass_max = float(self.cfg.domain_rand.added_mass_range[1])
+        self._priv_rx_max = float(self.cfg.domain_rand.load_offset_range_xy[0])
+        self._priv_ry_max = float(self.cfg.domain_rand.load_offset_range_xy[1])
+        self._priv_rz_max = 0.095  # 固定偏移
+        
+        
+        
+        # 初始化下一次触发时间
+        int_min = max(1, int(self.cfg.domain_rand.load_interval_s[0] / self.sim_params.dt))
+        int_max = max(int_min + 1, int(self.cfg.domain_rand.load_interval_s[1] / self.sim_params.dt))
+        self.load_next_trigger_step[:] = torch.randint(int_min, int_max + 1, (self.num_envs,), device=self.device)
+        
+        
+        
+        
+        
+        
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         self.base_height = torch.zeros_like(self.root_states[:, 2])
         if self.cfg.terrain.measure_heights or self.cfg.terrain.critic_measure_heights:
