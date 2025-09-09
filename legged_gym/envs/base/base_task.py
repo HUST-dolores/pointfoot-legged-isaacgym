@@ -136,6 +136,10 @@ class BaseTask:
             self.gym.subscribe_viewer_keyboard_event(
                 self.viewer, gymapi.KEY_V, "toggle_viewer_sync"
             )
+        
+            
+            
+            
 
     def get_observations(self):
         return (
@@ -1067,13 +1071,47 @@ class BaseTask:
         # 第 i 个环境、第 j 个槽位当前是否有“激活中的负载”。    
     
         expired = self.load_active & (self.envs_steps_buf.unsqueeze(1) >= self.load_until_step)
+        expired_envs = expired.any(dim=1).nonzero().flatten()  # 记录受影响的环境ID
         if expired.any():
             self.load_active[expired] = False
+
+        # 若有 pending 且现在允许，优先激活 pending
+        if self.spawn_gate_enabled:  # 总开关：是否允许激活负载
+            can_ids = []        # 记录本次循环中成功激活 pending 的环境ID
+            for env_id in range(self.num_envs):
+                if not self.pending_load_active[env_id]:   # 跳过无pending负载的环境
+                    continue
+                active_cnt = int(self.load_active[env_id].sum().item())  # 该环境当前激活中的负载数
+                if active_cnt < self.allowed_active_slots:    # 只要未达并发上限就激活
+                    # 找空槽或替换最早到期槽
+                    active = self.load_active[env_id]
+                    if (~active).any():
+                        slot = (~active).nonzero(as_tuple=False).flatten()[0].item()
+                    else:
+                        slot = torch.argmin(self.load_until_step[env_id]).item()
+                    # 激活 pending
+                    self.load_active[env_id, slot] = True       # 标记为激活
+                    self.load_mass[env_id, slot] = float(self.pending_load_mass[env_id].item())  # 质量
+                    self.load_r_local[env_id, slot, :] = self.pending_load_r_local[env_id]  # 偏心距
+                    # 默认持续时间：用最近一次的 duration 或重抽
+                    dur_min = max(1, int(self.cfg.domain_rand.load_duration_s[0] / self.sim_params.dt))
+                    dur_max = max(dur_min + 1, int(self.cfg.domain_rand.load_duration_s[1] / self.sim_params.dt))
+                    duration_steps = torch.randint(dur_min, dur_max + 1, (1,), device=self.device).item()
+                    self.load_until_step[env_id, slot] = self.envs_steps_buf[env_id] + duration_steps
+                    # 清除 pending
+                    self.pending_load_active[env_id] = False
+                    can_ids.append(env_id)
+            if len(can_ids) > 0:
+                self._recompute_effective_mass_com(torch.tensor(can_ids, device=self.device, dtype=torch.long))
+
 
         # 触发新负载的 env
         env_mask = self.envs_steps_buf >= self.load_next_trigger_step
         env_ids = env_mask.nonzero(as_tuple=False).flatten()
         if len(env_ids) == 0:
+            # 只有到期清理也需要重算（如果存在）
+            if len(expired_envs) > 0:
+                self._recompute_effective_mass_com(expired_envs)
             return
 
         # 预取配置
@@ -1085,41 +1123,62 @@ class BaseTask:
         x_range = float(self.cfg.domain_rand.load_offset_range_xy[0])
         y_range = float(self.cfg.domain_rand.load_offset_range_xy[1])
         z_offset = 0.095  # 机体坐标系上方固定偏移
-
+        
+        
+        changed_envs = []  # 收集新增负载的环境ID
         # 为每个触发env生成一个新负载
         for env_id in env_ids.tolist():
             # 选择槽位：优先空槽；若无空槽，替换最早到期槽
             #tolist()将数组或张量转换为标准的Python列表结构。
-            active = self.load_active[env_id]
+            # 重置下一次触发时间（无论是否成功生成）
+            interval_steps = torch.randint(int_min, int_max + 1, (1,), device=self.device).item()
+            next_step = self.envs_steps_buf[env_id] + interval_steps
             #提取指定环境env_id的所有槽位（共L个）的激活状态（布尔值）。
+            # 门控：是否允许此 env 再激活一个负载
+            if self.spawn_gate_enabled:
+                active_cnt = int(self.load_active[env_id].sum().item())
+                if active_cnt >= self.allowed_active_slots:
+                    if self.spawn_gate_mode == "wait":
+                        # 若没有 pending，则创建一个 pending
+                        if not self.pending_load_active[env_id]:
+                            load_mass = torch.empty(1, device=self.device).uniform_(mass_min, mass_max).item()
+                            rx = torch.empty(1, device=self.device).uniform_(-x_range, x_range).item()
+                            ry = torch.empty(1, device=self.device).uniform_(-y_range, y_range).item()
+                            self.pending_load_active[env_id] = True
+                            self.pending_load_mass[env_id] = load_mass
+                            self.pending_load_r_local[env_id] = torch.tensor([rx, ry, z_offset], device=self.device)
+                    # 无论 block 还是 wait，都推迟下一次检查
+                    self.load_next_trigger_step[env_id] = self.envs_steps_buf[env_id] + self.spawn_gate_reschedule_steps
+                    continue  # 本轮不激活
+
+            active = self.load_active[env_id]
             if (~active).any():
-            #取反后的张量是否存在至少一个True（即是否存在空闲槽位）
                 slot = (~active).nonzero(as_tuple=False).flatten()[0].item()
-            #获取所有空闲槽位（True值）的索引
             else:
                 slot = torch.argmin(self.load_until_step[env_id]).item()
-            #无空槽时强制替换，优先淘汰最早结束的负载，最大化槽位利用率。
-            # 采样负载参数
-            duration_steps = torch.randint(dur_min, dur_max + 1, (1,), device=self.device).item()
-            #PyTorch 的 torch.randint(low, high, size)中，high参数是​​独占的​​（exclusive），即生成的整数范围为 [low, high - 1]。
-            
-            # 质量为正值（如需允许卸载/减重，可改用对称范围）
-            load_mass = torch_rand_float(mass_min, mass_max, (1, 1), device=self.device).squeeze().item()
-            # 本体坐标系偏心距
-            rx = torch_rand_float(-x_range, x_range, (1, 1), device=self.device).squeeze().item()
-            ry = torch_rand_float(-y_range, y_range, (1, 1), device=self.device).squeeze().item()
-            r_local = torch.tensor([rx, ry, z_offset], device=self.device, dtype=torch.float)
 
-            # 写入槽位
+            duration_steps = torch.randint(dur_min, dur_max + 1, (1,), device=self.device).item()
+            load_mass = torch.empty(1, device=self.device).uniform_(mass_min, mass_max).item()
+            rx = torch.empty(1, device=self.device).uniform_(-x_range, x_range).item()
+            ry = torch.empty(1, device=self.device).uniform_(-y_range, y_range).item()
+            r_local = torch.tensor([rx, ry, z_offset], device=self.device)
+
             self.load_active[env_id, slot] = True
             self.load_mass[env_id, slot] = load_mass
             self.load_r_local[env_id, slot, :] = r_local
             self.load_until_step[env_id, slot] = self.envs_steps_buf[env_id] + duration_steps
+            self.load_next_trigger_step[env_id] = next_step
+            changed_envs.append(env_id)
 
-            # 安排下一次触发
-            interval_steps = torch.randint(int_min, int_max + 1, (1,), device=self.device).item()
-            self.load_next_trigger_step[env_id] = self.envs_steps_buf[env_id] + interval_steps
-        
+        if len(expired_envs) > 0 or len(changed_envs) > 0:
+            ids = expired_envs
+            if len(changed_envs) > 0:
+                ce = torch.tensor(changed_envs, device=self.device, dtype=torch.long)
+                ids = ce if len(ids) == 0 else torch.unique(torch.cat([ids, ce], dim=0))
+            self._recompute_effective_mass_com(ids)
+            
+            
+            
         
     def _accumulate_load_wrenches(self):
         """将当前有效负载对应的重力与力矩累加到外力/外矩缓冲区。"""
@@ -1152,6 +1211,14 @@ class BaseTask:
         #第一个参数 0表示​​操作的维度​​，即沿着张量的哪个维度进行索引累加。
         forces_sum.index_add_(0, env_k, F_world_k)
         torques_sum.index_add_(0, env_k, tau_world_k)
+        # eps = 0.0
+        # if forces_sum.abs().max().item() > eps or torques_sum.abs().max().item() > eps:
+        #         hit_envs_f = (forces_sum.abs().sum(dim=-1) > eps).nonzero(as_tuple=False).squeeze(1)
+        #         hit_envs_t = (torques_sum.abs().sum(dim=-1) > eps).nonzero(as_tuple=False).squeeze(1)
+        #         # 这里可在断点处查看 forces_sum[hit_envs_f] / torques_sum[hit_envs_t]
+        #         breakpoint()
+
+
 
         self.rigid_body_external_forces[:, 0, 0:3] += forces_sum
         self.rigid_body_external_torques[:, 0, 0:3] += torques_sum
@@ -1166,6 +1233,13 @@ class BaseTask:
         self._accumulate_load_wrenches()
         self._push_robots()
 
+        # if self.rigid_body_external_forces.abs().max().item() > 0.0:
+        #     # 可选：定位哪些 env/body 非零
+        #     env_body_mask = self.rigid_body_external_forces.abs().sum(dim=-1) > 0  # [N,B]
+        #     hit_envs = env_body_mask.any(dim=1).nonzero(as_tuple=False).squeeze(1)
+        #     breakpoint()  # 在 VS Code 调试器中会停在这里
+
+
         # 一次提交
         self.gym.apply_rigid_body_force_tensors(
             self.sim,
@@ -1174,58 +1248,101 @@ class BaseTask:
             gymapi.ENV_SPACE,
         )
 
+
+    def set_allowed_active_slots(self, k: int):
+        self.allowed_active_slots = int(max(0, k))
+
+    def _recompute_effective_mass_com(self, env_ids: torch.Tensor = None):
+        """基于当前激活负载集合，重算 self.base_mass 与 self.base_com。
+        m_eff = m0 + Σ m_i
+        com_eff = (m0·com0 + Σ m_i·r_i) / m_eff
+        说明：
+        - 负载位置 r_i 使用机体系（与 base_com 同坐标系），包含 z=0.095 偏移。
+        - inertia 难以估计，此处不更新 self.base_inertia。
+        """
+        # 当前有效负载掩码 [N, L]
+        active = self.load_active & (self.envs_steps_buf.unsqueeze(1) < self.load_until_step)
+        #​​active_f​​：转换为浮点张量 [N, L]，用于后续加权计算。
+        active_f = active.float()
+
+        # Σ m_i [N]
+        added_mass = (self.load_mass * active_f).sum(dim=1)  # [N]
+
+        # Σ(m_i * r_i) [N,3]
+        mr = (self.load_r_local * self.load_mass.unsqueeze(-1)) * active_f.unsqueeze(-1)  # [N,L,3]
+        mr_sum = mr.sum(dim=1)  # [N,3]
+
+        # 有效质量与质心
+        m0 = self.base_mass0                  # [N]
+        com0 = self.base_com0                 # [N,3]
+        m_eff = m0 + added_mass               # [N]
+        # 防止除零（理论上 m0>0，这里只是保险）
+        denom = m_eff.clamp_min(1e-6).unsqueeze(-1)  # [N,1]
+        com_eff = (m0.unsqueeze(-1) * com0 + mr_sum) / denom  # [N,3]
+
+        if env_ids is None:
+            self.base_mass[:] = m_eff
+            self.base_com[:] = com_eff
+        else:
+            self.base_mass[env_ids] = m_eff[env_ids]
+            self.base_com[env_ids] = com_eff[env_ids]
+
+
+        # 若 env_ids=None：更新​​所有环境​​的 base_mass和 base_com。
+        # 若指定 env_ids：仅更新​​选定环境​​的属性（高效局部更新）。
+
         
-    def _add_random_load(self):
-        """Randomly adds load to the robots."""
-        env_ids = (
-            (
-                self.envs_steps_buf
-                % int(self.cfg.domain_rand.load_interval_s / self.sim_params.dt)
-                == 0
-            )
-            .nonzero(as_tuple=False)
-            .flatten()
-        )
-        if len(env_ids) == 0:
-            return
+    # def _add_random_load(self):
+    #     """Randomly adds load to the robots."""
+    #     env_ids = (
+    #         (
+    #             self.envs_steps_buf
+    #             % int(self.cfg.domain_rand.load_interval_s / self.sim_params.dt)
+    #             == 0
+    #         )
+    #         .nonzero(as_tuple=False)
+    #         .flatten()
+    #     )
+    #     if len(env_ids) == 0:
+    #         return
 
-        max_load = self.cfg.domain_rand.max_load
-        max_CoM_offset = self.cfg.domain_rand.max_com_offset
+    #     max_load = self.cfg.domain_rand.max_load
+    #     max_CoM_offset = self.cfg.domain_rand.max_com_offset
 
-        load_mass = torch_rand_float(-max_load, max_load, (self.num_envs,1), device=self.device)
-        load_position = torch_rand_float(-max_CoM_offset, max_CoM_offset, (self.num_envs, 3), device=self.device)
+    #     load_mass = torch_rand_float(-max_load, max_load, (self.num_envs,1), device=self.device)
+    #     load_position = torch_rand_float(-max_CoM_offset, max_CoM_offset, (self.num_envs, 3), device=self.device)
 
-        # 更新质量和质心
-        for i, env_id in enumerate(env_ids):
+    #     # 更新质量和质心
+    #     for i, env_id in enumerate(env_ids):
 
 
-            # 计算新的质量和质心
-            total_mass = self.base_mass[env_id] + load_mass[i]
-            new_com = (self.base_mass[env_id] * self.base_com[env_id] + load_mass[i] * load_position[i]) / total_mass
+    #         # 计算新的质量和质心
+    #         total_mass = self.base_mass[env_id] + load_mass[i]
+    #         new_com = (self.base_mass[env_id] * self.base_com[env_id] + load_mass[i] * load_position[i]) / total_mass
 
-            # 更新质量和质心
-            self.base_mass[env_id] = total_mass
-            self.base_com[env_id] = new_com
+    #         # 更新质量和质心
+    #         self.base_mass[env_id] = total_mass
+    #         self.base_com[env_id] = new_com
 
-            # # 更新惯量（假设负载为均匀分布的球体）
-            # load_inertia = (2 / 5) * load_mass[i] * (0.1 ** 2)  # 假设负载半径为 0.1 m
-            # self.base_inertia[env_id] += load_inertia
+    #         # # 更新惯量（假设负载为均匀分布的球体）
+    #         # load_inertia = (2 / 5) * load_mass[i] * (0.1 ** 2)  # 假设负载半径为 0.1 m
+    #         # self.base_inertia[env_id] += load_inertia
 
-            # 同步到仿真环境
-            body_props = self.gym.get_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id])
+    #         # 同步到仿真环境
+    #         body_props = self.gym.get_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id])
             
             
             
-            # print(f"[Before set] mass: {body_props[0].mass}, com: ({body_props[0].com.x}, {body_props[0].com.y}, {body_props[0].com.z})")
-            body_props[0].mass = self.base_mass[env_id].item()
-            body_props[0].com.x = self.base_com[env_id][0].item()
-            body_props[0].com.y = self.base_com[env_id][1].item()
-            body_props[0].com.z = self.base_com[env_id][2].item()
+    #         # print(f"[Before set] mass: {body_props[0].mass}, com: ({body_props[0].com.x}, {body_props[0].com.y}, {body_props[0].com.z})")
+    #         body_props[0].mass = self.base_mass[env_id].item()
+    #         body_props[0].com.x = self.base_com[env_id][0].item()
+    #         body_props[0].com.y = self.base_com[env_id][1].item()
+    #         body_props[0].com.z = self.base_com[env_id][2].item()
     
             # print(f"[After set] mass: {body_props[0].mass}, com: ({body_props[0].com.x}, {body_props[0].com.y}, {body_props[0].com.z})")
     
     
-            self.gym.set_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id], body_props, recomputeInertia=False)
+            # self.gym.set_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id], body_props, recomputeInertia=False)
     def _get_priv_load_features(self):
         """构造固定长度的负载特权向量: [count, mass_1, rx_1, ry_1, rz_1, ..., mass_L, rx_L, ry_L, rz_L]"""
         L = self.max_concurrent_loads
@@ -1654,6 +1771,9 @@ class BaseTask:
         self.base_ang_vel = quat_rotate_inverse(
             self.base_quat, self.root_states[:, 10:13]
         )
+        
+        #######负载相关########
+        # 外力/外矩缓冲区（每个刚体一个槽位）
         self.rigid_body_external_forces = torch.zeros(
             (self.num_envs, self.num_bodies, 3), device=self.device, requires_grad=False
         )
@@ -1665,6 +1785,21 @@ class BaseTask:
             [self.sim_params.gravity.x, self.sim_params.gravity.y, self.sim_params.gravity.z],
             device=self.device, dtype=torch.float
         )
+        # 允许的活动槽位上限（由训练脚本或 PPO 同步）
+        self.allowed_active_slots = 2
+        # 生成门控配置
+        self.spawn_gate_enabled = getattr(self.cfg.domain_rand, "spawn_gate", True)
+        self.spawn_gate_mode = getattr(self.cfg.domain_rand, "spawn_gate_mode", "block")
+        resched_s = float(getattr(self.cfg.domain_rand, "spawn_gate_reschedule_s", 1.0))
+        self.spawn_gate_reschedule_steps = max(1, int(resched_s / self.sim_params.dt))
+        # 待激活负载（每 env 最多1个）
+        self.pending_load_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.pending_load_mass = torch.zeros(self.num_envs, device=self.device)
+        self.pending_load_r_local = torch.zeros(self.num_envs, 3, device=self.device)
+       
+        # 基础质量/质心快照（未叠加负载，用于重算有效质量与质心）
+        self.base_mass0 = self.base_mass.clone()
+        self.base_com0 = self.base_com.clone()
         self.max_concurrent_loads = 8
         L = self.max_concurrent_loads
         self.load_active = torch.zeros((self.num_envs, L), dtype=torch.bool, device=self.device)
@@ -1688,7 +1823,7 @@ class BaseTask:
         self.load_next_trigger_step[:] = torch.randint(int_min, int_max + 1, (self.num_envs,), device=self.device)
         
         
-        
+        ###############负载相关结束###########
         
         
         

@@ -105,6 +105,26 @@ class BipedWF(BaseTask):
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf | self.edge_reset_buf
 
+        # 清空这些环境的负载状态并恢复质量/质心
+        self.load_active[env_ids, :] = False
+        self.load_until_step[env_ids, :] = 0
+        self.load_mass[env_ids, :] = 0.0
+        self.load_r_local[env_ids, :, :] =  torch.zeros_like(self.load_r_local[env_ids, :, :])
+        # 清空 pending 与恢复基础质量/质心
+        self.pending_load_active[env_ids] = False
+        self.pending_load_mass[env_ids] = 0.0
+        self.pending_load_r_local[env_ids] = 0.0      
+        # 恢复基础质量/质心
+        self.base_mass[env_ids] = self.base_mass0[env_ids]
+        self.base_com[env_ids] = self.base_com0[env_ids]
+
+        if hasattr(self, "load_next_trigger_step"):
+            int_min = max(1, int(self.cfg.domain_rand.load_interval_s[0] / self.sim_params.dt))
+            int_max = max(int_min + 1, int(self.cfg.domain_rand.load_interval_s[1] / self.sim_params.dt))
+            self.load_next_trigger_step[env_ids] = torch.randint(
+                int_min, int_max + 1, (len(env_ids),), device=self.device
+            )
+            
     def step(self, actions):
         self._action_clip(actions)
         # step physics and render each frame
@@ -123,8 +143,8 @@ class BipedWF(BaseTask):
             )
             if self.cfg.domain_rand.push_robots:
                 self._push_robots()
-            if self.cfg.domain_rand.add_random_load:
-                self._add_random_load()
+            # if self.cfg.domain_rand.add_random_load:
+            #     self._add_random_load()
             self.gym.simulate(self.sim)
             if self.device == "cpu":
                 self.gym.fetch_results(self.sim, True)

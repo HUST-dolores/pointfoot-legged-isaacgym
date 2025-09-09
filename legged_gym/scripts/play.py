@@ -120,7 +120,7 @@ def play(args):
     logger = Logger(env.dt)
     robot_index = 5  # which robot is used for logging
     joint_index = 1  # which joint is used for logging
-    stop_state_log = 1000  # number of steps before plotting states
+    stop_state_log = 3000  # number of steps before plotting states
     stop_rew_log = (
         env.max_episode_length + 1
     )  # number of steps before print average episode rewards

@@ -158,6 +158,13 @@ class OnPolicyRunner:
         )
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
+        
+        if hasattr(self.env, "set_allowed_active_slots"):
+            try:
+                self.env.set_allowed_active_slots(1)
+            except Exception:
+                pass
+        
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
             # Rollout
@@ -214,6 +221,26 @@ class OnPolicyRunner:
                 mean_surrogate_loss,
                 mean_kl,
             ) = self.alg.update()
+            
+            if hasattr(self.env, "set_allowed_active_slots"):
+                try:
+                    k_frozen = self.alg.get_frozen_slot_count()
+                    # 方案A：严格顺序（更稳）：只允许已冻结数量的并发负载
+                    # self.env.set_allowed_active_slots(k_frozen)
+
+                    # 方案B：允许“正在识别中的 +1”（更快）
+                    allowed = k_frozen + 1
+                    # 如有并发上限可加约束，否则直接设置
+                    if hasattr(self.env, "max_concurrent_loads"):
+                        allowed = min(allowed, int(self.env.max_concurrent_loads))
+                    self.env.set_allowed_active_slots(int(max(1, allowed)))
+                    # 写日志观察训练节奏
+                    if self.writer is not None:
+                        self.writer.add_scalar("Enc/frozen_slots", k_frozen, it)
+                        self.writer.add_scalar("Enc/allowed_active_slots", allowed, it)
+                except Exception:
+                    pass
+          
             stop = time.time()
             learn_time = stop - start
 
@@ -257,6 +284,27 @@ class OnPolicyRunner:
             / (locs["collection_time"] + locs["learn_time"])
         )
 
+        # === 新增：统计激活负载总数与激活 slot 数 ===
+        active_loads_sum = 0
+        if hasattr(self.env, "load_active"):
+            la = self.env.load_active
+            if isinstance(la, torch.Tensor):
+                active_loads_sum = int(la.sum().item())
+            else:
+                # 兜底（非张量）
+                active_loads_sum = int(sum(map(sum, la)))
+
+        active_slots = None
+        try:
+            # 若 PPO 实现了 get_frozen_slot_count，则用 总槽数-冻结数
+            if hasattr(self.alg, "get_frozen_slot_count") and hasattr(self.alg, "encoder") and hasattr(self.alg.encoder, "num_slots"):
+                frozen = int(self.alg.get_frozen_slot_count())
+                active_slots = int(self.alg.encoder.num_slots - frozen)
+        except Exception:
+            active_slots = None
+            
+            
+        # === TensorBoard ===
         self.writer.add_scalar(
             "Loss/value_function", locs["mean_value_loss"], locs["it"]
         )
@@ -272,6 +320,11 @@ class OnPolicyRunner:
             "Perf/collection time", locs["collection_time"], locs["it"]
         )
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
+        # 新增指标
+        self.writer.add_scalar("Env/active_loads_sum", active_loads_sum, locs["it"])
+        if active_slots is not None:
+            self.writer.add_scalar("Enc/active_slots", active_slots, locs["it"])
+            
         if len(locs["rewbuffer"]) > 0:
             self.writer.add_scalar(
                 "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
@@ -305,6 +358,9 @@ class OnPolicyRunner:
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                f"""{'Encoder loss:':>{pad}} {locs['mean_extra_loss']:.4f}\n""" 
+                f"""{'Active loads (sum):':>{pad}} {active_loads_sum}\n"""
+                f"""{'Active slots:':>{pad}} {active_slots if active_slots is not None else 'N/A'}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.4f}\n"""
                 f"""{'Learning rate:':>{pad}} {self.alg.learning_rate:.4f}\n"""
                 f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
@@ -320,6 +376,9 @@ class OnPolicyRunner:
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                f"""{'Encoder loss:':>{pad}} {locs['mean_extra_loss']:.4f}\n""" 
+                f"""{'Active loads (sum):':>{pad}} {active_loads_sum}\n"""
+                f"""{'Active slots:':>{pad}} {active_slots if active_slots is not None else 'N/A'}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
             )
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""

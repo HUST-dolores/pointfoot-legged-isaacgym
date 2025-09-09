@@ -205,13 +205,15 @@ class BipedCfgWF(BaseConfig):
         load_offset_range_xy = [0.13, 0.12]
         randomize_inertia = True
         randomize_inertia_range = [0.95, 1.05]
-        push_robots = True
+        push_robots = False
         add_random_load = False
         push_interval_s = 7
-        load_interval_s = [13, 15]  # 随机化 todo
-        load_duration_s = [5, 7]
-        
-        
+        load_interval_s = [7, 9]  # 随机化 todo
+        load_duration_s = [3, 5]
+        #生成门控
+        spawn_gate = True                 # 启用门控
+        spawn_gate_mode = "wait"          # "block" 或 "wait"
+        spawn_gate_reschedule_s = 1.0     # 不满足时重试间隔（秒）
         
         max_push_vel_xy = 1.5
         max_load = 5# [kg]s
