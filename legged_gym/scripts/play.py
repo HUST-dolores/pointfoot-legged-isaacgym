@@ -51,7 +51,7 @@ def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 50
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 10)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 1)
 
     env_cfg.terrain.num_rows = 10
     env_cfg.terrain.num_cols = 20
@@ -70,6 +70,7 @@ def play(args):
     env_cfg.domain_rand.randomize_motor_torque = False
     env_cfg.domain_rand.randomize_default_dof_pos = False
     env_cfg.domain_rand.randomize_action_delay = False
+
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -118,9 +119,9 @@ def play(args):
         )
 
     logger = Logger(env.dt)
-    robot_index = 5  # which robot is used for logging
+    robot_index = 0  # which robot is used for logging
     joint_index = 1  # which joint is used for logging
-    stop_state_log = 3000  # number of steps before plotting states
+    stop_state_log = 1000  # number of steps before plotting states
     stop_rew_log = (
         env.max_episode_length + 1
     )  # number of steps before print average episode rewards
@@ -175,9 +176,17 @@ def play(args):
                     "base_vel_x": env.base_lin_vel[robot_index, 0].item(),
                     "base_vel_y": env.base_lin_vel[robot_index, 1].item(),
                     "base_vel_z": env.base_lin_vel[robot_index, 2].item(),
+
                     "base_vel_yaw": env.base_ang_vel[robot_index, 2].item(),
                     "power": torch.sum(env.power[robot_index, :]).item(),
-                    
+                    "torque_abad_L": env.torques[robot_index, 0].item(),
+                    "torque_hip_L": env.torques[robot_index, 1].item(),
+                    "torque_knee_L": env.torques[robot_index, 2].item(),
+                    "torque_wheel_L": env.torques[robot_index, 3].item(),
+                    "torque_abad_R": env.torques[robot_index, 4].item(),
+                    "torque_hip_R": env.torques[robot_index, 5].item(),
+                    "torque_knee_R": env.torques[robot_index, 6].item(),
+                    "torque_wheel_R": env.torques[robot_index, 7].item(),
                     "mass": env.base_mass[robot_index].item(),
                     "CoM_x": env.base_com[robot_index, 0].item(),
                     "CoM_y": env.base_com[robot_index, 1].item(),
@@ -191,6 +200,11 @@ def play(args):
                     ]
                     .cpu()
                     .numpy(),
+                    
+                    # "contact_forces_magnitude": torch.norm(
+                    #     env.contact_forces[robot_index, env.feet_indices, :], 
+                    #     dim=-1
+                    # ),
                 }
             )
             # print(torch.sum(env.power[robot_index, :]).item())
@@ -203,11 +217,15 @@ def play(args):
                         / env.cfg.normalization.obs_scales.lin_vel,
                         "est_lin_vel_z": est[robot_index, 2].item()
                         / env.cfg.normalization.obs_scales.lin_vel,
-                                        
-                        "mass_est": est[robot_index, 3].item(),
-                        "CoM_est_x": est[robot_index, 4].item(),
-                        "CoM_est_y": est[robot_index, 5].item(),
-                        "CoM_est_z": est[robot_index, 6].item(),
+                        
+                        "mass_est": est[robot_index, 3].item()
+                        / env.cfg.normalization.obs_scales.mass_scale + float(env.base_mass0[robot_index].item()),
+                        "CoM_est_x": est[robot_index, 4].item()
+                        / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 0].item()),
+                        "CoM_est_y": est[robot_index, 5].item()
+                        / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 1].item()),
+                        "CoM_est_z": est[robot_index, 6].item()
+                        / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 2].item()),
                         "inertia_est_xx": est[robot_index, 7].item(),
                         "inertia_est_yy": est[robot_index, 8].item(),
                         "inertia_est_zz": est[robot_index, 9].item(),

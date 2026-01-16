@@ -338,6 +338,10 @@ class BipedSF(BaseTask):
                 self.cfg.asset.self_collisions,
                 0,
             )
+            self.envs.append(env_handle)
+            self.actor_handles.append(actor_handle)
+            
+            
             dof_props = self._process_dof_props(dof_props_asset, i)
             self.gym.set_actor_dof_properties(env_handle, actor_handle, dof_props)
             body_props = self.gym.get_actor_rigid_body_properties(
@@ -347,8 +351,7 @@ class BipedSF(BaseTask):
             self.gym.set_actor_rigid_body_properties(
                 env_handle, actor_handle, body_props, recomputeInertia=True
             )
-            self.envs.append(env_handle)
-            self.actor_handles.append(actor_handle)
+
 
         self.feet_indices = torch.zeros(
             len(feet_names), dtype=torch.long, device=self.device, requires_grad=False

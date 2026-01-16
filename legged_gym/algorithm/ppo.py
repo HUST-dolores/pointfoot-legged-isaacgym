@@ -106,56 +106,56 @@ class PPO:
         self.use_clipped_value_loss = use_clipped_value_loss
         #encoder 自适应冻结配置
                 # 冻结/门控超参（默认值，可在后续接 cfg 覆盖）
-        self.enc_freeze_cfg = {
-            "p_thresh": 0.7,          # 槽存在概率阈值
-            "ema_beta": 0.9,          # EMA 衰减
-            "patience": 5,            # 连续满足步数
-            "min_updates": 50,        # 冻结前最少更新步
-            # 仅用“输出稳定性判据”时的阈值
-            "mass_var_thresh": 1e-2,  # 质量时间方差阈值
-            "pos_var_thresh": 1e-3,   # 位置时间方差阈值
-            # 若改回“特权误差判据”，也给默认
-            "mass_mse_thresh": 1e-2,
-            "pos_mse_thresh": 5e-4,
-            # 解冻（被拿走）判据
-            "unlock_p_thresh": 0.3,     # 冻结槽位 p 低于此阈值
-            "unlock_patience": 10,      # 连续步数
-            "alpha_mass": 1.0,          # 质量匹配权重
-            "beta_com": 1.0,            # 质心匹配权重
-            # 额外：全局 g_pred 的索引与一致性判据
-            "g_mass_idx": 3,            # g_pred 中总质量索引
-            "g_com_start": 4,           # g_pred 中质心起始索引
-            "g_com_dim": 2,             # 质心维度(2: x,y)
-            "mass_margin_frac": 0.20,   # 允许的质量相对误差
-            "com_margin": 0.05,         # 允许的质心误差(m)
-            "unlock_by_consistency": True,  # 是否启用一致性解冻 
-        }
+        # self.enc_freeze_cfg = {
+        #     "p_thresh": 0.7,          # 槽存在概率阈值
+        #     "ema_beta": 0.9,          # EMA 衰减
+        #     "patience": 5,            # 连续满足步数
+        #     "min_updates": 50,        # 冻结前最少更新步
+        #     # 仅用“输出稳定性判据”时的阈值
+        #     "mass_var_thresh": 1e-2,  # 质量时间方差阈值
+        #     "pos_var_thresh": 1e-3,   # 位置时间方差阈值
+        #     # 若改回“特权误差判据”，也给默认
+        #     "mass_mse_thresh": 1e-2,
+        #     "pos_mse_thresh": 5e-4,
+        #     # 解冻（被拿走）判据
+        #     "unlock_p_thresh": 0.3,     # 冻结槽位 p 低于此阈值
+        #     "unlock_patience": 10,      # 连续步数
+        #     "alpha_mass": 1.0,          # 质量匹配权重
+        #     "beta_com": 1.0,            # 质心匹配权重
+        #     # 额外：全局 g_pred 的索引与一致性判据
+        #     "g_mass_idx": 3,            # g_pred 中总质量索引
+        #     "g_com_start": 4,           # g_pred 中质心起始索引
+        #     "g_com_dim": 3,             # 质心维度(3: x,y,z)
+        #     "mass_margin_frac": 0.20,   # 允许的质量相对误差
+        #     "com_margin": 0.05,         # 允许的质心误差(m)
+        #     "unlock_by_consistency": True,  # 是否启用一致性解冻 
+        # }
         
         
-        L = self.encoder.num_slots
-        self.enc_slot_frozen = [False] * L
-        self.enc_slot_p_ema  = torch.zeros(L)
-        self.enc_slot_m_ema  = torch.zeros(L)
-        self.enc_slot_m2_ema = torch.zeros(L)
-        self.enc_slot_r_ema  = torch.zeros(L, 2)
-        self.enc_slot_r2_ema = torch.zeros(L, 2)
-        self.enc_slot_patience = torch.zeros(L, dtype=torch.long)
-        self.enc_total_updates = 0  # 计数编码器额外优化步
+        # L = self.encoder.num_slots
+        # self.enc_slot_frozen = [False] * L
+        # self.enc_slot_p_ema  = torch.zeros(L)
+        # self.enc_slot_m_ema  = torch.zeros(L)
+        # self.enc_slot_m2_ema = torch.zeros(L)
+        # self.enc_slot_r_ema  = torch.zeros(L, 2)
+        # self.enc_slot_r2_ema = torch.zeros(L, 2)
+        # self.enc_slot_patience = torch.zeros(L, dtype=torch.long)
+        # self.enc_total_updates = 0  # 计数编码器额外优化步
         
-        # 冻结时缓存的槽位参数（用于“被拿走”反演）
-        self.slot_params_m = torch.zeros(L)       # m̂_i
-        self.slot_params_r = torch.zeros(L, 2)    # r̂_i = [x,y]
-        self._unlock_patience = torch.zeros(L, dtype=torch.long)
+        # # 冻结时缓存的槽位参数（用于“被拿走”反演）
+        # self.slot_params_m = torch.zeros(L)       # m̂_i
+        # self.slot_params_r = torch.zeros(L, 2)    # r̂_i = [x,y]
+        # self._unlock_patience = torch.zeros(L, dtype=torch.long)
 
-        # 全局快照（稳定前一状态）
-        self._stable_M = None     # 标量
-        self._stable_C = None     # 3维
-        self._count_ema = 0.0     # g_pred 的 count EMA
+        # # 全局快照（稳定前一状态）
+        # self._stable_M = None     # 标量
+        # self._stable_C = None     # 3维
+        # self._count_ema = 0.0     # g_pred 的 count EMA
         
-        # 全局 g_pred 的 EMA（仅用模型输出）
-        self.g_mass_ema = torch.tensor(0.0)   # 标量
-        self.g_com_ema  = torch.zeros(2)      # [2]
-        self.g_count_ema= torch.tensor(0.0)   # 标量
+        # # 全局 g_pred 的 EMA（仅用模型输出）
+        # self.g_mass_ema = torch.tensor(0.0)   # 标量
+        # self.g_com_ema  = torch.zeros(2)      # [2]
+        # self.g_count_ema= torch.tensor(0.0)   # 标量
 
     def init_storage(
         self,
@@ -372,40 +372,91 @@ class PPO:
                     
                     self.encoder.encode(obs_history_batch)
                     encode_batch = self.encoder.get_encoder_out()
-                    g_pred, s_pred = self.encoder.split_outputs(encode_batch)   # g:[B,11], s:[B,L,4]
-                    #槽位预测解耦​
-                    exist_logit = s_pred[..., 0]
-                    mass_pred   = F.softplus(s_pred[..., 1])
-                    pos_pred    = s_pred[..., 2:4]
+                    # g_pred, s_pred = self.encoder.split_outputs(encode_batch)   # g:[B,11], s:[B,L,4]
+                    # #槽位预测解耦​
+                    # exist_logit = s_pred[..., 0]
+                    # mass_pred   = F.softplus(s_pred[..., 1])
+                    # pos_pred    = s_pred[..., 2:4]
                     
                     
-                    # 2) 目标(来自 critic_obs 的特权段)，仅作监督，禁止梯度回传
-                    B = critic_obs_batch.size(0)
-                    L = self.encoder.num_slots
-                    #gt means ground truth
-                    # critic 前10维 + count(紧随其后的priv首维)
-                    g_tgt = torch.cat([critic_obs_batch[:, :10], critic_obs_batch[:, 10:11]], dim=-1).detach()  # [B,11]
-                    #critic_obs_batch[:, 10:11]明确表示“取第 10 列且保留二维形状”，强调该列是​​独立特征​​（如物体数量），而非普通标量。
-                    priv = critic_obs_batch[:, 10:10 + (1 + 4*L)]     # [B,1+4L]
-                    slots_gt = priv[:, 1:].view(B, L, 4).detach()              # [B,L,4] -> [mass, rx, ry, rz]
-                    #只要槽位的​​任一属性非零​​（质量、位置等至少一个不为零），即视为有效槽位（active=1）
-                    active = (slots_gt.abs().sum(dim=-1) > 0)         # [B,L]有效槽位掩码 [B, L]
-                    mass_gt = slots_gt[..., 0]
-                    pos_gt  = slots_gt[..., 1:3]
-                    #todo 忘记把encoder和actor_critic的device对齐了 就是说，是不是一个是概率，一个是三个维度的坐标
+                    # # 2) 目标(来自 critic_obs 的特权段)，仅作监督，禁止梯度回传
+                    # B = critic_obs_batch.size(0)
+                    # L = self.encoder.num_slots
+                    # #gt means ground truth
+                    # # critic 前10维 + count(紧随其后的priv首维)
+                    # g_tgt = torch.cat([critic_obs_batch[:, :10], critic_obs_batch[:, 10:11]], dim=-1).detach()  # [B,11]
+                    # #critic_obs_batch[:, 10:11]明确表示“取第 10 列且保留二维形状”，强调该列是​​独立特征​​（如物体数量），而非普通标量。
+                    # priv = critic_obs_batch[:, 10:10 + (1 + 4*L)]     # [B,1+4L]
+                    # slots_gt = priv[:, 1:].view(B, L, 4).detach()              # [B,L,4] -> [mass, rx, ry, rz]
+                    # #只要槽位的​​任一属性非零​​（质量、位置等至少一个不为零），即视为有效槽位（active=1）
+                    # active = (slots_gt.abs().sum(dim=-1) > 0)         # [B,L]有效槽位掩码 [B, L]
+                    # mass_gt = slots_gt[..., 0]
+                    # pos_gt  = slots_gt[..., 1:3]
+                    # #todo 忘记把encoder和actor_critic的device对齐了 就是说，是不是一个是概率，一个是三个维度的坐标
                     
+                    
+                    # # 构造长度=10的权重向量 w（对误差乘 w 再平方，等价于对该维MSE乘 w^2）
+                    # w = torch.ones(10, device=self.device)
+                    # w[0:3] = 1.0     # 下调线速度三维的影响
+                    # w[3] = 2.0   # 或 2.0，如果你想更看重质量
+                    # w[4:6] = 2.0    # 强化质心两维
+                    # # 其余维度按需调整
+                    # w[6:10] = 0.3    # z和惯量
+                    
+
+                    
+                    
+                    
+                    
+                    # diff = g_pred[:, :10] - critic_obs_batch[:, :10]
+                    # loss_g = (diff.pow(2) * (w**2)).mean()
                     
                     #3） losses
-                    loss_g = (g_pred - g_tgt).pow(2).mean()# 全局预测MSE损失
-                    bce = F.binary_cross_entropy_with_logits(exist_logit, active.float(), reduction='none').mean()# 存在性BCE损失
-                    mass_mse = (mass_pred - mass_gt).pow(2) # 质量预测MSE损失
-                    pos_mse  = (pos_pred  - pos_gt ).pow(2).sum(dim=-1) # 位置预测MSE损失
-                    mask = active.float() # 仅对有效槽位计算损失
+                    # loss_g = (g_pred[:, :10] - critic_obs_batch[:, :10]).pow(2).mean()# 全局预测MSE损失  
+                    # loss_g = (g_pred - g_tgt).pow(2).mean()# 全局预测MSE损失
+                    # bce = F.binary_cross_entropy_with_logits(exist_logit, active.float(), reduction='none').mean()# 存在性BCE损失
+                    # mass_mse = (mass_pred - mass_gt).pow(2) # 质量预测MSE损失
+                    # pos_mse  = (pos_pred  - pos_gt ).pow(2).sum(dim=-1) # 位置预测MSE损失
+                    # mask = active.float() # 仅对有效槽位计算损失
                     # 平均时除以有效槽位数，避免稀疏目标导致
-                    loss_mass = (mass_mse * mask).sum() / (mask.sum() + 1e-8)
-                    loss_pos  = (pos_mse  * mask).sum() / (mask.sum() + 1e-8)
+                    # loss_mass = (mass_mse * mask).sum() / (mask.sum() + 1e-8)
+                    # loss_pos  = (pos_mse  * mask).sum() / (mask.sum() + 1e-8)
 
-                    extra_loss = loss_g + bce + loss_mass + loss_pos
+                    # # === Debug: 前10维逐维 MSE（无 bce/mass/pos 依赖） ===
+                    # if (self.enc_total_updates % 100) == 0:
+                    #     with torch.no_grad():
+                    #         mse_vec = (g_pred[:, :10] - critic_obs_batch[:, :10]).pow(2).mean(dim=0).detach().cpu()
+                    #         mass_idx  = int(self.enc_freeze_cfg.get("g_mass_idx", 3))
+                    #         com_start = int(self.enc_freeze_cfg.get("g_com_start", 4))
+                    #         com_dim   = int(self.enc_freeze_cfg.get("g_com_dim", 2))
+                    #         mass_mse_g = float(mse_vec[mass_idx].item()) if mass_idx < mse_vec.numel() else float('nan')
+                    #         com_slice_end = com_start + com_dim
+                    #         com_mse_g = float(mse_vec[com_start:com_slice_end].mean().item()) if com_slice_end <= mse_vec.numel() else float('nan')
+                    #         # 若上方已计算 active，这里仅作为参考统计
+                    #         try:
+                    #             active_elems = int(active.sum().item())
+                    #         except Exception:
+                    #             active_elems = -1  # 未计算 active 时给占位
+
+                    #         print(
+                    #             f"[ENCLOSS] up={self.enc_total_updates} "
+                    #             f"loss_g={loss_g.item():.4e} | "
+                    #             f"g_mse_dim={mse_vec.tolist()} | "
+                    #             f"mass_mse_g={mass_mse_g:.4e} com_mse_g={com_mse_g:.4e} | "
+                    #             f"active_elems={active_elems}"
+                    #         )
+
+
+                if self.encoder.is_mlp_encoder:
+                    extra_loss = (
+                        (encode_batch[:, 0:7] - critic_obs_batch[:, 0:7]).pow(2).mean()
+                    )
+                    # extra_loss = loss_g 
+                    # extra_loss = loss_g + bce + loss_mass + loss_pos
+                    
+                    
+                    
+                    
                     # print(
                     #     f"[ENC] loss_g={loss_g.item():.6f} "
                     #     f"bce={bce.item():.6f} "
@@ -450,132 +501,132 @@ class PPO:
                     #             # 也可打印日志到 stdout 或 TensorBoard
                     #             # print(f"[Encoder] Freeze slot head {i} at update {self.enc_total_updates}")
                     # === 自适应冻结统计（仅用模型输出，不依赖特权）===
-                    with torch.no_grad():
+                    # with torch.no_grad():
    
-                        # 预测信号
-                        p = torch.sigmoid(exist_logit)        # [B,L]
-                        m = mass_pred                         # [B,L]
-                        r = pos_pred                          # [B,L,2]
-                        # EMA 更新
-                        beta = self.enc_freeze_cfg["ema_beta"]
-                        # batch 平均（跨 B）再做 EMA（时间）
-                        p_mean = p.mean(dim=0).cpu()               # [L] 存在概率均值
-                        m_mean = m.mean(dim=0).cpu()               # [L] 质量均值
-                        m2_mean= (m**2).mean(dim=0).cpu()          # [L] 质量平方均值
-                        r_mean = r.mean(dim=0).cpu()               # [L,2] 位置均值
-                        r2_mean= (r**2).mean(dim=0).cpu()          # [L,2] 位置平方均值
+                    #     # 预测信号
+                    #     p = torch.sigmoid(exist_logit)        # [B,L]
+                    #     m = mass_pred                         # [B,L]
+                    #     r = pos_pred                          # [B,L,2]
+                    #     # EMA 更新
+                    #     beta = self.enc_freeze_cfg["ema_beta"]
+                    #     # batch 平均（跨 B）再做 EMA（时间）
+                    #     p_mean = p.mean(dim=0).cpu()               # [L] 存在概率均值
+                    #     m_mean = m.mean(dim=0).cpu()               # [L] 质量均值
+                    #     m2_mean= (m**2).mean(dim=0).cpu()          # [L] 质量平方均值
+                    #     r_mean = r.mean(dim=0).cpu()               # [L,2] 位置均值
+                    #     r2_mean= (r**2).mean(dim=0).cpu()          # [L,2] 位置平方均值
 
-                        self.enc_slot_p_ema  = beta*self.enc_slot_p_ema  + (1-beta)*p_mean
-                        self.enc_slot_m_ema  = beta*self.enc_slot_m_ema  + (1-beta)*m_mean
-                        self.enc_slot_m2_ema = beta*self.enc_slot_m2_ema + (1-beta)*m2_mean
-                        self.enc_slot_r_ema  = beta*self.enc_slot_r_ema  + (1-beta)*r_mean
-                        self.enc_slot_r2_ema = beta*self.enc_slot_r2_ema + (1-beta)*r2_mean
+                    #     self.enc_slot_p_ema  = beta*self.enc_slot_p_ema  + (1-beta)*p_mean
+                    #     self.enc_slot_m_ema  = beta*self.enc_slot_m_ema  + (1-beta)*m_mean
+                    #     self.enc_slot_m2_ema = beta*self.enc_slot_m2_ema + (1-beta)*m2_mean
+                    #     self.enc_slot_r_ema  = beta*self.enc_slot_r_ema  + (1-beta)*r_mean
+                    #     self.enc_slot_r2_ema = beta*self.enc_slot_r2_ema + (1-beta)*r2_mean
 
-                        # 时间方差估计（EMA 近似）
-                        m_var = (self.enc_slot_m2_ema - self.enc_slot_m_ema**2).clamp_min(0.0)      # [L]
-                        r_var = (self.enc_slot_r2_ema - self.enc_slot_r_ema**2).sum(dim=-1).clamp_min(0.0)  # [L]
+                    #     # 时间方差估计（EMA 近似）
+                    #     m_var = (self.enc_slot_m2_ema - self.enc_slot_m_ema**2).clamp_min(0.0)      # [L]
+                    #     r_var = (self.enc_slot_r2_ema - self.enc_slot_r_ema**2).sum(dim=-1).clamp_min(0.0)  # [L]
 
-                        # 判据（使用 enc_freeze_cfg 的阈值，但不再依赖特权 MSE）冻结条件
-                        p_ok   = self.enc_slot_p_ema >= self.enc_freeze_cfg.get("p_thresh", 0.9)  # 槽存在概率阈值
-                        mass_ok= m_var <= self.enc_freeze_cfg.get("mass_var_thresh", 1e-3)  # 质量时间方差阈值
-                        pos_ok = r_var <= self.enc_freeze_cfg.get("pos_var_thresh", 1e-4)  # 位置时间方差阈值
-                        ok = (p_ok & mass_ok & pos_ok)
+                    #     # 判据（使用 enc_freeze_cfg 的阈值，但不再依赖特权 MSE）冻结条件
+                    #     p_ok   = self.enc_slot_p_ema >= self.enc_freeze_cfg.get("p_thresh", 0.9)  # 槽存在概率阈值
+                    #     mass_ok= m_var <= self.enc_freeze_cfg.get("mass_var_thresh", 1e-3)  # 质量时间方差阈值
+                    #     pos_ok = r_var <= self.enc_freeze_cfg.get("pos_var_thresh", 1e-4)  # 位置时间方差阈值
+                    #     ok = (p_ok & mass_ok & pos_ok)
 
-                        # 耐心与冻结
-                        self.enc_slot_patience[ok] += 1
-                        self.enc_slot_patience[~ok] = 0
-                        can_freeze = self.enc_total_updates >= self.enc_freeze_cfg.get("min_updates", 50)
-                        patience_need = self.enc_freeze_cfg.get("patience", 5)
-                        for i in range(self.encoder.num_slots):
-                            if not self.enc_slot_frozen[i] and can_freeze and self.enc_slot_patience[i] >= patience_need:
-                                self.encoder.freeze_slot_head(i, True)
-                                self.enc_slot_frozen[i] = True
-                                # 记录冻结时刻的槽位快照
-                                self.slot_params_m[i] = float(self.enc_slot_m_ema[i].item())
-                                self.slot_params_r[i] = self.enc_slot_r_ema[i].clone()
-                        try:
-                            g_mass_idx = int(self.enc_freeze_cfg.get("g_mass_idx", 0))
-                            g_com_start= int(self.enc_freeze_cfg.get("g_com_start", 1))
-                            g_com_dim  = int(self.enc_freeze_cfg.get("g_com_dim", 2))
-                            if g_pred.shape[-1] >= max(g_mass_idx+1, g_com_start+g_com_dim):
-                                g_mass = g_pred[:, g_mass_idx].mean().detach().cpu()
-                                g_com  = g_pred[:, g_com_start:g_com_start+g_com_dim].mean(dim=0).detach().cpu()
-                                self.g_mass_ema = beta*self.g_mass_ema + (1-beta)*g_mass
-                                # 只取前2维为质心
-                                g_com2 = g_com[:2] if g_com.numel() >= 2 else torch.zeros(2)
-                                self.g_com_ema  = beta*self.g_com_ema  + (1-beta)*g_com2
-                            # count 默认取最后一维
-                            g_count = g_pred[:, -1].mean().detach().cpu()
-                            self.g_count_ema = beta*self.g_count_ema + (1-beta)*g_count
-                        except Exception:
-                            pass
+                    #     # 耐心与冻结
+                    #     self.enc_slot_patience[ok] += 1
+                    #     self.enc_slot_patience[~ok] = 0
+                    #     can_freeze = self.enc_total_updates >= self.enc_freeze_cfg.get("min_updates", 50)
+                    #     patience_need = self.enc_freeze_cfg.get("patience", 5)
+                    #     for i in range(self.encoder.num_slots):
+                    #         if not self.enc_slot_frozen[i] and can_freeze and self.enc_slot_patience[i] >= patience_need:
+                    #             self.encoder.freeze_slot_head(i, True)
+                    #             self.enc_slot_frozen[i] = True
+                    #             # 记录冻结时刻的槽位快照
+                    #             self.slot_params_m[i] = float(self.enc_slot_m_ema[i].item())
+                    #             self.slot_params_r[i] = self.enc_slot_r_ema[i].clone()
+                    #     try:
+                    #         g_mass_idx = int(self.enc_freeze_cfg.get("g_mass_idx", 0))
+                    #         g_com_start= int(self.enc_freeze_cfg.get("g_com_start", 1))
+                    #         g_com_dim  = int(self.enc_freeze_cfg.get("g_com_dim", 3))
+                    #         if g_pred.shape[-1] >= max(g_mass_idx+1, g_com_start+g_com_dim):
+                    #             g_mass = g_pred[:, g_mass_idx].mean().detach().cpu()
+                    #             g_com  = g_pred[:, g_com_start:g_com_start+g_com_dim].mean(dim=0).detach().cpu()
+                    #             self.g_mass_ema = beta*self.g_mass_ema + (1-beta)*g_mass
+                    #             # 只取前2维为质心
+                    #             g_com2 = g_com[:2] if g_com.numel() >= 2 else torch.zeros(2)
+                    #             self.g_com_ema  = beta*self.g_com_ema  + (1-beta)*g_com2
+                    #         # count 默认取最后一维
+                    #         g_count = g_pred[:, -1].mean().detach().cpu()
+                    #         self.g_count_ema = beta*self.g_count_ema + (1-beta)*g_count
+                    #     except Exception:
+                    #         pass
 
-                        # === 解冻判据 1：p 过低（被拿走）===
-                        unlock_p_thresh = self.enc_freeze_cfg.get("unlock_p_thresh", 0.3)
-                        unlock_patience = int(self.enc_freeze_cfg.get("unlock_patience", 10))
-                        for i in range(self.encoder.num_slots):
-                            if self.enc_slot_frozen[i]:
-                                if self.enc_slot_p_ema[i] < unlock_p_thresh:
-                                    self._unlock_patience[i] += 1
-                                else:
-                                    self._unlock_patience[i] = 0
-                                if self._unlock_patience[i] >= unlock_patience:
-                                    self.encoder.freeze_slot_head(i, False)  # 解冻
-                                    self.enc_slot_frozen[i] = False
-                                    self._unlock_patience[i] = 0
-                                    # 解冻后清空该槽的稳定计数
-                                    self.enc_slot_patience[i] = 0
+                    #     # === 解冻判据 1：p 过低（被拿走）===
+                    #     unlock_p_thresh = self.enc_freeze_cfg.get("unlock_p_thresh", 0.3)
+                    #     unlock_patience = int(self.enc_freeze_cfg.get("unlock_patience", 10))
+                    #     for i in range(self.encoder.num_slots):
+                    #         if self.enc_slot_frozen[i]:
+                    #             if self.enc_slot_p_ema[i] < unlock_p_thresh:
+                    #                 self._unlock_patience[i] += 1
+                    #             else:
+                    #                 self._unlock_patience[i] = 0
+                    #             if self._unlock_patience[i] >= unlock_patience:
+                    #                 self.encoder.freeze_slot_head(i, False)  # 解冻
+                    #                 self.enc_slot_frozen[i] = False
+                    #                 self._unlock_patience[i] = 0
+                    #                 # 解冻后清空该槽的稳定计数
+                    #                 self.enc_slot_patience[i] = 0
 
-                        # === 解冻判据 2：全局一致性（质量/质心）===
-                        if self.enc_freeze_cfg.get("unlock_by_consistency", True):
-                            # 仅当存在已冻结槽位时才考虑
-                            if any(self.enc_slot_frozen):
-                                # 槽位加权和
-                                ci = (self.enc_slot_m_ema * self.enc_slot_p_ema)        # [L]
-                                sum_m = float(ci.sum().item()) + 1e-8
-                                sum_mr = (ci.unsqueeze(-1) * self.enc_slot_r_ema).sum(dim=0)  # [2]
-                                com_slots = sum_mr / sum_m
+                    #     # === 解冻判据 2：全局一致性（质量/质心）===
+                    #     if self.enc_freeze_cfg.get("unlock_by_consistency", True):
+                    #         # 仅当存在已冻结槽位时才考虑
+                    #         if any(self.enc_slot_frozen):
+                    #             # 槽位加权和
+                    #             ci = (self.enc_slot_m_ema * self.enc_slot_p_ema)        # [L]
+                    #             sum_m = float(ci.sum().item()) + 1e-8
+                    #             sum_mr = (ci.unsqueeze(-1) * self.enc_slot_r_ema).sum(dim=0)  # [2]
+                    #             com_slots = sum_mr / sum_m
 
-                                Mg = float(self.g_mass_ema.item())
-                                Cg = self.g_com_ema
+                    #             Mg = float(self.g_mass_ema.item())
+                    #             Cg = self.g_com_ema
 
-                                # 容差
-                                mass_margin = max(self.enc_freeze_cfg.get("mass_margin_frac", 0.1)*max(Mg, 1e-6), 1e-6)
-                                com_margin  = float(self.enc_freeze_cfg.get("com_margin", 0.05))
+                    #             # 容差
+                    #             mass_margin = max(self.enc_freeze_cfg.get("mass_margin_frac", 0.1)*max(Mg, 1e-6), 1e-6)
+                    #             com_margin  = float(self.enc_freeze_cfg.get("com_margin", 0.05))
 
-                                mass_bad = (sum_m - Mg) > mass_margin  # 槽和过大（可能减少了负载但槽位仍冻结）
-                                com_bad  = torch.norm((com_slots - Cg).float(), p=2).item() > com_margin
+                    #             mass_bad = (sum_m - Mg) > mass_margin  # 槽和过大（可能减少了负载但槽位仍冻结）
+                    #             com_bad  = torch.norm((com_slots - Cg).float(), p=2).item() > com_margin
 
-                                if (mass_bad or com_bad) and (self.enc_total_updates >= self.enc_freeze_cfg.get("min_updates", 50)):
-                                    # 选一个冻结槽位，使去掉它后与全局更一致
-                                    alpha = float(self.enc_freeze_cfg.get("alpha_mass", 1.0))
-                                    betaC = float(self.enc_freeze_cfg.get("beta_com", 1.0))
-                                    best_i = None
-                                    best_cost = float("inf")
+                    #             if (mass_bad or com_bad) and (self.enc_total_updates >= self.enc_freeze_cfg.get("min_updates", 50)):
+                    #                 # 选一个冻结槽位，使去掉它后与全局更一致
+                    #                 alpha = float(self.enc_freeze_cfg.get("alpha_mass", 1.0))
+                    #                 betaC = float(self.enc_freeze_cfg.get("beta_com", 1.0))
+                    #                 best_i = None
+                    #                 best_cost = float("inf")
 
-                                    for i in range(self.encoder.num_slots):
-                                        if not self.enc_slot_frozen[i]:
-                                            continue
-                                        ci_i = float(ci[i].item())
-                                        # 假设“拿走”该槽
-                                        M_wo = max(sum_m - ci_i, 1e-8)
-                                        C_wo = (sum_mr - ci_i * self.enc_slot_r_ema[i]) / M_wo
-                                        cost = alpha * abs(M_wo - Mg) + betaC * torch.norm((C_wo - Cg).float(), p=2).item()
-                                        if cost < best_cost:
-                                            best_cost = cost
-                                            best_i = i
-                                    if best_i is not None:
-                                        # 解冻候选槽位（需要耐心避免抖动）
-                                        self._unlock_patience[best_i] += 1
-                                        # 其他候选清零
-                                        for j in range(self.encoder.num_slots):
-                                            if j != best_i:
-                                                self._unlock_patience[j] = 0
-                                        if self._unlock_patience[best_i] >= unlock_patience:
-                                            self.encoder.freeze_slot_head(best_i, False)
-                                            self.enc_slot_frozen[best_i] = False
-                                            self._unlock_patience[best_i] = 0
-                                            self.enc_slot_patience[best_i] = 0
+                    #                 for i in range(self.encoder.num_slots):
+                    #                     if not self.enc_slot_frozen[i]:
+                    #                         continue
+                    #                     ci_i = float(ci[i].item())
+                    #                     # 假设“拿走”该槽
+                    #                     M_wo = max(sum_m - ci_i, 1e-8)
+                    #                     C_wo = (sum_mr - ci_i * self.enc_slot_r_ema[i]) / M_wo
+                    #                     cost = alpha * abs(M_wo - Mg) + betaC * torch.norm((C_wo - Cg).float(), p=2).item()
+                    #                     if cost < best_cost:
+                    #                         best_cost = cost
+                    #                         best_i = i
+                    #                 if best_i is not None:
+                    #                     # 解冻候选槽位（需要耐心避免抖动）
+                    #                     self._unlock_patience[best_i] += 1
+                    #                     # 其他候选清零
+                    #                     for j in range(self.encoder.num_slots):
+                    #                         if j != best_i:
+                    #                             self._unlock_patience[j] = 0
+                    #                     if self._unlock_patience[best_i] >= unlock_patience:
+                    #                         self.encoder.freeze_slot_head(best_i, False)
+                    #                         self.enc_slot_frozen[best_i] = False
+                    #                         self._unlock_patience[best_i] = 0
+                    #                         self.enc_slot_patience[best_i] = 0
                         
                     
                     
@@ -585,30 +636,30 @@ class PPO:
                     
                     
                 else:
-                    extra_loss = torch.zeros((), device=self.device)
+                    extra_loss = torch.zeros_like(value_loss)
                     # 统一到下方优化步骤
-                    self.extra_optimizer.zero_grad()
-                    extra_loss.backward()
-                    nn.utils.clip_grad_norm_(self.encoder.parameters(), self.max_grad_norm)
-                    self.extra_optimizer.step()
-                    num_updates_extra += 1
-                    mean_extra_loss += extra_loss.item()
-                    continue  # 非 MLP 编码器时直接继续
+                    # self.extra_optimizer.zero_grad()
+                    # extra_loss.backward()
+                    # nn.utils.clip_grad_norm_(self.encoder.parameters(), self.max_grad_norm)
+                    # self.extra_optimizer.step()
+                    # num_updates_extra += 1
+                    # mean_extra_loss += extra_loss.item()
+                    # continue  # 非 MLP 编码器时直接继续
                     
 
                 # 5) 反传与优化
                 self.extra_optimizer.zero_grad()
                 extra_loss.backward()
-                nn.utils.clip_grad_norm_(self.encoder.parameters(), self.max_grad_norm)
+                # nn.utils.clip_grad_norm_(self.encoder.parameters(), self.max_grad_norm)
                 self.extra_optimizer.step()
 
                 num_updates_extra += 1
                 mean_extra_loss += extra_loss.item()
-                self.enc_total_updates = getattr(self, "enc_total_updates", 0) + 1
+                # self.enc_total_updates = getattr(self, "enc_total_updates", 0) + 1
         #性能统计与清理
         mean_value_loss /= num_updates
         if num_updates_extra > 0:
-            mean_extra_loss /= num_updates_extra
+            mean_extra_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_kl /= num_updates
         self.storage.clear()
@@ -616,6 +667,6 @@ class PPO:
         return (mean_value_loss, mean_extra_loss, mean_surrogate_loss, mean_kl)
 
 
-    def get_frozen_slot_count(self) -> int:
-        """返回已冻结的槽位头数量"""
-        return int(sum(1 for f in self.enc_slot_frozen if f))
+    # def get_frozen_slot_count(self) -> int:
+    #     """返回已冻结的槽位头数量"""
+    #     return int(sum(1 for f in self.enc_slot_frozen if f))

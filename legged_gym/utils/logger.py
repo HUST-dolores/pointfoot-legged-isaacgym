@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import defaultdict
 from multiprocessing import Process, Value
-
+import torch
 
 class Logger:
     def __init__(self, dt):
@@ -43,6 +43,13 @@ class Logger:
         self.plot_process = None
 
     def log_state(self, key, value):
+        if isinstance(value, torch.Tensor): 
+            value = value.detach().cpu() 
+            if value.numel() == 1: 
+                value = value.item() 
+            else: 
+                value = value.numpy() 
+
         self.state_log[key].append(value)
 
     def log_states(self, dict):
@@ -67,6 +74,11 @@ class Logger:
         nb_rows = 4
         nb_cols = 4
         fig, axs = plt.subplots(nb_rows, nb_cols)
+        
+        # 计算要跳过的数据点数（前0.5秒）
+        skip_points = int(0.5 / self.dt)
+        
+        
         for key, value in self.state_log.items():
             time = np.linspace(0, len(value) * self.dt, len(value))
             break
@@ -127,12 +139,22 @@ class Logger:
         a = axs[2, 0]
         if log["contact_forces_z"]:
             forces = np.array(log["contact_forces_z"])
-            for i in range(forces.shape[1]):
-                a.plot(time, forces[:, i], label=f"force {i}")
+            if len(forces) > skip_points:
+                # 跳过前0.5秒的数据
+                forces_skipped = forces[skip_points:]
+                # 生成对应的时间轴
+                time_skipped = np.linspace(0.5, len(forces) * self.dt, len(forces_skipped))
+                for i in range(forces_skipped.shape[1]):
+                    a.plot(time_skipped, forces_skipped[:, i], label=f"force {i}")
+            else:
+                # 如果数据不够长，使用全部数据
+                for i in range(forces.shape[1]):
+                    a.plot(time, forces[:, i], label=f"force {i}")
         a.set(xlabel="time [s]", ylabel="Forces z [N]", title="Vertical Contact forces")
         a.legend()
         # plot torque/vel curves
-        a = axs[2, 1]
+
+        a = axs[2, 3]
         # if log["dof_vel"] != [] and log["dof_torque"] != []:
         #     a.plot(log["dof_vel"], log["dof_torque"], "x", label="measured")
         # a.set(
@@ -140,9 +162,15 @@ class Logger:
         #     ylabel="Joint Torque [Nm]",
         #     title="Torque/velocity curves",
         # )
-        if log["power"]:
-            a.plot(time, log["power"])
-        a.set(xlabel="time [s]", ylabel="power [w]", title="Total Power")
+        # if log["torque_abad"]:
+        #     a.plot(time, log["torque_abad"], label="torque_abad")
+        # if log["torque_hip"]:
+        #     a.plot(time, log["torque_hip"], label="torque_hip")
+        if log["torque_knee_L"]:
+            a.plot(time, log["torque_knee_L"], label="torque_knee_L")
+        if log["torque_knee_R"]:
+            a.plot(time, log["torque_knee_R"], label="torque_knee_R")
+        a.set(xlabel="time [s]", ylabel="power [w]", title="torque_i_care")
         a.legend()
         # plot torques
         a = axs[2, 2]
@@ -199,7 +227,7 @@ class Logger:
         a.set(xlabel="time [s]", ylabel="inertia_yy [???]", title="inertia_yy")
         a.legend()
         
-        a = axs[2, 3]
+        a = axs[2, 1]
         if log["inertia_zz"]:
             a.plot(time, log["inertia_zz"], label="Actual")
         if log["inertia_est_zz"]:

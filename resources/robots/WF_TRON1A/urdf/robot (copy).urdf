@@ -1,0 +1,14 @@
+<!-- 为负载链接设置Gazebo物理属性 -->
+<gazebo reference="dynamic_load_link">
+    <mu1>100.0</mu1>  <!-- 静摩擦系数1，设置一个非常大的值 -->
+    <mu2>100.0</mu2>  <!-- 动摩擦系数2，同样设置一个非常大的值 -->
+    <kp>100000000.0</kp> <!-- 接触刚度，通常也设高 -->
+    <kd>1000000.0</kd>   <!-- 接触阻尼 -->
+    <material>Gazebo/Red</material> <!-- 可选：在Gazebo中指定颜色 -->
+</gazebo>
+
+<!-- 同样，也为板子设置高摩擦系数，确保负载和板子之间的接触面摩擦力足够大 -->
+<gazebo reference="plate_link">
+    <mu1>100.0</mu1>
+    <mu2>100.0</mu2>
+</gazebo>

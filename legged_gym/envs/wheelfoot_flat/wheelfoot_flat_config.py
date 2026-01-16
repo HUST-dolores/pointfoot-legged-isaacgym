@@ -32,10 +32,10 @@ from legged_gym.envs.base.base_config import BaseConfig
 
 class BipedCfgWF(BaseConfig):
     class env:
-        num_envs = 4096
+        num_envs = 2048
         num_observations = 30 + 6 - 2 - 4 - 2 
         # +6 means wheel obs,-2 means sin&cos clock, -4 means gait para nums -2 means wheels pos -2 means load estimation related
-        num_critic_observations = 3 + 7 + num_observations + 8*4 + 1
+        num_critic_observations = 3 + 7 + num_observations
         num_height_samples = 117
         num_actions = 8
         env_spacing = 3.0  # not used with heightfields/trimeshes
@@ -199,18 +199,22 @@ class BipedCfgWF(BaseConfig):
         randomize_restitution = True
         restitution_range = [0.0, 1.0]
         randomize_base_mass = True
-        added_mass_range = [1.5, 2.5]  # [kg]这个mass是初始化定义的mass，定义后不会改变。
+        added_mass_range = [-0.1, 0.1]  # [kg]这个mass是初始化定义的机体随机化的mass，定义后不会改变。
+        add_load_range = [2, 5]  # [kg]这个mass是负载的mass，定义后不会改变。
         randomize_base_com = True
         rand_com_vec = [0.03, 0.02, 0.03]
         load_offset_range_xy = [0.13, 0.12]
         randomize_inertia = True
         randomize_inertia_range = [0.95, 1.05]
-        push_robots = False
-        add_random_load = False
+        push_robots = True
+        add_random_load = True
         push_interval_s = 7
-        load_interval_s = [7, 9]  # 随机化 todo
-        load_duration_s = [3, 5]
-        #生成门控
+        # load_interval_s = [5, 6]  # 随机化 todo 之后的添加负载的时间间隔
+        # load_duration_s = [3, 4]  # 负载持续时间
+        # load_start_time_s = [1, 2]  # 负载开始时间
+        load_start_time_s = 2.0     # 机器人开始添加负载的时间（秒）
+        load_duration_s = 10.0       # 负载持续时间（秒）
+        load_interval_s = 15.0       # 两次负载添加之间的时间间隔（秒）
         spawn_gate = True                 # 启用门控
         spawn_gate_mode = "wait"          # "block" 或 "wait"
         spawn_gate_reschedule_s = 1.0     # 不满足时重试间隔（秒）
@@ -292,7 +296,7 @@ class BipedCfgWF(BaseConfig):
 
     class normalization:
         class obs_scales:
-            lin_vel = 2.0
+            lin_vel = 1.0
             ang_vel = 0.25
             dof_pos = 1.0
             dof_vel = 0.05
@@ -300,7 +304,9 @@ class BipedCfgWF(BaseConfig):
             height_measurements = 5.0
             contact_forces = 0.01
             torque = 0.05
-
+            mass_scale = 0.05
+            com_scale = 5.0
+            inertia_scale = 5.0
         clip_observations = 100.0
         clip_actions = 100.0
 
@@ -354,7 +360,7 @@ class BipedCfgPPOWF(BaseConfig):
         output_detach = True
         num_input_dim = BipedCfgWF.env.num_observations * BipedCfgWF.env.obs_history_length
         num_output_dim = 10
-        hidden_dims = [256, 128]
+        hidden_dims = [256,256, 128]
         activation = "elu"
         orthogonal_init = False
 

@@ -32,12 +32,18 @@ class BipedWF(BaseTask):
         self.sim_params = sim_params
         self.height_samples = None
 
+        # Ensure self.device is properly initialized
+        if not hasattr(self, 'device') or self.device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Initialize self.pi safely
+        self.pi = torch.acos(torch.zeros(1, device=self.device)) * 2
+
         self.init_done = False
         self._parse_cfg(self.cfg)
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless)
-        self.pi = torch.acos(torch.zeros(1, device=self.device)) * 2
         self.group_idx = torch.arange(0, self.cfg.env.num_envs)
-
+        self.compute_group_observations_count = 0
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
         self._init_buffers()
@@ -58,13 +64,16 @@ class BipedWF(BaseTask):
         if self.cfg.commands.curriculum:
             time_out_env_ids = self.time_out_buf.nonzero(as_tuple=False).flatten()
             self.update_command_curriculum(time_out_env_ids)
+        # reset load timers so spawn schedule restarts after reset
+        self._reset_load_timers(env_ids)
+        # 处理机器人（主 actor）的重置逻辑
 
         # reset robot states
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
         self._resample_commands(env_ids)
         # self._resample_gaits(env_ids)
-
+        # self.remove_load(env_ids) 
         # reset buffers
         self.last_actions[env_ids] = 0.0
         self.last_dof_pos[env_ids] = self.dof_pos[env_ids]
@@ -105,26 +114,50 @@ class BipedWF(BaseTask):
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf | self.edge_reset_buf
 
-        # 清空这些环境的负载状态并恢复质量/质心
-        self.load_active[env_ids, :] = False
-        self.load_until_step[env_ids, :] = 0
-        self.load_mass[env_ids, :] = 0.0
-        self.load_r_local[env_ids, :, :] =  torch.zeros_like(self.load_r_local[env_ids, :, :])
-        # 清空 pending 与恢复基础质量/质心
-        self.pending_load_active[env_ids] = False
-        self.pending_load_mass[env_ids] = 0.0
-        self.pending_load_r_local[env_ids] = 0.0      
-        # 恢复基础质量/质心
-        self.base_mass[env_ids] = self.base_mass0[env_ids]
-        self.base_com[env_ids] = self.base_com0[env_ids]
+        
 
-        if hasattr(self, "load_next_trigger_step"):
-            int_min = max(1, int(self.cfg.domain_rand.load_interval_s[0] / self.sim_params.dt))
-            int_max = max(int_min + 1, int(self.cfg.domain_rand.load_interval_s[1] / self.sim_params.dt))
-            self.load_next_trigger_step[env_ids] = torch.randint(
-                int_min, int_max + 1, (len(env_ids),), device=self.device
-            )
-            
+
+    def _reset_load(self, env_ids):
+
+        goal_displacement = gymapi.Vec3(0, 0, 0.1)
+        goal_displacement_tensor = to_torch(
+            [goal_displacement.x, goal_displacement.y, goal_displacement.z], device=self.device)
+
+        self.load_indices = to_torch(self.load_indices, dtype=torch.long, device=self.device)
+        self.root_states[self.load_indices[env_ids], 0:3] = self.load_states[env_ids, 0:3]+ goal_displacement_tensor
+        self.root_states[self.load_indices[env_ids], 3:7] = self.load_states[env_ids, 3:7]
+        self.root_states[self.load_indices[env_ids], 7:13] = torch.zeros_like(self.root_states[self.load_indices[env_ids], 7:13])
+        # 旋转重置：单位四元数
+        load_indices = self.load_indices[env_ids].to(torch.int32)
+        self.gym.set_actor_root_state_tensor_indexed(self.sim,
+                                                         gymtorch.unwrap_tensor(self.root_states),
+                                                         gymtorch.unwrap_tensor(load_indices), len(load_indices))
+        print(f"self.root_states dtype: {self.root_states.dtype}, shape: {self.root_states.shape}")
+        print(f"self.load_indices dtype: {self.load_indices.dtype}, shape: {self.load_indices.shape}")
+        print(f"env_ids dtype: {env_ids.dtype}, shape: {env_ids.shape}")
+        print(f"self.load_states dtype: {self.load_states.dtype}, shape: {self.load_states.shape}")
+        print(f"goal_displacement_tensor dtype: {goal_displacement_tensor.dtype}, shape: {goal_displacement_tensor.shape}")
+    # def reset_load(self, env_ids, apply_reset=False):
+    #     rand_floats = torch_rand_float(-1.0, 1.0, (len(env_ids), 4), device=self.device)
+
+    #     new_rot = randomize_rotation(rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids])
+
+    #     self.goal_states[env_ids, 0:3] = self.goal_init_state[env_ids, 0:3]
+    #     self.goal_states[env_ids, 3:7] = new_rot
+    #     self.root_state_tensor[self.goal_object_indices[env_ids], 0:3] = self.goal_states[env_ids, 0:3] + self.goal_displacement_tensor
+    #     self.root_state_tensor[self.goal_object_indices[env_ids], 3:7] = self.goal_states[env_ids, 3:7]
+    #     self.root_state_tensor[self.goal_object_indices[env_ids], 7:13] = torch.zeros_like(self.root_state_tensor[self.goal_object_indices[env_ids], 7:13])
+
+    #     if apply_reset:
+    #         goal_object_indices = self.goal_object_indices[env_ids].to(torch.int32)
+    #         self.gym.set_actor_root_state_tensor_indexed(self.sim,
+    #                                                      gymtorch.unwrap_tensor(self.root_state_tensor),
+    #                                                      gymtorch.unwrap_tensor(goal_object_indices), len(env_ids))
+    #     self.reset_goal_buf[env_ids] = 0
+
+
+
+
     def step(self, actions):
         self._action_clip(actions)
         # step physics and render each frame
@@ -141,8 +174,8 @@ class BipedWF(BaseTask):
             self.gym.set_dof_actuation_force_tensor(
                 self.sim, gymtorch.unwrap_tensor(self.torques)
             )
-            if self.cfg.domain_rand.push_robots:
-                self._push_robots()
+            # if self.cfg.domain_rand.push_robots:
+            #     self._push_robots()
             # if self.cfg.domain_rand.add_random_load:
             #     self._add_random_load()
             self.gym.simulate(self.sim)
@@ -216,13 +249,18 @@ class BipedWF(BaseTask):
             ),
             dim=-1,
         )
-        priv_load_feat = self._get_priv_load_features()
+        # priv_load_feat = self._get_priv_load_features()
+        
+       
+
+        self.compute_group_observations_count += 1
+        
         critic_obs_buf = torch.cat((
             self.base_lin_vel * self.obs_scales.lin_vel,
-            self.base_mass.unsqueeze(-1),
-            self.base_com,
-            self.base_inertia,
-            priv_load_feat,
+            (self.base_mass - self.base_mass0).unsqueeze(-1) * self.obs_scales.mass_scale,     # Δmass
+            (self.base_com - self.base_com0)[:, :3] * self.obs_scales.com_scale,            # Δcom(xy)
+            self.base_inertia * self.obs_scales.inertia_scale,     ##比例
+            # priv_load_feat,
             self.obs_buf), dim=-1)
         return obs_buf, critic_obs_buf
     
@@ -252,7 +290,7 @@ class BipedWF(BaseTask):
             self.measured_heights = self._get_heights()
 
         self.base_height = torch.mean(
-            self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1
+            self.root_states[self.actor_indices, 2].unsqueeze(1) - self.measured_heights, dim=1
         )
 
     def _resample_commands(self, env_ids):
@@ -261,6 +299,10 @@ class BipedWF(BaseTask):
         Args:
             env_ids (List[int]): Environments ids for which new commands are needed
         """
+        # ensure command ranges are tensors on the correct device
+        lin_vel_x_range = torch.as_tensor(self.command_ranges["lin_vel_x"], device=self.device)
+        lin_vel_y_range = torch.as_tensor(self.command_ranges["lin_vel_y"], device=self.device)
+        ang_vel_yaw_range = torch.as_tensor(self.command_ranges["ang_vel_yaw"], device=self.device)
         self.commands[env_ids, 0] = (
             self.command_ranges["lin_vel_x"][env_ids, 1]
             - self.command_ranges["lin_vel_x"][env_ids, 0]
@@ -316,6 +358,18 @@ class BipedWF(BaseTask):
             heading = torch.atan2(forward[:,1], forward[:,0])
             self.commands[env_ids[zero_cmd_env_idx_], 3] = heading
             
+        self.commands[env_ids, 0] = (
+            lin_vel_x_range[env_ids, 1] - lin_vel_x_range[env_ids, 0]
+        ) * torch.rand(len(env_ids), device=self.device) + lin_vel_x_range[env_ids, 0]
+
+        self.commands[env_ids, 1] = (
+            lin_vel_y_range[env_ids, 1] - lin_vel_y_range[env_ids, 0]
+        ) * torch.rand(len(env_ids), device=self.device) + lin_vel_y_range[env_ids, 0]
+
+        self.commands[env_ids, 2] = (
+            ang_vel_yaw_range[env_ids, 1] - ang_vel_yaw_range[env_ids, 0]
+        ) * torch.rand(len(env_ids), device=self.device) + ang_vel_yaw_range[env_ids, 0]
+        
     def _get_noise_scale_vec(self, cfg):
         """Sets a vector used to scale the noise added to the observations.
             [NOTE]: Must be adapted when changing the observations structure
@@ -469,5 +523,5 @@ class BipedWF(BaseTask):
     
     def _reward_base_height(self):
         # Penalize base height away from target
-        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        base_height = torch.mean(self.root_states[self.actor_indices, 2].unsqueeze(1) - self.measured_heights, dim=1)
         return torch.abs(base_height - self.cfg.rewards.base_height_target)
