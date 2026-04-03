@@ -51,7 +51,7 @@ def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 30
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 100)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 10)
 
     env_cfg.terrain.num_rows = 10
     env_cfg.terrain.num_cols = 20
@@ -76,10 +76,10 @@ def play(args):
     # get robot_type
     robot_type = os.getenv("ROBOT_TYPE")
     commands_val = to_torch([0.5, 0.0, 0, 0], device=env.device) if robot_type.startswith("PF")\
-        else to_torch([1.0, 0.0, 0.0], device=env.device) if robot_type == "WF_TRON1A" else to_torch([1.5, 0.0, 0.0, 0.0, 0.0])
+        else to_torch([0.5, 0.0, 0.0], device=env.device) if robot_type == "WF_TRON1A" else to_torch([1.5, 0.0, 0.0, 0.0, 0.0])
     action_scale = env.cfg.control.action_scale_pos if robot_type == "WF_TRON1A"\
         else env.cfg.control.action_scale
-    obs, obs_history, commands, _ = env.get_observations()
+    obs, obs_history, commands, critic_obs = env.get_observations()
     # load policy
     train_cfg.runner.resume = True
     train_cfg.runner.load_run = args.load_run
@@ -118,9 +118,9 @@ def play(args):
         )
 
     logger = Logger(env.dt)
-    robot_index = 5  # which robot is used for logging
+    robot_index = 0  # which robot is used for logging
     joint_index = 1  # which joint is used for logging
-    stop_state_log = 100  # number of steps before plotting states
+    stop_state_log = 200  # number of steps before plotting states
     stop_rew_log = (
         env.max_episode_length + 1
     )  # number of steps before print average episode rewards
@@ -135,7 +135,7 @@ def play(args):
 
         env.commands[:, :] = commands_val
 
-        obs, rews, dones, infos, obs_history, commands, _ = env.step(
+        obs, rews, dones, infos, obs_history, commands, critic_obs = env.step(
             actions.detach()
         )
         if RECORD_FRAMES:
@@ -177,6 +177,22 @@ def play(args):
                     "base_vel_z": env.base_lin_vel[robot_index, 2].item(),
                     "base_vel_yaw": env.base_ang_vel[robot_index, 2].item(),
                     "power": torch.sum(env.power[robot_index, :]).item(),
+                    "torque_abad_L": env.torques[robot_index, 0].item(),
+                    "torque_hip_L": env.torques[robot_index, 1].item(),
+                    "torque_knee_L": env.torques[robot_index, 2].item(),
+                    "torque_wheel_L": env.torques[robot_index, 3].item(),
+                    "torque_abad_R": env.torques[robot_index, 4].item(),
+                    "torque_hip_R": env.torques[robot_index, 5].item(),
+                    "torque_knee_R": env.torques[robot_index, 6].item(),
+                    "torque_wheel_R": env.torques[robot_index, 7].item(),
+                    "mass": env.base_mass[robot_index].item(),
+                    "CoM_x": env.base_com[robot_index, 0].item(),
+                    "CoM_y": env.base_com[robot_index, 1].item(),
+                    "CoM_z": env.base_com[robot_index, 2].item(),
+                    # "inertia_xx": env.base_inertia[robot_index, 0].item(),
+                    # "inertia_yy": env.base_inertia[robot_index, 1].item(),
+                    # "inertia_zz": env.base_inertia[robot_index, 2].item(),   
+                    
                     "contact_forces_z": env.contact_forces[
                         robot_index, env.feet_indices, 2
                     ]
@@ -185,15 +201,50 @@ def play(args):
                 }
             )
             # print(torch.sum(env.power[robot_index, :]).item())
-            if est != None:
-                logger.log_states(
+            # if est != None:                # 计算并记录 extra_loss 分量（速度 / 质量 / 质心）
+            #     extra_loss_vel = (
+            #         (est[:, 0:3] - critic_obs[:, 0:3]).pow(2).mean().item()
+            #     )
+            #     extra_loss_mass = (
+            #         (est[:, 3] - critic_obs[:, 3]).pow(2).mean().item()
+            #     )
+            #     extra_loss_com = (
+            #         (est[:, 4:7] - critic_obs[:, 4:7]).pow(2).mean().item()
+            #     )
+            #     logger.log_states(
+            #         {
+            #             "extra_loss_vel": extra_loss_vel,
+            #             "extra_loss_mass": extra_loss_mass,
+            #             "extra_loss_com": extra_loss_com,
+            #         }
+            #     )
+            #     if (i % 50) == 0:
+            #         obs_vec = obs[robot_index].detach().cpu().tolist()
+            #         cmd_vec = env.commands[robot_index].detach().cpu().tolist()
+            #         print(
+            #             f"[PLAY] t={i * env.dt:.2f}s "
+            #             f"extra_loss_vel={extra_loss_vel:.6f} "
+            #             f"extra_loss_mass={extra_loss_mass:.6f} "
+            #             f"extra_loss_com={extra_loss_com:.6f}"
+            #         )
+            #         print(f"[PLAY] obs[{robot_index}]={obs_vec}")
+            #         print(f"[PLAY] commands[{robot_index}]={cmd_vec}")
+            logger.log_states(
                     {
                         "est_lin_vel_x": est[robot_index, 0].item()
                         / env.cfg.normalization.obs_scales.lin_vel,
                         "est_lin_vel_y": est[robot_index, 1].item()
                         / env.cfg.normalization.obs_scales.lin_vel,
                         "est_lin_vel_z": est[robot_index, 2].item()
-                        / env.cfg.normalization.obs_scales.lin_vel,
+                        / env.cfg.normalization.obs_scales.lin_vel,                        
+                        # "mass_est": est[robot_index, 3].item()
+                #         / env.cfg.normalization.obs_scales.mass_scale + float(env.base_mass0[robot_index].item()),
+                #         "CoM_est_x": est[robot_index, 4].item()
+                #         / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 0].item()),
+                #         "CoM_est_y": est[robot_index, 5].item()
+                #         / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 1].item()),
+                #         "CoM_est_z": est[robot_index, 6].item()
+                #         / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 2].item()),
                     }
                 )
         elif i == stop_state_log:

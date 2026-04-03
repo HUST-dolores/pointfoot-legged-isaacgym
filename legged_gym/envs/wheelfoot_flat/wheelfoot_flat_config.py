@@ -32,7 +32,7 @@ from legged_gym.envs.base.base_config import BaseConfig
 
 class BipedCfgWF(BaseConfig):
     class env:
-        num_envs = 8192
+        num_envs = 2048
         num_observations = 30 + 6 - 2 - 4 - 2  # +6 means wheel obs,-2 means sin&cos clock, -4 means gait para nums -2 means wheels pos
         num_critic_observations = 3 + num_observations
         num_height_samples = 117
@@ -169,11 +169,11 @@ class BipedCfgWF(BaseConfig):
 
     class asset:
         file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/WF_TRON1A/urdf/robot.urdf"
-        name = "pointfoot_flat"
+        name = "wheelfoot_flat"
         foot_name = "wheel"
         foot_radius = 0.127
         penalize_contacts_on = ["knee", "hip"]
-        terminate_after_contacts_on = ["abad", "base"]
+        terminate_after_contacts_on = ["abad", "knee", "hip"]
         disable_gravity = False
         collapse_fixed_joints = True  # merge bodies connected by fixed joints. Specific fixed joints can be kept by adding " <... dont_collapse="true">
         fix_base_link = False  # fixe the base of the robot
@@ -198,14 +198,19 @@ class BipedCfgWF(BaseConfig):
         randomize_restitution = True
         restitution_range = [0.0, 1.0]
         randomize_base_mass = True
-        added_mass_range = [-0.5, 2]
+        added_mass_range = [-0.1, 0.1]        
+        add_load_range = [0.1, 3]  # [kg]这个mass是负载的mass，定义后不会改变。  000 
         randomize_base_com = True
+        load_enable_iter = 4000    #000 
         rand_com_vec = [0.03, 0.02, 0.03]
+        # load_offset_range_xy = [0.13, 0.12]   #000
         randomize_inertia = True
-        randomize_inertia_range = [0.8, 1.2]
-        push_robots = True
+        randomize_inertia_range = [0.95, 1.05]
+        push_robots = False
         push_interval_s = 7
-        max_push_vel_xy = 1.5
+        load_start_time_s = 0.5     # 机器人开始添加负载的时间（秒）
+        load_duration_s = 2.0       # 负载持续时间（秒）    000
+        load_interval_s = 4.0       # 两次负载添加之间的时间间隔（秒）
         rand_force = False
         force_resampling_time_s = 15
         max_force = 50.0
@@ -222,7 +227,7 @@ class BipedCfgWF(BaseConfig):
         randomize_imu_offset = True
         randomize_imu_offset_range = [-1.2, 1.2]
         delay_ms_range = [0, 20]
-        max_push_vel_xy = 1.0
+        max_push_vel_xy = 1.5
 
     class rewards:
         class scales:
@@ -241,7 +246,7 @@ class BipedCfgWF(BaseConfig):
             same_foot_x_position = -50 # 0.5
             same_foot_z_position = -100
             lin_vel_z = -0.3
-            ang_vel_xy = -0.3
+            ang_vel_xy = -0.3 #原来是-0.3，改成-0.1试试 修改
             torques = -0.00016
             dof_acc = -1.5e-7
             action_rate = -0.03
@@ -250,7 +255,7 @@ class BipedCfgWF(BaseConfig):
             action_smooth = -0.03
             orientation = -12.0
             feet_distance = -100
-            base_height = -20
+            base_height = -20 #原来是-20，改成-5试试 修改
 
         only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
         clip_reward = 100
@@ -280,7 +285,7 @@ class BipedCfgWF(BaseConfig):
 
     class normalization:
         class obs_scales:
-            lin_vel = 2.0
+            lin_vel = 1.0  #修改 本来被我修改为了0.1 原版2.0
             ang_vel = 0.25
             dof_pos = 1.0
             dof_vel = 0.05
@@ -288,7 +293,9 @@ class BipedCfgWF(BaseConfig):
             height_measurements = 5.0
             contact_forces = 0.01
             torque = 0.05
-
+            mass_scale = 0.05
+            com_scale = 5.0
+            inertia_scale = 5.0
         clip_observations = 100.0
         clip_actions = 100.0
 
@@ -342,7 +349,7 @@ class BipedCfgPPOWF(BaseConfig):
         output_detach = True
         num_input_dim = BipedCfgWF.env.num_observations * BipedCfgWF.env.obs_history_length
         num_output_dim = 3
-        hidden_dims = [256, 128]
+        hidden_dims = [256, 128]  #曾经被我修改为[256,256, 128]
         activation = "elu"
         orthogonal_init = False
 
@@ -378,7 +385,7 @@ class BipedCfgPPOWF(BaseConfig):
         policy_class_name = "ActorCritic"
         algorithm_class_name = "PPO"
         num_steps_per_env = 24  # per iteration
-        max_iterations = 8000  # number of policy updates
+        max_iterations = 32000  # number of policy updates
 
         # logging
         logger = "tensorboard"

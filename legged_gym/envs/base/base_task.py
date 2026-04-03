@@ -106,6 +106,9 @@ class BaseTask:
         self.envs_steps_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long
         )
+        # 训练迭代计数由 runner 注入；负载默认在指定迭代后才启用
+        self.learning_iteration = 0
+        self.load_enable_iter = int(getattr(self.cfg.domain_rand, "load_enable_iter", 0))
         self.time_out_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.bool
         )
@@ -113,6 +116,20 @@ class BaseTask:
             self.num_envs, device=self.device, dtype=torch.bool
         )
         self.extras = {}
+        self.base_add_mass = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.base_com_offset = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        
+        # self.num_actors_per_env = 2 # Robot + Load
+        # self.load_offset_range = {
+        #     "x": (-0.17, 0.21),  # x 方向的偏移范围  稍微有些偏移，因为机器人前进时会有一个向前的速度
+        #     "y": (-0.19, 0.19),  # y 方向的偏移范围
+        #     "z": (0.10, 0.10),   # z 方向的偏移范围 平板在机体上方0.1m处 平板长宽0.5m，高度0.005米
+        # }   #000
+        
 
         # create envs, sim and viewer
         self.create_sim()
@@ -132,6 +149,139 @@ class BaseTask:
             self.gym.subscribe_viewer_keyboard_event(
                 self.viewer, gymapi.KEY_V, "toggle_viewer_sync"
             )
+                    
+    #     # self.load_manager = {}  # Dictionary to manage loads dynamically
+
+    # def add_load(self, env_id, position, orientation):
+    #     """Dynamically add a load to the specified environment."""
+    #     # Update load state in the buffer
+    #     # print(f"self.root_states dtype: {self.root_states.dtype}, shape: {self.root_states.shape}")
+    #     # print(f"self.load_indices dtype: {self.load_indices.dtype}, shape: {self.load_indices.shape}")
+    #     # print(f"position dtype: {position.dtype}, shape: {position.shape}")
+    #             # Create load asset
+                    
+    #     # Ensure tensors keep device/dtype without rebuilding from torch.tensor (avoids warning)
+    #     pos_t = torch.as_tensor(position, device=self.device, dtype=self.root_states.dtype)
+    #     ori_t = torch.as_tensor(orientation, device=self.device, dtype=self.root_states.dtype)
+    #     self.root_states[self.load_indices[env_id], 0:3] = pos_t
+    #     self.root_states[self.load_indices[env_id], 3:7] = ori_t
+    #     self.root_states[self.load_indices[env_id], 7:13] = torch.zeros_like(self.root_states[self.load_indices[env_id], 7:13]) # Reset velocities
+
+        
+    #     # Update simulation
+    #     load_indices = self.load_indices.to(torch.int32)
+        
+
+
+
+    #     self.gym.set_actor_root_state_tensor_indexed(
+    #         self.sim,
+    #         gymtorch.unwrap_tensor(self.root_states),
+    #         gymtorch.unwrap_tensor(load_indices), len(load_indices)
+    #     )
+
+        
+        
+        
+
+    # def remove_load(self, env_id):
+    #     """Dynamically remove a load from the specified environment."""
+    #     # Move load far away
+    #     far_position = torch.tensor([0.0, 0.0, -100.0], 
+    #                             device=self.device, 
+    #                             dtype=self.root_states.dtype)
+
+    #     self.root_states[self.load_indices, 0:3] = far_position
+
+        
+    #     # Update simulation
+    #     load_indices = self.load_indices.to(torch.int32)
+    #     self.gym.set_actor_root_state_tensor_indexed(
+    #         self.sim,
+    #         gymtorch.unwrap_tensor(self.root_states),
+    #         gymtorch.unwrap_tensor(load_indices), len(load_indices)
+    #     )
+
+    # def _reset_load_timers(self, env_ids):
+    #     """Reset load timers/state on env reset so loads can spawn again."""
+    #     if not getattr(self.cfg.domain_rand, "add_random_load", False):
+    #         return
+    #     start_s = float(getattr(self.cfg.domain_rand, "load_start_time_s", 0.0))
+    #     self.has_load[env_ids] = False
+    #     self.load_remove_time[env_ids] = 0.0
+    #     self.next_load_spawn_time[env_ids] = start_s
+    #     # ensure any existing load actor is moved away
+    #     for env_id in env_ids.tolist():
+    #         self.remove_load(env_id)
+
+    # def _maybe_spawn_loads(self):
+    #     """Spawn/remove loads based on episode time thresholds.
+
+    #     Uses domain_rand: `load_start_time_s`, `load_duration_s`, `load_interval_s`.
+    #     Requires `self.cfg.domain_rand.add_random_load` to be True.
+    #     """
+    #     if not getattr(self.cfg.domain_rand, "add_random_load", False):
+    #         return
+
+    #     t = self.episode_length_buf.float() * self.dt  # [N]
+    #     start_s = float(getattr(self.cfg.domain_rand, "load_start_time_s", 0.0))
+    #     dur_s = float(getattr(self.cfg.domain_rand, "load_duration_s", 0.0))
+    #     interval_s = float(getattr(self.cfg.domain_rand, "load_interval_s", 0.0))
+
+    #     # 初始化 next/stop 时间（首次）
+    #     init_mask = self.next_load_spawn_time == 0
+    #     if init_mask.any():
+    #         self.next_load_spawn_time[init_mask] = start_s
+
+    #     # 到期移除当前负载
+    #     remove_mask = self.has_load & (t >= self.load_remove_time)
+    #     if remove_mask.any():
+    #         ids = remove_mask.nonzero(as_tuple=False).flatten().tolist()
+    #         for env_id in ids:
+    #             self.remove_load(env_id)
+    #             self.has_load[env_id] = False
+
+    #     # 触发生成新负载（仅当未携带负载且到达触发时间）
+    #     spawn_mask = (~self.has_load) & (t >= self.next_load_spawn_time)
+    #     if spawn_mask.any():
+    #         ids = spawn_mask.nonzero(as_tuple=False).flatten().tolist()
+    #         for env_id in ids:
+    #             # 在机体上方采样局部偏移
+    #             x_rng = self.load_offset_range["x"]
+    #             y_rng = self.load_offset_range["y"]
+    #             z_rng = self.load_offset_range["z"]
+    #             rx = torch.empty(1, device=self.device).uniform_(x_rng[0], x_rng[1]).item()
+    #             ry = torch.empty(1, device=self.device).uniform_(y_rng[0], y_rng[1]).item()
+    #             rz = torch.empty(1, device=self.device).uniform_(z_rng[0], z_rng[1]).item()
+    #             r_local = torch.tensor([rx, ry, rz], device=self.device)
+
+    #             base_pos = self.root_states[self.actor_indices[env_id], 0:3]
+    #             base_quat = self.root_states[self.actor_indices[env_id], 3:7]
+    #             # quat_rotate expects batched inputs; add batch dim then squeeze back
+    #             pos_world = quat_rotate(base_quat.unsqueeze(0), r_local.unsqueeze(0)).squeeze(0) + base_pos
+    #             orientation = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
+
+    #             self.add_load(env_id, pos_world, orientation)
+    #             self.has_load[env_id] = True
+    #             # 统计：累计生成次数 +1
+    #             self.loads_spawned_count[env_id] += 1
+    #             self.load_remove_time[env_id] = t[env_id] + dur_s
+    #             self.next_load_spawn_time[env_id] = t[env_id] + interval_s
+
+    # def get_load_stats(self):
+    #     """返回负载统计信息用于日志：
+    #     - active_loads_sum: 当前所有环境中激活负载总数
+    #     - total_loads_spawned: 累计生成负载总数（跨所有环境求和）
+    #     """
+    #     try:
+    #         active = int(self.has_load.sum().item())
+    #     except Exception:
+    #         active = 0
+    #     try:
+    #         total_spawned = int(self.loads_spawned_count.sum().item())
+    #     except Exception:
+    #         total_spawned = 0
+    #     return {"active_loads_sum": active, "total_loads_spawned": total_spawned}
 
     def get_observations(self):
         return (
@@ -306,6 +456,7 @@ class BaseTask:
 
         # save body names from the asset
         body_names = self.gym.get_asset_rigid_body_names(robot_asset)
+        self.body_names = body_names  # st
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)
@@ -328,12 +479,44 @@ class BaseTask:
         )
         start_pose = gymapi.Transform()
         start_pose.p = gymapi.Vec3(*self.base_init_state[:3])
+        
+        load_start_pose = gymapi.Transform()
+        load_start_pose.p = gymapi.Vec3()
+        load_start_pose.p.x = self.base_init_state[0]
+        load_start_pose.p.y = self.base_init_state[1]
+        load_start_pose.p.z = self.base_init_state[2] - 100
+
 
         self._get_env_origins()
         env_lower = gymapi.Vec3(0.0, 0.0, 0.0)
         env_upper = gymapi.Vec3(0.0, 0.0, 0.0)
         self.actor_handles = []
+        self.load_handles = [] 
         self.envs = []
+                
+        self.load_init_state = []
+        
+        self.actor_indices = []
+        self.load_indices = []
+        
+        # # Create load asset
+        load_asset_options = gymapi.AssetOptions()
+        load_asset_options.fix_base_link = False
+        load_volume = 0.1 * 0.1 * 0.1
+        load_mass_range = getattr(self.cfg.domain_rand, "add_load_range", [1.0, 1.0])
+        load_mass_min, load_mass_max = float(load_mass_range[0]), float(load_mass_range[1])
+        if load_mass_min == load_mass_max:
+            chosen_load_mass = load_mass_min
+        else:
+            chosen_load_mass = torch.empty(1).uniform_(load_mass_min, load_mass_max).item()
+        load_asset_options.density = chosen_load_mass / load_volume
+        self.load_mass = chosen_load_mass  # sampled once from cfg.domain_rand.add_load_range
+        self.load_asset = self.gym.create_box(self.sim, 0.1, 0.1, 0.1, load_asset_options)
+        load_rigid_shape_props = self.gym.get_asset_rigid_shape_properties(self.load_asset)
+        load_rigid_shape_props[0].friction = 0.5
+        self.gym.set_asset_rigid_shape_properties(self.load_asset, load_rigid_shape_props)
+        
+        
         self.friction_coef = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
@@ -349,6 +532,9 @@ class BaseTask:
         self.whole_body_mass = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
+        # self.base_inertia = torch.zeros(
+        #     self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False
+        # )
         for i in range(self.num_envs):
             # create env instance
             env_handle = self.gym.create_env(
@@ -371,6 +557,8 @@ class BaseTask:
             )
             dof_props = self._process_dof_props(dof_props_asset, i)
             self.gym.set_actor_dof_properties(env_handle, actor_handle, dof_props)
+            actor_idx = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
+            self.actor_indices.append(actor_idx)
             body_props = self.gym.get_actor_rigid_body_properties(
                 env_handle, actor_handle
             )
@@ -380,6 +568,19 @@ class BaseTask:
             )
             self.envs.append(env_handle)
             self.actor_handles.append(actor_handle)
+        #    Create load actor (hidden initially)
+            load_pose = gymapi.Transform()
+            load_pose.p = gymapi.Vec3(0.0, 0.0, -100.0) # Far away
+            load_handle = self.gym.create_actor(
+                env_handle, self.load_asset, load_pose, f"load_{i}", i, 0, 0
+            )
+            # print(f"Created load actor in env {i}, handle {load_handle}")
+            self.load_handles.append(load_handle)
+            load_idx = self.gym.get_actor_index(env_handle, load_handle, gymapi.DOMAIN_SIM)
+            self.load_indices.append(load_idx)
+            self.load_init_state.append([load_start_pose.p.x, load_start_pose.p.y, load_start_pose.p.z,
+                                           load_start_pose.r.x, load_start_pose.r.y, load_start_pose.r.z, load_start_pose.r.w,
+                                           0, 0, 0, 0, 0, 0])
 
         self.feet_indices = torch.zeros(
             len(feet_names), dtype=torch.long, device=self.device, requires_grad=False
@@ -410,6 +611,13 @@ class BaseTask:
             self.termination_contact_indices[i] = self.gym.find_actor_rigid_body_handle(
                 self.envs[0], self.actor_handles[0], termination_contact_names[i]
             )
+        # self.load_init_state = to_torch(self.load_init_state, device=self.device, dtype=torch.float).view(self.num_envs, 13)
+        # self.load_states = self.load_init_state.clone()
+
+
+        self.actor_indices = to_torch(self.actor_indices, dtype=torch.long, device=self.device)
+        if len(self.load_indices) > 0:
+            self.load_indices = to_torch(self.load_indices, dtype=torch.long, device=self.device)
             
     def _get_heights(self, env_ids=None):
         """Samples heights of the terrain at required points around each robot.
@@ -438,11 +646,11 @@ class BaseTask:
             points = quat_apply_yaw(
                 self.base_quat[env_ids].repeat(1, self.num_height_points),
                 self.height_points[env_ids],
-            ) + (self.root_states[env_ids, :3]).unsqueeze(1)
+            ) + (self.root_states[self.actor_indices[env_ids], :3]).unsqueeze(1)
         else:
             points = quat_apply_yaw(
                 self.base_quat.repeat(1, self.num_height_points), self.height_points
-            ) + (self.root_states[:, :3]).unsqueeze(1)
+            ) + (self.root_states[self.actor_indices, :3]).unsqueeze(1)
 
         points += self.terrain.cfg.border_size
         points = (points / self.terrain.cfg.horizontal_scale).long()
@@ -547,18 +755,21 @@ class BaseTask:
         if self.cfg.domain_rand.randomize_base_com:
             if env_id == 0:
                 com_x, com_y, com_z = self.cfg.domain_rand.rand_com_vec
-                self.base_com[:, 0] = (
+                self.base_com_offset[:, 0] = (
                     torch.rand(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)\
                     * (com_x * 2) - com_x)
-                self.base_com[:, 1] = (
+                self.base_com_offset[:, 1] = (
                     torch.rand(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)\
                     * (com_y * 2) - com_y)
-                self.base_com[:, 2] = (
+                self.base_com_offset[:, 2] = (
                     torch.rand(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)\
                     * (com_z * 2) - com_z)
-            props[0].com.x += self.base_com[env_id, 0]
-            props[0].com.y += self.base_com[env_id, 1]
-            props[0].com.z += self.base_com[env_id, 2]
+            props[0].com.x += self.base_com_offset[env_id, 0]
+            props[0].com.y += self.base_com_offset[env_id, 1]
+            props[0].com.z += self.base_com_offset[env_id, 2]
+            self.base_com[:, 0] = props[0].com.x
+            self.base_com[:, 1] = props[0].com.y
+            self.base_com[:, 2] = props[0].com.z   #check 具体是哪个坐标系
         if self.cfg.domain_rand.randomize_inertia:
             for i in range(len(props)):
                 low_bound, high_bound = self.cfg.domain_rand.randomize_inertia_range
@@ -567,6 +778,18 @@ class BaseTask:
                 props[i].inertia.x.x *= inertia_scale
                 props[i].inertia.y.y *= inertia_scale
                 props[i].inertia.z.z *= inertia_scale
+            if env_id == 0:
+                # 初始化张量以存储所有环境的初始质量和质心
+                self.base_mass0 = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+                self.base_com0 = torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float)
+
+        # 为当前环境的初始质量和质心赋值
+        self.base_mass0[env_id] = props[0].mass
+        self.base_com0[env_id, :] = torch.tensor(
+            [props[0].com.x, props[0].com.y, props[0].com.z],
+            device=self.device,
+            dtype=torch.float,
+        )
         return props
 
     def _step_contact_targets(self):
@@ -680,7 +903,7 @@ class BaseTask:
             self.measured_heights = self._get_heights()
 
         self.base_height = torch.mean(
-            self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1
+            self.root_states[self.actor_indices, 2].unsqueeze(1) - self.measured_heights, dim=1
         )
         
     def _parse_cfg(self, cfg):
@@ -822,6 +1045,10 @@ class BaseTask:
         if "tracking_contacts_shaped_height" in self.reward_scales.keys():
             self.rwd_swingHeightPrev = self._reward_tracking_contacts_shaped_height()
             
+    def set_learning_iteration(self, it: int):
+        """Runner可在每个训练迭代开始前调用，告知当前迭代计数。"""
+        self.learning_iteration = int(it)    
+        
     def _prepare_reward_function(self):
         """Prepares a list of reward functions, whcih will be called to compute the total reward.
         Looks for self._reward_<REWARD_NAME>, where <REWARD_NAME> are names of all non zero reward scales in the cfg.
@@ -921,7 +1148,7 @@ class BaseTask:
             # don't change on initial reset
             return
         distance = torch.norm(
-            self.root_states[env_ids, :2] - self.env_origins[env_ids, :2], dim=1
+            self.root_states[self.actor_indices[env_ids], :2] - self.env_origins[env_ids, :2], dim=1
         )
         # robots that walked far enough progress to harder terains
         move_up = distance > self.terrain.env_length / 2
@@ -1004,10 +1231,92 @@ class BaseTask:
 
         self.gym.apply_rigid_body_force_tensors(
             self.sim,
-            gymtorch.unwrap_tensor(self.rigid_body_external_forces),
-            gymtorch.unwrap_tensor(self.rigid_body_external_torques),
+            gymtorch.unwrap_tensor(self.rigid_body_external_forces.view(-1, 3)),
+            gymtorch.unwrap_tensor(self.rigid_body_external_torques.view(-1, 3)),
+            # gymtorch.unwrap_tensor(self.rigid_body_external_forces),
+            # gymtorch.unwrap_tensor(self.rigid_body_external_torques),
             gymapi.ENV_SPACE,
         )
+    def _compute_mass_com(self, env_ids: torch.Tensor = None, load_on_body_mask: torch.Tensor = None):
+        """Update effective base mass/COM when a load is present on the robot."""
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+
+        # 如果未传入掩码，现算一次
+        if load_on_body_mask is None:
+            load_on_body_mask = self.is_load_on_body(env_ids)
+
+        base_pos = self.root_states[self.actor_indices[env_ids], 0:3]
+        base_quat = self.root_states[self.actor_indices[env_ids], 3:7]
+        load_pos = self.root_states[self.load_indices[env_ids], 0:3]
+
+        rel_body = quat_rotate_inverse(base_quat, load_pos - base_pos)
+
+        # 基础质量/质心（包含随机化后的初值）
+        m0 = self.base_mass0[env_ids]
+        com0 = self.base_com0[env_ids]
+
+        load_mass = torch.full_like(m0, float(self.load_mass)) * load_on_body_mask.float()
+        m_eff = m0 + load_mass
+        denom = m_eff.clamp_min(1e-6).unsqueeze(-1)
+        com_eff = (m0.unsqueeze(-1) * com0 + load_mass.unsqueeze(-1) * rel_body) / denom
+
+        self.base_mass[env_ids] = m_eff
+        self.base_com[env_ids] = com_eff
+    
+    def is_load_on_body(
+        self,
+        env_ids=None,
+        half_length=0.2,
+        half_width=0.2,
+        top_z=0.1,
+        margin=0.05,
+        force_min=1.0,
+        force_rel_tol=0.5,
+    ):
+        """判定负载是否位于机体顶部且与机体存在相当接触力。
+
+        条件：
+        1) 负载投影在 base 坐标系的盒内（带 margin）。
+        2) 负载的接触力与机体某一刚体的接触力大小相近（相对差<=force_rel_tol，且力大于 force_min）。
+        """
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+
+        base_pos = self.root_states[self.actor_indices[env_ids], 0:3]
+        base_quat = self.root_states[self.actor_indices[env_ids], 3:7]
+        load_pos = self.root_states[self.load_indices[env_ids], 0:3]
+
+        rel_world = load_pos - base_pos
+        rel_body = quat_rotate_inverse(base_quat, rel_world)
+
+        half_L = half_length + margin
+        half_W = half_width + margin
+        top_Z = top_z + margin
+
+        pos_inside = (
+            (rel_body[:, 0].abs() <= half_L)
+            & (rel_body[:, 1].abs() <= half_W)
+            & (rel_body[:, 2] >= 0.0)
+            & (rel_body[:, 2] <= top_Z)
+        )
+
+        # 负载的接触力需要与机体某个刚体的接触力相当，否则判定为未接触
+        forces = self.contact_forces[env_ids]  # [N, num_bodies_total, 3]
+        norms = torch.norm(forces, dim=-1)
+
+        load_norm = norms[:, 9]
+        robot_norms = norms[:, 0]
+
+        rel_diff = robot_norms - load_norm
+        force_match = (
+            (robot_norms >= force_min)
+            & (load_norm >= force_min)
+            & (rel_diff <= force_rel_tol)
+        )
+
+        inside = pos_inside & force_match
+        return inside
         
     def compute_observations(self):
         """Computes observations"""
@@ -1025,7 +1334,9 @@ class BaseTask:
         # add imu noise if needed
         if self.cfg.domain_rand.randomize_imu_offset:
             randomized_base_quat = quat_mul(self.random_imu_offset, self.base_quat)
-            self.obs_buf[:, :3] = quat_rotate_inverse(randomized_base_quat, self.root_states[:, 10:13]) * self.obs_scales.ang_vel
+            self.obs_buf[:, :3] = quat_rotate_inverse(
+                randomized_base_quat, self.root_states[self.actor_indices, 10:13]
+            ) * self.obs_scales.ang_vel
             self.obs_buf[:, 3:6] = quat_rotate_inverse(randomized_base_quat, self.gravity_vec)
             
     def _reset_root_states(self, env_ids):
@@ -1037,19 +1348,28 @@ class BaseTask:
         """
         # base position
         if self.custom_origins:
-            self.root_states[env_ids] = self.base_init_state
-            self.root_states[env_ids, :3] += self.env_origins[env_ids]
-            self.root_states[env_ids, :2] += torch_rand_float(
+            # self.root_states[self.actor_indices[env_ids]] = self.base_init_state
+            # self.root_states[self.actor_indices[env_ids], :3] += self.env_origins[env_ids]
+            # self.root_states[self.actor_indices[env_ids], :2] += torch_rand_float(
+            #     -0.7, 0.7, (len(self.actor_indices[env_ids]), 2), device=self.device
+            self.root_states[self.actor_indices[env_ids]] = self.base_init_state
+            self.root_states[self.actor_indices[env_ids], :3] += self.env_origins[env_ids]
+            self.root_states[self.actor_indices[env_ids], :2] += torch_rand_float(
                 -0.7, 0.7, (len(env_ids), 2), device=self.device
             )  # xy position within 1m of the center
         else:
-            self.root_states[env_ids] = self.base_init_state
-            self.root_states[env_ids, :3] += self.env_origins[env_ids]
+            # self.root_states[self.actor_indices[env_ids]] = self.base_init_state
+            # self.root_states[self.actor_indices[env_ids], :3] += self.env_origins[env_ids]
+            self.root_states[self.actor_indices[env_ids]] = self.base_init_state
+            self.root_states[self.actor_indices[env_ids], :3] += self.env_origins[env_ids]
         # base velocities
-        self.root_states[env_ids, 7:13] = torch_rand_float(
-            -0.5, 0.5, (len(env_ids), 6), device=self.device
-        )  # [7:10]: lin vel, [10:13]: ang vel
-        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        # self.root_states[self.actor_indices[env_ids], 7:13] = torch_rand_float(
+        #     -0.5, 0.5, (len(self.actor_indices[env_ids]), 6), device=self.device
+        self.root_states[self.actor_indices[env_ids], 7:13] = torch_rand_float(
+            -0.5, 0.5, (len(env_ids), 6), device=self.device    #虽然不一样，但结果是一样的
+        )  # [7:10]: lin vel, [10:13]: ang vel  
+        # prop_indices = self.global_indices[env_ids, 2:].flatten()
+        env_ids_int32 = self.actor_indices[env_ids].to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim,
             gymtorch.unwrap_tensor(self.root_states),
@@ -1070,7 +1390,15 @@ class BaseTask:
         )
         self.dof_vel[env_ids] = 0.0
 
-        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        # # env_ids_int32 = env_ids.to(dtype=torch.int32)
+        # actor_indices = self.actor_indices[env_ids].to(torch.int32)
+        # # multi_env_ids_int32 = self.global_indices[env_ids, :1].flatten()
+        # self.gym.set_dof_state_tensor_indexed(self.sim,
+        #                                       gymtorch.unwrap_tensor(self.dof_state),
+        #                                       gymtorch.unwrap_tensor(actor_indices), len(actor_indices))
+        
+        
+        env_ids_int32 = self.actor_indices[env_ids].to(dtype=torch.int32)
         self.gym.set_dof_state_tensor_indexed(
             self.sim,
             gymtorch.unwrap_tensor(self.dof_state),
@@ -1123,7 +1451,30 @@ class BaseTask:
                 self.foot_positions[:, :, 2]
                 - self.cfg.asset.foot_radius
                 - self._get_foot_heights()), 0, 1)
-        
+    def debug_print_contact_forces(self, env_id: int = 0, min_norm: float = 0.0):
+        """Print contact forces of one environment with body names for quick inspection."""
+        if not hasattr(self, "body_names"):
+            print("[debug_contact] body_names not set")
+            return
+        if env_id < 0 or env_id >= self.num_envs:
+            print(f"[debug_contact] invalid env_id {env_id}")
+            return
+
+        # contact_forces is [num_envs, num_bodies_total, 3]; robot bodies then load.
+        forces = self.contact_forces[env_id]
+        norms = torch.norm(forces, dim=-1)
+
+        names = list(self.body_names) + ["load"]
+        total_bodies = forces.shape[0]
+        if total_bodies != len(names):
+            print(f"[debug_contact] name count {len(names)} mismatches force slots {total_bodies}")
+        for idx in range(total_bodies):
+            n = norms[idx].item()
+            if n < min_norm:
+                continue
+            f = forces[idx].tolist()
+            name = names[idx] if idx < len(names) else f"body_{idx}"
+            print(f"[env {env_id}] body {idx} ({name}): force {f} | norm {n:.4f}")
     def post_physics_step(self):
         """check terminations, compute observations and rewards
         calls self._post_physics_step_callback() for common computations
@@ -1136,12 +1487,12 @@ class BaseTask:
         self.episode_length_buf += 1
 
         # prepare quantities
-        self.base_quat[:] = self.root_states[:, 3:7]
-        self.base_position = self.root_states[:, :3]
+        self.base_quat[:] = self.root_states[self.actor_indices, 3:7]   
+        self.base_position = self.root_states[self.actor_indices, :3]
         self.base_lin_vel = (self.base_position - self.last_base_position) / self.dt
         self.base_lin_vel[:] = quat_rotate_inverse(self.base_quat, self.base_lin_vel)
         self.base_ang_vel[:] = quat_rotate_inverse(
-            self.base_quat, self.root_states[:, 10:13]
+            self.base_quat, self.root_states[self.actor_indices, 10:13]
         )
         self.projected_gravity[:] = quat_rotate_inverse(
             self.base_quat, self.gravity_vec
@@ -1149,9 +1500,13 @@ class BaseTask:
         self.dof_acc = (self.last_dof_vel - self.dof_vel) / self.dt
         self.dof_pos_int += (self.dof_pos - self.raw_default_dof_pos) * self.dt
         self.power = torch.abs(self.torques * self.dof_vel)
-
         self.compute_foot_state()
-
+        # 生成/移除负载
+        # if self.learning_iteration >= self.load_enable_iter:
+        # self._maybe_spawn_loads()
+        # print(f"[BaseTask] learning_iteration={self.learning_iteration}")        
+        # load_on_body_mask = self.is_load_on_body()
+        # self._compute_mass_com(load_on_body_mask=load_on_body_mask)
         self._post_physics_step_callback()
 
         # compute observations, rewards, resets, ...
@@ -1164,9 +1519,9 @@ class BaseTask:
         self.last_actions[:, :, 1] = self.last_actions[:, :, 0]
         self.last_actions[:, :, 0] = self.actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
-        self.last_root_vel[:] = self.root_states[:, 7:13]
-        self.last_base_position[:] = self.base_position[:]
-        self.last_foot_positions[:] = self.foot_positions[:]
+        self.last_root_vel[:] = self.root_states[self.actor_indices, 7:13]  #错误？
+        self.last_base_position[:] = self.base_position[:]   
+        self.last_foot_positions[:] = self.foot_positions[:]  
         
     def _action_clip(self, actions):
         target_pos = torch.clip(
@@ -1205,24 +1560,26 @@ class BaseTask:
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
         # create some wrapper tensors for different slices
-        self.root_states = gymtorch.wrap_tensor(actor_root_state)
+        self.root_states = gymtorch.wrap_tensor(actor_root_state).view(-1, 13)
+        # self.root_states = gymtorch.wrap_tensor(actor_root_state)
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
         self.dof_pos = self.dof_state.view(self.num_envs, self.num_dof, 2)[
             ..., 0
         ]  # equal [:,:, 0]
         self.dof_vel = self.dof_state.view(self.num_envs, self.num_dof, 2)[..., 1]
         self.dof_acc = torch.zeros_like(self.dof_vel)
-        self.base_quat = self.root_states[:, 3:7]
-
+        self.base_quat = self.root_states[self.actor_indices, 3:7]
         rigid_body_state = self.gym.acquire_rigid_body_state_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
+        num_bodies_total = self.num_bodies + 1
+        self.num_bodies_total = num_bodies_total
         self.rigid_body_state = gymtorch.wrap_tensor(rigid_body_state).view(
-            self.num_envs, self.num_bodies, -1
-        )
+            self.num_envs, self.num_bodies_total, -1
+        )[:, :self.num_bodies, :] # Slice to keep only robot bodies
+            
+        #     self.num_envs, num_bodies_total, 13
+        # )[:, :self.num_bodies, :] # Slice to keep only robot bodies
         self.feet_state = self.rigid_body_state[:, self.feet_indices, :]
-        self.rigid_body_state = gymtorch.wrap_tensor(rigid_body_state).view(
-            self.num_envs, self.num_bodies, -1
-        )
         self.foot_positions = self.rigid_body_state.view(
             self.num_envs, self.num_bodies, 13
         )[:, self.feet_indices, 0:3]
@@ -1237,7 +1594,20 @@ class BaseTask:
         )  # shape: num_envs, num_bodies, xyz axis
 
         # initialize some data used later on
-        self.extras = {}
+        self.extras = {}  
+        # Load management buffers
+        # self.load_manager = {}
+        self.has_load = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.next_load_spawn_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.load_remove_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        # 统计：每个环境累计生成的负载次数
+        self.loads_spawned_count = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        
+        # Initialize next spawn time
+        if hasattr(self.cfg.domain_rand, "load_start_time_s"):
+             self.next_load_spawn_time[:] = self.cfg.domain_rand.load_start_time_s
         self.noise_scale_vec = self._get_noise_scale_vec(self.cfg)
         self.gravity_vec = to_torch(
             get_axis_params(-1.0, self.up_axis_idx), device=self.device
@@ -1297,7 +1667,7 @@ class BaseTask:
         )
         self.last_dof_pos = torch.zeros_like(self.dof_pos)
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
-        self.last_root_vel = torch.zeros_like(self.root_states[:, 7:13])
+        self.last_root_vel = torch.zeros_like(self.root_states[self.actor_indices, 7:13])
         self.dof_pos_int = torch.zeros_like(self.dof_pos)
         self.action_delay_idx = torch.zeros(
             self.num_envs,
@@ -1335,36 +1705,30 @@ class BaseTask:
             device=self.device,
             requires_grad=False,
         )  # TODO change this
-        self.command_ranges["lin_vel_x"] = torch.zeros(
-            self.num_envs,
-            2,
-            dtype=torch.float,
-            device=self.device,
-            requires_grad=False,
-        )
-        self.command_ranges["lin_vel_x"][:] = torch.tensor(
-            self.cfg.commands.ranges.lin_vel_x
-        )
-        self.command_ranges["lin_vel_y"] = torch.zeros(
-            self.num_envs,
-            2,
-            dtype=torch.float,
-            device=self.device,
-            requires_grad=False,
-        )
-        self.command_ranges["lin_vel_y"][:] = torch.tensor(
-            self.cfg.commands.ranges.lin_vel_y
-        )
-        self.command_ranges["ang_vel_yaw"] = torch.zeros(
-            self.num_envs,
-            2,
-            dtype=torch.float,
-            device=self.device,
-            requires_grad=False,
-        )
-        self.command_ranges["ang_vel_yaw"][:] = torch.tensor(
-            self.cfg.commands.ranges.ang_vel_yaw
-        )
+        # Expand scalar command ranges into per-env tensors for fast indexing
+        base_command_ranges = {
+            "lin_vel_x": torch.tensor(
+                self.cfg.commands.ranges.lin_vel_x, dtype=torch.float, device=self.device
+            ),
+            "lin_vel_y": torch.tensor(
+                self.cfg.commands.ranges.lin_vel_y, dtype=torch.float, device=self.device
+            ),
+            "ang_vel_yaw": torch.tensor(
+                self.cfg.commands.ranges.ang_vel_yaw, dtype=torch.float, device=self.device
+            ),
+        }
+        for key, base_range in base_command_ranges.items():
+            flat_range = base_range.view(-1)
+            if flat_range.numel() != 2:
+                raise ValueError(f"Command range {key} must have 2 values, got {flat_range.shape}")
+            self.command_ranges[key] = flat_range.unsqueeze(0).repeat(self.num_envs, 1)
+        if self.cfg.commands.heading_command:
+            self.command_ranges["heading"] = torch.tensor(
+                self.cfg.commands.ranges.heading,
+                dtype=torch.float,
+                device=self.device,
+                requires_grad=False,
+            )
         self.feet_air_time = torch.zeros(
             self.num_envs,
             self.feet_indices.shape[0],
@@ -1379,22 +1743,24 @@ class BaseTask:
             device=self.device,
             requires_grad=False,
         )
-        self.base_position = self.root_states[:, :3]
+        self.base_position = self.root_states[self.actor_indices, :3]
         self.last_base_position = self.base_position.clone()
         self.base_lin_vel = quat_rotate_inverse(
-            self.base_quat, self.root_states[:, 7:10]
+            self.base_quat, self.root_states[self.actor_indices, 7:10]
         )
         self.base_ang_vel = quat_rotate_inverse(
-            self.base_quat, self.root_states[:, 10:13]
+            self.base_quat, self.root_states[self.actor_indices, 10:13]
         )
         self.rigid_body_external_forces = torch.zeros(
             (self.num_envs, self.num_bodies, 3), device=self.device, requires_grad=False
+            # (self.num_envs, self.num_bodies_total, 3), device=self.device, requires_grad=False
         )
         self.rigid_body_external_torques = torch.zeros(
             (self.num_envs, self.num_bodies, 3), device=self.device, requires_grad=False
+            # (self.num_envs, self.num_bodies_total, 3), device=self.device, requires_grad=False
         )
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
-        self.base_height = torch.zeros_like(self.root_states[:, 2])
+        self.base_height = torch.zeros_like(self.root_states[self.actor_indices, 2])
         if self.cfg.terrain.measure_heights or self.cfg.terrain.critic_measure_heights:
             self.height_points = self._init_height_points()
         self.measured_heights = 0

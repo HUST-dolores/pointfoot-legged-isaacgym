@@ -103,6 +103,41 @@
         <parent link="base_Link"/>
         <child link="limx_imu"/>
     </joint>
+    <!-- 定义平板 Link -->
+    <link name="plate_link">
+   	<inertial>
+        <!-- 质量0.1kg -->
+        <mass value="0.1" />
+        <!-- 惯性矩阵，基于薄板公式近似计算 -->
+        <inertia ixx="0.0002083" ixy="0.0" ixz="0.0"
+                 iyy="0.0002083" iyz="0.0"
+                 izz="0.0004167" />
+    	</inertial>
+	<visual>
+	    <geometry>
+		<!-- 尺寸：0.5m x 0.5m x 0.005m -->
+		<box size="0.5 0.5 0.005"/>
+	    </geometry>
+	    <material name="blue"/>
+	</visual>
+	<collision>
+	    <geometry>
+		<box size="0.5 0.5 0.005"/>
+	    </geometry>
+	</collision>
+    </link>
+
+<!-- 定义固定关节，将平板连接到机器人基础连杆 -->
+<joint name="plate_fixed_joint" type="fixed">
+    <!-- 
+        xyz: 定义平板中心相对于base_Link坐标系的偏移量
+        例如，假设想让平板位于机器人上方10厘米处：xyz="0 0 0.1"
+        请根据您的实际需要调整此位置
+    -->
+    <origin xyz="0 0 0.02" rpy="0 0 0"/>
+    <parent link="base_Link"/>
+    <child link="plate_link"/>
+</joint>
     <!-- Imu link -->
     <link name="limx_imu">
         <inertial>

@@ -44,7 +44,7 @@ class MLP_Encoder(nn.Module):
         self,
         num_input_dim,
         num_output_dim,
-        hidden_dims=[256, 256],
+        hidden_dims=[256, 256], #之前我修改的是512256128 修改
         activation="elu",
         orthogonal_init=False,
         output_detach=False,

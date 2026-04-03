@@ -257,6 +257,24 @@ class OnPolicyRunner:
             / (locs["collection_time"] + locs["learn_time"])
         )
 
+       # 统计负载：当前激活数量 & 累计生成数量
+        active_loads_sum = 0
+        total_loads_spawned = 0
+        try:
+            if hasattr(self.env, "get_load_stats"):
+                st = self.env.get_load_stats()
+                active_loads_sum = int(st.get("active_loads_sum", 0))
+                total_loads_spawned = int(st.get("total_loads_spawned", 0))
+            elif hasattr(self.env, "has_load"):
+                # 回退：仅有当前激活数
+                hl = self.env.has_load
+                if isinstance(hl, torch.Tensor):
+                    active_loads_sum = int(hl.sum().item())
+        except Exception:
+            pass
+            
+            
+        # === TensorBoard ===
         self.writer.add_scalar(
             "Loss/value_function", locs["mean_value_loss"], locs["it"]
         )
@@ -272,6 +290,10 @@ class OnPolicyRunner:
             "Perf/collection time", locs["collection_time"], locs["it"]
         )
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
+        #         # 新增指标：负载统计
+        self.writer.add_scalar("Env/active_loads_sum", active_loads_sum, locs["it"])   #修改
+        self.writer.add_scalar("Env/total_loads_spawned", total_loads_spawned, locs["it"])
+            
         if len(locs["rewbuffer"]) > 0:
             self.writer.add_scalar(
                 "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
@@ -305,6 +327,9 @@ class OnPolicyRunner:
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                f"""{'Encoder loss:':>{pad}} {locs['mean_extra_loss']:.4f}\n"""    #修改
+                f"""{'Active loads (sum):':>{pad}} {active_loads_sum}\n"""
+                f"""{'Total loads spawned:':>{pad}} {total_loads_spawned}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.4f}\n"""
                 f"""{'Learning rate:':>{pad}} {self.alg.learning_rate:.4f}\n"""
                 f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
@@ -320,6 +345,9 @@ class OnPolicyRunner:
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                f"""{'Encoder loss:':>{pad}} {locs['mean_extra_loss']:.4f}\n""" 
+                f"""{'Active loads (sum):':>{pad}} {active_loads_sum}\n"""
+                f"""{'Total loads spawned:':>{pad}} {total_loads_spawned}\n"""       #修改
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
             )
             #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""

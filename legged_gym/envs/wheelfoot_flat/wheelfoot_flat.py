@@ -43,6 +43,8 @@ class BipedWF(BaseTask):
         self._init_buffers()
         self._prepare_reward_function()
         self.init_done = True
+        print(f"=== 实际机器人类型: 轮足机器人+板 ===")
+        print(f"===============================")
 
     def reset_idx(self, env_ids):
         if len(env_ids) == 0:
@@ -54,13 +56,13 @@ class BipedWF(BaseTask):
         if self.cfg.commands.curriculum:
             time_out_env_ids = self.time_out_buf.nonzero(as_tuple=False).flatten()
             self.update_command_curriculum(time_out_env_ids)
-
+        # self._reset_load_timers(env_ids)
         # reset robot states
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
         self._resample_commands(env_ids)
         # self._resample_gaits(env_ids)
-
+        # self._reset_load(env_ids)   #修改 这里需要加吗？
         # reset buffers
         self.last_actions[env_ids] = 0.0
         self.last_dof_pos[env_ids] = self.dof_pos[env_ids]
@@ -100,7 +102,26 @@ class BipedWF(BaseTask):
         # send timeout info to the algorithm
         if self.cfg.env.send_timeouts:
             self.extras["time_outs"] = self.time_out_buf | self.edge_reset_buf
+    # def _reset_load(self, env_ids):
 
+    #     goal_displacement = gymapi.Vec3(0, 0, 0.1)
+    #     goal_displacement_tensor = to_torch(
+    #         [goal_displacement.x, goal_displacement.y, goal_displacement.z], device=self.device)
+
+    #     self.load_indices = to_torch(self.load_indices, dtype=torch.long, device=self.device)
+    #     self.root_states[self.load_indices[env_ids], 0:3] = self.load_states[env_ids, 0:3]+ goal_displacement_tensor
+    #     self.root_states[self.load_indices[env_ids], 3:7] = self.load_states[env_ids, 3:7]
+    #     self.root_states[self.load_indices[env_ids], 7:13] = torch.zeros_like(self.root_states[self.load_indices[env_ids], 7:13])
+    #     # 旋转重置：单位四元数
+    #     load_indices = self.load_indices[env_ids].to(torch.int32)
+    #     self.gym.set_actor_root_state_tensor_indexed(self.sim,
+    #                                                      gymtorch.unwrap_tensor(self.root_states),
+    #                                                      gymtorch.unwrap_tensor(load_indices), len(load_indices))
+    #     print(f"self.root_states dtype: {self.root_states.dtype}, shape: {self.root_states.shape}")
+    #     print(f"self.load_indices dtype: {self.load_indices.dtype}, shape: {self.load_indices.shape}")
+    #     print(f"env_ids dtype: {env_ids.dtype}, shape: {env_ids.shape}")
+    #     print(f"self.load_states dtype: {self.load_states.dtype}, shape: {self.load_states.shape}")
+    #     print(f"goal_displacement_tensor dtype: {goal_displacement_tensor.dtype}, shape: {goal_displacement_tensor.shape}")
     def step(self, actions):
         self._action_clip(actions)
         # step physics and render each frame
@@ -191,7 +212,12 @@ class BipedWF(BaseTask):
             dim=-1,
         )
         critic_obs_buf = torch.cat((
-            self.base_lin_vel * self.obs_scales.lin_vel, self.obs_buf), dim=-1)
+            self.base_lin_vel * self.obs_scales.lin_vel,
+            # (self.base_mass - self.base_mass0).unsqueeze(-1) * self.obs_scales.mass_scale,     # Δmass
+            # (self.base_com - self.base_com0)[:, :3] * self.obs_scales.com_scale,            # Δcom(xy)
+            # self.base_inertia * self.obs_scales.inertia_scale,     ##比例
+            # priv_load_feat,
+            self.obs_buf), dim=-1)
         return obs_buf, critic_obs_buf
     
     def _post_physics_step_callback(self):
@@ -220,7 +246,7 @@ class BipedWF(BaseTask):
             self.measured_heights = self._get_heights()
 
         self.base_height = torch.mean(
-            self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1
+            self.root_states[self.actor_indices, 2].unsqueeze(1) - self.measured_heights, dim=1
         )
 
     def _resample_commands(self, env_ids):
@@ -437,5 +463,6 @@ class BipedWF(BaseTask):
     
     def _reward_base_height(self):
         # Penalize base height away from target
-        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        base_height = torch.mean(self.root_states[self.actor_indices, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        # base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
         return torch.abs(base_height - self.cfg.rewards.base_height_target)

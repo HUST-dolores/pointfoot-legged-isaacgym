@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from collections import defaultdict
 from multiprocessing import Process, Value
-
+import torch
 
 class Logger:
     def __init__(self, dt):
@@ -42,7 +42,14 @@ class Logger:
         self.num_episodes = 0
         self.plot_process = None
 
-    def log_state(self, key, value):
+    def log_state(self, key, value):        
+        if isinstance(value, torch.Tensor): 
+            value = value.detach().cpu() 
+            if value.numel() == 1: 
+                value = value.item() 
+            else: 
+                value = value.numpy() 
+
         self.state_log[key].append(value)
 
     def log_states(self, dict):
@@ -64,9 +71,11 @@ class Logger:
         self.plot_process.start()
 
     def _plot(self):
-        nb_rows = 3
-        nb_cols = 3
+        nb_rows = 4
+        nb_cols = 4
         fig, axs = plt.subplots(nb_rows, nb_cols)
+                # 计算要跳过的数据点数（前0.5秒）
+        skip_points = int(0.5 / self.dt)
         for key, value in self.state_log.items():
             time = np.linspace(0, len(value) * self.dt, len(value))
             break
@@ -90,21 +99,57 @@ class Logger:
         # plot base vel x
         a = axs[0, 0]
         if log["base_vel_x"]:
-            a.plot(time, log["base_vel_x"], label="measured")
+            bx = np.array(log["base_vel_x"])
+            if len(bx) > skip_points:
+                bx = bx[skip_points:]
+                t_bx = np.linspace(0.5, len(log["base_vel_x"]) * self.dt, len(bx))
+            else:
+                t_bx = time
+            a.plot(t_bx, bx, label="measured")
         if log["command_x"]:
-            a.plot(time, log["command_x"], label="commanded")
+            cx = np.array(log["command_x"])
+            if len(cx) > skip_points:
+                cx = cx[skip_points:]
+                t_cx = np.linspace(0.5, len(log["command_x"]) * self.dt, len(cx))
+            else:
+                t_cx = time
+            a.plot(t_cx, cx, label="commanded")
         if log["est_lin_vel_x"]:
-            a.plot(time, log["est_lin_vel_x"], label="est")
+            ex = np.array(log["est_lin_vel_x"])
+            if len(ex) > skip_points:
+                ex = ex[skip_points:]
+                t_ex = np.linspace(0.5, len(log["est_lin_vel_x"]) * self.dt, len(ex))
+            else:
+                t_ex = time
+            a.plot(t_ex, ex, label="est")
         a.set(xlabel="time [s]", ylabel="base lin vel [m/s]", title="Base velocity x")
         a.legend()
         # plot base vel y
         a = axs[0, 1]
         if log["base_vel_y"]:
-            a.plot(time, log["base_vel_y"], label="measured")
+            by = np.array(log["base_vel_y"])
+            if len(by) > skip_points:
+                by = by[skip_points:]
+                t_by = np.linspace(0.5, len(log["base_vel_y"]) * self.dt, len(by))
+            else:
+                t_by = time
+            a.plot(t_by, by, label="measured")
         if log["command_y"]:
-            a.plot(time, log["command_y"], label="commanded")
+            cy = np.array(log["command_y"])
+            if len(cy) > skip_points:
+                cy = cy[skip_points:]
+                t_cy = np.linspace(0.5, len(log["command_y"]) * self.dt, len(cy))
+            else:
+                t_cy = time
+            a.plot(t_cy, cy, label="commanded")
         if log["est_lin_vel_y"]:
-            a.plot(time, log["est_lin_vel_y"], label="est")
+            ey = np.array(log["est_lin_vel_y"])
+            if len(ey) > skip_points:
+                ey = ey[skip_points:]
+                t_ey = np.linspace(0.5, len(log["est_lin_vel_y"]) * self.dt, len(ey))
+            else:
+                t_ey = time
+            a.plot(t_ey, ey, label="est")
         a.set(xlabel="time [s]", ylabel="base lin vel [m/s]", title="Base velocity y")
         a.legend()
         # plot base vel yaw
@@ -127,12 +172,23 @@ class Logger:
         a = axs[2, 0]
         if log["contact_forces_z"]:
             forces = np.array(log["contact_forces_z"])
+            if len(forces) > skip_points:
+                # 跳过前0.5秒的数据
+                forces_skipped = forces[skip_points:]
+                # 生成对应的时间轴
+                time_skipped = np.linspace(0.5, len(forces) * self.dt, len(forces_skipped))
+                for i in range(forces_skipped.shape[1]):
+                    a.plot(time_skipped, forces_skipped[:, i], label=f"force {i}")
+            else:
+                # 如果数据不够长，使用全部数据
+                for i in range(forces.shape[1]):
+                    a.plot(time, forces[:, i], label=f"force {i}")
             for i in range(forces.shape[1]):
                 a.plot(time, forces[:, i], label=f"force {i}")
         a.set(xlabel="time [s]", ylabel="Forces z [N]", title="Vertical Contact forces")
         a.legend()
         # plot torque/vel curves
-        a = axs[2, 1]
+        a = axs[2, 3]
         # if log["dof_vel"] != [] and log["dof_torque"] != []:
         #     a.plot(log["dof_vel"], log["dof_torque"], "x", label="measured")
         # a.set(
@@ -140,15 +196,67 @@ class Logger:
         #     ylabel="Joint Torque [Nm]",
         #     title="Torque/velocity curves",
         # )
-        if log["power"]:
-            a.plot(time, log["power"])
-        a.set(xlabel="time [s]", ylabel="power [w]", title="Total Power")
+        if log["torque_knee_L"]:
+            a.plot(time, log["torque_knee_L"], label="torque_knee_L")
+        if log["torque_knee_R"]:
+            a.plot(time, log["torque_knee_R"], label="torque_knee_R")
+        a.set(xlabel="time [s]", ylabel="power [w]", title="torque_i_care")
         a.legend()
         # plot torques
         a = axs[2, 2]
         if log["dof_torque"] != []:
             a.plot(time, log["dof_torque"], label="measured")
         a.set(xlabel="time [s]", ylabel="Joint Torque [Nm]", title="Torque")
+        a.legend()
+        # plot mass     
+        a = axs[3, 3]
+        if log["mass"]:
+            a.plot(time, log["mass"], label="Actual")
+        if log["mass_est"]:
+            a.plot(time, log["mass_est"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="mass [kg]", title="mass")
+        a.legend()
+        
+        a = axs[3, 0]
+        if log["CoM_x"]:
+            a.plot(time, log["CoM_x"], label="Actual")
+        if log["CoM_est_x"]:
+            a.plot(time, log["CoM_est_x"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="CoM_x [m]", title="CoM_x")
+        a.legend()
+
+        a = axs[3, 1]
+        if log["CoM_y"]:
+            a.plot(time, log["CoM_y"], label="Actual")
+        if log["CoM_est_y"]:
+            a.plot(time, log["CoM_est_y"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="CoM_y [m]", title="CoM_y")
+        a.legend()
+        
+        a = axs[3, 2]
+        if log["CoM_z"]:
+            a.plot(time, log["CoM_z"], label="Actual")
+        if log["CoM_est_z"]:
+            a.plot(time, log["CoM_est_z"], label="Estimated")
+        a.set(xlabel="time [s]", ylabel="CoM_z [m]", title="CoM_z")
+        a.legend()
+        
+        a = axs[0, 3]
+        if log["extra_loss_vel"]:
+            a.plot(time, log["extra_loss_vel"], label="extra_loss_vel")
+        a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_vel")
+        a.legend()
+        
+        a = axs[1, 3]
+        if log["extra_loss_mass"]:
+            a.plot(time, log["extra_loss_mass"], label="extra_loss_mass")
+        a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_mass")
+        a.legend()
+        
+        a = axs[2, 1]
+        if log["extra_loss_com"]:
+            a.plot(time, log["extra_loss_com"], label="extra_loss_com")
+        a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_com")
         a.legend()
         plt.show()
 
