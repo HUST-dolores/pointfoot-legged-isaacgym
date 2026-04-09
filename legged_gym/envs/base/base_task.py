@@ -108,7 +108,7 @@ class BaseTask:
         )
         # 训练迭代计数由 runner 注入；负载默认在指定迭代后才启用
         self.learning_iteration = 0
-        self.load_enable_iter = int(getattr(self.cfg.domain_rand, "load_enable_iter", 0))
+        self.load_enable_iter = int(getattr(self.cfg.domain_rand, "load_enable_iter", 1000))
         self.time_out_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.bool
         )
@@ -124,11 +124,11 @@ class BaseTask:
         )
         
         # self.num_actors_per_env = 2 # Robot + Load
-        # self.load_offset_range = {
-        #     "x": (-0.17, 0.21),  # x 方向的偏移范围  稍微有些偏移，因为机器人前进时会有一个向前的速度
-        #     "y": (-0.19, 0.19),  # y 方向的偏移范围
-        #     "z": (0.10, 0.10),   # z 方向的偏移范围 平板在机体上方0.1m处 平板长宽0.5m，高度0.005米
-        # }   #000
+        self.load_offset_range = {
+            "x": (-0.17, 0.21),  # x 方向的偏移范围  稍微有些偏移，因为机器人前进时会有一个向前的速度
+            "y": (-0.19, 0.19),  # y 方向的偏移范围
+            "z": (0.10, 0.10),   # z 方向的偏移范围 平板在机体上方0.1m处 平板长宽0.5m，高度0.005米
+        }   #000
         
 
         # create envs, sim and viewer
@@ -152,136 +152,137 @@ class BaseTask:
                     
     #     # self.load_manager = {}  # Dictionary to manage loads dynamically
 
-    # def add_load(self, env_id, position, orientation):
-    #     """Dynamically add a load to the specified environment."""
-    #     # Update load state in the buffer
-    #     # print(f"self.root_states dtype: {self.root_states.dtype}, shape: {self.root_states.shape}")
-    #     # print(f"self.load_indices dtype: {self.load_indices.dtype}, shape: {self.load_indices.shape}")
-    #     # print(f"position dtype: {position.dtype}, shape: {position.shape}")
-    #             # Create load asset
+    def add_load(self, env_id, position, orientation):
+        """Dynamically add a load to the specified environment."""
+        # Update load state in the buffer
+        # print(f"self.root_states dtype: {self.root_states.dtype}, shape: {self.root_states.shape}")
+        # print(f"self.load_indices dtype: {self.load_indices.dtype}, shape: {self.load_indices.shape}")
+        # print(f"position dtype: {position.dtype}, shape: {position.shape}")
+                # Create load asset
                     
-    #     # Ensure tensors keep device/dtype without rebuilding from torch.tensor (avoids warning)
-    #     pos_t = torch.as_tensor(position, device=self.device, dtype=self.root_states.dtype)
-    #     ori_t = torch.as_tensor(orientation, device=self.device, dtype=self.root_states.dtype)
-    #     self.root_states[self.load_indices[env_id], 0:3] = pos_t
-    #     self.root_states[self.load_indices[env_id], 3:7] = ori_t
-    #     self.root_states[self.load_indices[env_id], 7:13] = torch.zeros_like(self.root_states[self.load_indices[env_id], 7:13]) # Reset velocities
+        # Ensure tensors keep device/dtype without rebuilding from torch.tensor (avoids warning)
+        pos_t = torch.as_tensor(position, device=self.device, dtype=self.root_states.dtype)
+        ori_t = torch.as_tensor(orientation, device=self.device, dtype=self.root_states.dtype)
+        self.root_states[self.load_indices[env_id], 0:3] = pos_t
+        self.root_states[self.load_indices[env_id], 3:7] = ori_t
+        self.root_states[self.load_indices[env_id], 7:13] = torch.zeros_like(self.root_states[self.load_indices[env_id], 7:13]) # Reset velocities
 
         
-    #     # Update simulation
-    #     load_indices = self.load_indices.to(torch.int32)
+        # Update simulation (single load actor)
+        load_indices = self.load_indices[env_id].to(torch.int32).view(1)
         
 
 
 
-    #     self.gym.set_actor_root_state_tensor_indexed(
-    #         self.sim,
-    #         gymtorch.unwrap_tensor(self.root_states),
-    #         gymtorch.unwrap_tensor(load_indices), len(load_indices)
-    #     )
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(load_indices), len(load_indices)
+        )
 
         
         
         
 
-    # def remove_load(self, env_id):
-    #     """Dynamically remove a load from the specified environment."""
-    #     # Move load far away
-    #     far_position = torch.tensor([0.0, 0.0, -100.0], 
-    #                             device=self.device, 
-    #                             dtype=self.root_states.dtype)
+    def remove_load(self, env_id):
+        """Dynamically remove a load from the specified environment."""
+        # Move load far away
+        far_position = torch.tensor([0.0, 0.0, -100.0], 
+                                device=self.device, 
+                                dtype=self.root_states.dtype)
 
-    #     self.root_states[self.load_indices, 0:3] = far_position
+        self.root_states[self.load_indices[env_id], 0:3] = far_position
+        self.root_states[self.load_indices[env_id], 7:13] = 0.0
 
         
-    #     # Update simulation
-    #     load_indices = self.load_indices.to(torch.int32)
-    #     self.gym.set_actor_root_state_tensor_indexed(
-    #         self.sim,
-    #         gymtorch.unwrap_tensor(self.root_states),
-    #         gymtorch.unwrap_tensor(load_indices), len(load_indices)
-    #     )
+        # Update simulation (single load actor)
+        load_indices = self.load_indices[env_id].to(torch.int32).view(1)
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(load_indices), len(load_indices)
+        )
 
-    # def _reset_load_timers(self, env_ids):
-    #     """Reset load timers/state on env reset so loads can spawn again."""
-    #     if not getattr(self.cfg.domain_rand, "add_random_load", False):
-    #         return
-    #     start_s = float(getattr(self.cfg.domain_rand, "load_start_time_s", 0.0))
-    #     self.has_load[env_ids] = False
-    #     self.load_remove_time[env_ids] = 0.0
-    #     self.next_load_spawn_time[env_ids] = start_s
-    #     # ensure any existing load actor is moved away
-    #     for env_id in env_ids.tolist():
-    #         self.remove_load(env_id)
+    def _reset_load_timers(self, env_ids):
+        """Reset load timers/state on env reset so loads can spawn again."""
+        if not getattr(self.cfg.domain_rand, "add_random_load", False):
+            return
+        start_s = float(getattr(self.cfg.domain_rand, "load_start_time_s", 0.0))
+        self.has_load[env_ids] = False
+        self.load_remove_time[env_ids] = 0.0
+        self.next_load_spawn_time[env_ids] = start_s
+        # ensure any existing load actor is moved away
+        for env_id in env_ids.tolist():
+            self.remove_load(env_id)
 
-    # def _maybe_spawn_loads(self):
-    #     """Spawn/remove loads based on episode time thresholds.
+    def _maybe_spawn_loads(self):
+        """Spawn/remove loads based on episode time thresholds.
 
-    #     Uses domain_rand: `load_start_time_s`, `load_duration_s`, `load_interval_s`.
-    #     Requires `self.cfg.domain_rand.add_random_load` to be True.
-    #     """
-    #     if not getattr(self.cfg.domain_rand, "add_random_load", False):
-    #         return
+        Uses domain_rand: `load_start_time_s`, `load_duration_s`, `load_interval_s`.
+        Requires `self.cfg.domain_rand.add_random_load` to be True.
+        """
+        if not getattr(self.cfg.domain_rand, "add_random_load", False):
+            return
 
-    #     t = self.episode_length_buf.float() * self.dt  # [N]
-    #     start_s = float(getattr(self.cfg.domain_rand, "load_start_time_s", 0.0))
-    #     dur_s = float(getattr(self.cfg.domain_rand, "load_duration_s", 0.0))
-    #     interval_s = float(getattr(self.cfg.domain_rand, "load_interval_s", 0.0))
+        t = self.episode_length_buf.float() * self.dt  # [N]
+        start_s = float(getattr(self.cfg.domain_rand, "load_start_time_s", 0.0))
+        dur_s = float(getattr(self.cfg.domain_rand, "load_duration_s", 0.0))
+        interval_s = float(getattr(self.cfg.domain_rand, "load_interval_s", 0.0))
 
-    #     # 初始化 next/stop 时间（首次）
-    #     init_mask = self.next_load_spawn_time == 0
-    #     if init_mask.any():
-    #         self.next_load_spawn_time[init_mask] = start_s
+        # 初始化 next/stop 时间（首次）
+        init_mask = self.next_load_spawn_time == 0
+        if init_mask.any():
+            self.next_load_spawn_time[init_mask] = start_s
 
-    #     # 到期移除当前负载
-    #     remove_mask = self.has_load & (t >= self.load_remove_time)
-    #     if remove_mask.any():
-    #         ids = remove_mask.nonzero(as_tuple=False).flatten().tolist()
-    #         for env_id in ids:
-    #             self.remove_load(env_id)
-    #             self.has_load[env_id] = False
+        # 到期移除当前负载
+        remove_mask = self.has_load & (t >= self.load_remove_time)
+        if remove_mask.any():
+            ids = remove_mask.nonzero(as_tuple=False).flatten().tolist()
+            for env_id in ids:
+                self.remove_load(env_id)
+                self.has_load[env_id] = False
 
-    #     # 触发生成新负载（仅当未携带负载且到达触发时间）
-    #     spawn_mask = (~self.has_load) & (t >= self.next_load_spawn_time)
-    #     if spawn_mask.any():
-    #         ids = spawn_mask.nonzero(as_tuple=False).flatten().tolist()
-    #         for env_id in ids:
-    #             # 在机体上方采样局部偏移
-    #             x_rng = self.load_offset_range["x"]
-    #             y_rng = self.load_offset_range["y"]
-    #             z_rng = self.load_offset_range["z"]
-    #             rx = torch.empty(1, device=self.device).uniform_(x_rng[0], x_rng[1]).item()
-    #             ry = torch.empty(1, device=self.device).uniform_(y_rng[0], y_rng[1]).item()
-    #             rz = torch.empty(1, device=self.device).uniform_(z_rng[0], z_rng[1]).item()
-    #             r_local = torch.tensor([rx, ry, rz], device=self.device)
+        # 触发生成新负载（仅当未携带负载且到达触发时间）
+        spawn_mask = (~self.has_load) & (t >= self.next_load_spawn_time)
+        if spawn_mask.any():
+            ids = spawn_mask.nonzero(as_tuple=False).flatten().tolist()
+            for env_id in ids:
+                # 在机体上方采样局部偏移
+                x_rng = self.load_offset_range["x"]
+                y_rng = self.load_offset_range["y"]
+                z_rng = self.load_offset_range["z"]
+                rx = torch.empty(1, device=self.device).uniform_(x_rng[0], x_rng[1]).item()
+                ry = torch.empty(1, device=self.device).uniform_(y_rng[0], y_rng[1]).item()
+                rz = torch.empty(1, device=self.device).uniform_(z_rng[0], z_rng[1]).item()
+                r_local = torch.tensor([rx, ry, rz], device=self.device)
 
-    #             base_pos = self.root_states[self.actor_indices[env_id], 0:3]
-    #             base_quat = self.root_states[self.actor_indices[env_id], 3:7]
-    #             # quat_rotate expects batched inputs; add batch dim then squeeze back
-    #             pos_world = quat_rotate(base_quat.unsqueeze(0), r_local.unsqueeze(0)).squeeze(0) + base_pos
-    #             orientation = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
+                base_pos = self.root_states[self.actor_indices[env_id], 0:3]
+                base_quat = self.root_states[self.actor_indices[env_id], 3:7]
+                # quat_rotate expects batched inputs; add batch dim then squeeze back
+                pos_world = quat_rotate(base_quat.unsqueeze(0), r_local.unsqueeze(0)).squeeze(0) + base_pos
+                orientation = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
 
-    #             self.add_load(env_id, pos_world, orientation)
-    #             self.has_load[env_id] = True
-    #             # 统计：累计生成次数 +1
-    #             self.loads_spawned_count[env_id] += 1
-    #             self.load_remove_time[env_id] = t[env_id] + dur_s
-    #             self.next_load_spawn_time[env_id] = t[env_id] + interval_s
+                self.add_load(env_id, pos_world, orientation)
+                self.has_load[env_id] = True
+                # 统计：累计生成次数 +1
+                self.loads_spawned_count[env_id] += 1
+                self.load_remove_time[env_id] = t[env_id] + dur_s
+                self.next_load_spawn_time[env_id] = t[env_id] + interval_s
 
-    # def get_load_stats(self):
-    #     """返回负载统计信息用于日志：
-    #     - active_loads_sum: 当前所有环境中激活负载总数
-    #     - total_loads_spawned: 累计生成负载总数（跨所有环境求和）
-    #     """
-    #     try:
-    #         active = int(self.has_load.sum().item())
-    #     except Exception:
-    #         active = 0
-    #     try:
-    #         total_spawned = int(self.loads_spawned_count.sum().item())
-    #     except Exception:
-    #         total_spawned = 0
-    #     return {"active_loads_sum": active, "total_loads_spawned": total_spawned}
+    def get_load_stats(self):
+        """返回负载统计信息用于日志：
+        - active_loads_sum: 当前所有环境中激活负载总数
+        - total_loads_spawned: 累计生成负载总数（跨所有环境求和）
+        """
+        try:
+            active = int(self.has_load.sum().item())
+        except Exception:
+            active = 0
+        try:
+            total_spawned = int(self.loads_spawned_count.sum().item())
+        except Exception:
+            total_spawned = 0
+        return {"active_loads_sum": active, "total_loads_spawned": total_spawned}
 
     def get_observations(self):
         return (
@@ -770,6 +771,10 @@ class BaseTask:
             self.base_com[:, 0] = props[0].com.x
             self.base_com[:, 1] = props[0].com.y
             self.base_com[:, 2] = props[0].com.z   #check 具体是哪个坐标系
+        # 始终初始化 base_mass0/base_com0，避免仅在 randomize_inertia=True 时才创建
+        if env_id == 0 and (not hasattr(self, "base_mass0") or not hasattr(self, "base_com0")):
+            self.base_mass0 = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+            self.base_com0 = torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float)
         if self.cfg.domain_rand.randomize_inertia:
             for i in range(len(props)):
                 low_bound, high_bound = self.cfg.domain_rand.randomize_inertia_range
@@ -1305,14 +1310,20 @@ class BaseTask:
         forces = self.contact_forces[env_ids]  # [N, num_bodies_total, 3]
         norms = torch.norm(forces, dim=-1)
 
-        load_norm = norms[:, 9]
-        robot_norms = norms[:, 0]
+        load_body_idx = self.num_bodies
+        if load_body_idx >= norms.shape[1]:
+            return torch.zeros_like(pos_inside, dtype=torch.bool)
 
-        rel_diff = robot_norms - load_norm
+        load_norm = norms[:, load_body_idx]
+        robot_norms = torch.max(norms[:, : self.num_bodies], dim=1).values
+
+        rel_diff = torch.abs(robot_norms - load_norm)
+        rel_scale = torch.clamp(torch.maximum(robot_norms, load_norm), min=1.0e-6)
+        rel_err = rel_diff / rel_scale
         force_match = (
             (robot_norms >= force_min)
             & (load_norm >= force_min)
-            & (rel_diff <= force_rel_tol)
+            & (rel_err <= force_rel_tol)
         )
 
         inside = pos_inside & force_match
@@ -1484,6 +1495,19 @@ class BaseTask:
         self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
 
+        # ---- Minimal diagnostics (3 asserts) ----
+        assert self.actor_indices.numel() == self.num_envs, (
+            f"[diag] actor_indices size mismatch: actor_indices={self.actor_indices.numel()}, "
+            f"num_envs={self.num_envs}"
+        )
+        assert torch.all((self.actor_indices >= 0) & (self.actor_indices < self.root_states.shape[0])), (
+            f"[diag] actor_indices out of root_states range: min={int(self.actor_indices.min().item())}, "
+            f"max={int(self.actor_indices.max().item())}, total_root_states={self.root_states.shape[0]}"
+        )
+        assert torch.unique(self.actor_indices).numel() == self.actor_indices.numel(), (
+            "[diag] actor_indices contains duplicate entries; robot-env mapping may be wrong"
+        )
+
         self.episode_length_buf += 1
 
         # prepare quantities
@@ -1502,11 +1526,10 @@ class BaseTask:
         self.power = torch.abs(self.torques * self.dof_vel)
         self.compute_foot_state()
         # 生成/移除负载
-        # if self.learning_iteration >= self.load_enable_iter:
-        # self._maybe_spawn_loads()
-        # print(f"[BaseTask] learning_iteration={self.learning_iteration}")        
-        # load_on_body_mask = self.is_load_on_body()
-        # self._compute_mass_com(load_on_body_mask=load_on_body_mask)
+        if self.learning_iteration >= self.load_enable_iter:
+            self._maybe_spawn_loads()
+            load_on_body_mask = self.is_load_on_body()
+            self._compute_mass_com(load_on_body_mask=load_on_body_mask)
         self._post_physics_step_callback()
 
         # compute observations, rewards, resets, ...
@@ -1514,6 +1537,31 @@ class BaseTask:
         self.compute_reward()
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
+        if env_ids.numel() > 0:
+            # Sync per-env cached base states after reset to avoid one-step velocity spikes
+            # caused by stale base_position/last_base_position.
+            reset_actor_ids = self.actor_indices[env_ids]
+            self.base_quat[env_ids] = self.root_states[reset_actor_ids, 3:7]
+            self.base_position[env_ids] = self.root_states[reset_actor_ids, :3]
+            self.base_lin_vel[env_ids] = quat_rotate_inverse(
+                self.base_quat[env_ids], self.root_states[reset_actor_ids, 7:10]
+            )
+            self.base_ang_vel[env_ids] = quat_rotate_inverse(
+                self.base_quat[env_ids], self.root_states[reset_actor_ids, 10:13]
+            )
+            self.projected_gravity[env_ids] = quat_rotate_inverse(
+                self.base_quat[env_ids], self.gravity_vec[env_ids]
+            )
+            self.last_base_position[env_ids] = self.base_position[env_ids]
+
+            reset_base_pos = self.root_states[self.actor_indices[env_ids], :3]
+            reset_jump = torch.norm(
+                reset_base_pos - self.last_base_position[env_ids], dim=1
+            )
+            assert torch.all(reset_jump < 1.0e-3), (
+                f"[diag] reset base_position not synchronized with last_base_position; "
+                f"max_jump={reset_jump.max().item():.6f}, num_bad={(reset_jump >= 1.0e-3).sum().item()}"
+            )
         self.compute_observations()  # in some cases a simulation step might be required to refresh some obs (for example body positions)
 
         self.last_actions[:, :, 1] = self.last_actions[:, :, 0]

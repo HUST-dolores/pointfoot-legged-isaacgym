@@ -199,9 +199,10 @@ class BipedCfgWF(BaseConfig):
         restitution_range = [0.0, 1.0]
         randomize_base_mass = True
         added_mass_range = [-0.1, 0.1]        
+        add_random_load = True
         add_load_range = [0.1, 3]  # [kg]这个mass是负载的mass，定义后不会改变。  000 
         randomize_base_com = True
-        load_enable_iter = 4000    #000 
+        load_enable_iter = 1000    #000 
         rand_com_vec = [0.03, 0.02, 0.03]
         # load_offset_range_xy = [0.13, 0.12]   #000
         randomize_inertia = True
@@ -285,7 +286,7 @@ class BipedCfgWF(BaseConfig):
 
     class normalization:
         class obs_scales:
-            lin_vel = 1.0  #修改 本来被我修改为了0.1 原版2.0
+            lin_vel = 2.0  #修改 本来被我修改为了0.1 原版2.0
             ang_vel = 0.25
             dof_pos = 1.0
             dof_vel = 0.05
@@ -385,7 +386,7 @@ class BipedCfgPPOWF(BaseConfig):
         policy_class_name = "ActorCritic"
         algorithm_class_name = "PPO"
         num_steps_per_env = 24  # per iteration
-        max_iterations = 32000  # number of policy updates
+        max_iterations = 16000  # number of policy updates
 
         # logging
         logger = "tensorboard"

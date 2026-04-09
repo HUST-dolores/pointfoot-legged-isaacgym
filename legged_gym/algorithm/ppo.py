@@ -312,31 +312,31 @@ class PPO:
 
                 if self.encoder.is_mlp_encoder:
                     extra_loss = (
-                        (encode_batch[:, 0:3] - critic_obs_batch[:, 0:3]).pow(2).mean()
+                        (encode_batch[:, 0:3] - critic_obs_batch[:, 0:7]).pow(2).mean()
                     )
-                    if num_updates_extra == 0:
-                        enc_slice = encode_batch[:, 0:3]
-                        crt_slice = critic_obs_batch[:, 0:3]
-                        print(
-                            "[extra_loss debug] encode_batch[:,0:3] shape=", enc_slice.shape,
-                            "min=", enc_slice.min().item(),
-                            "max=", enc_slice.max().item(),
-                            "mean=", enc_slice.mean().item(),
-                            "std=", enc_slice.std().item(),
-                        )
-                        print(
-                            "[extra_loss debug] critic_obs_batch[:,0:3] shape=", crt_slice.shape,
-                            "min=", crt_slice.min().item(),
-                            "max=", crt_slice.max().item(),
-                            "mean=", crt_slice.mean().item(),
-                            "std=", crt_slice.std().item(),
-                        )
-                        print(
-                            "[extra_loss debug] encode_batch[:,0:3] sample=", enc_slice[:5].detach().cpu(),
-                        )
-                        print(
-                            "[extra_loss debug] critic_obs_batch[:,0:3] sample=", crt_slice[:5].detach().cpu(),
-                        )
+                    # if num_updates_extra == 0:
+                    #     enc_slice = encode_batch[:, 0:3]
+                    #     crt_slice = critic_obs_batch[:, 0:3]
+                    #     print(
+                    #         "[extra_loss debug] encode_batch[:,0:3] shape=", enc_slice.shape,
+                    #         "min=", enc_slice.min().item(),
+                    #         "max=", enc_slice.max().item(),
+                    #         "mean=", enc_slice.mean().item(),
+                    #         "std=", enc_slice.std().item(),
+                    #     )
+                    #     print(
+                    #         "[extra_loss debug] critic_obs_batch[:,0:3] shape=", crt_slice.shape,
+                    #         "min=", crt_slice.min().item(),
+                    #         "max=", crt_slice.max().item(),
+                    #         "mean=", crt_slice.mean().item(),
+                    #         "std=", crt_slice.std().item(),
+                    #     )
+                    #     print(
+                    #         "[extra_loss debug] encode_batch[:,0:3] sample=", enc_slice[:5].detach().cpu(),
+                    #     )
+                    #     print(
+                    #         "[extra_loss debug] critic_obs_batch[:,0:3] sample=", crt_slice[:5].detach().cpu(),
+                    #     )
                     
                 else:
                     extra_loss = torch.zeros_like(value_loss)

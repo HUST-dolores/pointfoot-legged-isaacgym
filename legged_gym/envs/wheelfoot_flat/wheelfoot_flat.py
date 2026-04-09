@@ -56,7 +56,7 @@ class BipedWF(BaseTask):
         if self.cfg.commands.curriculum:
             time_out_env_ids = self.time_out_buf.nonzero(as_tuple=False).flatten()
             self.update_command_curriculum(time_out_env_ids)
-        # self._reset_load_timers(env_ids)
+        self._reset_load_timers(env_ids)
         # reset robot states
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
@@ -66,7 +66,7 @@ class BipedWF(BaseTask):
         # reset buffers
         self.last_actions[env_ids] = 0.0
         self.last_dof_pos[env_ids] = self.dof_pos[env_ids]
-        self.last_base_position[env_ids] = self.base_position[env_ids]
+        self.last_base_position[env_ids] = self.root_states[self.actor_indices[env_ids], :3]
         self.last_foot_positions[env_ids] = self.foot_positions[env_ids]
         self.last_dof_vel[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
@@ -213,8 +213,8 @@ class BipedWF(BaseTask):
         )
         critic_obs_buf = torch.cat((
             self.base_lin_vel * self.obs_scales.lin_vel,
-            # (self.base_mass - self.base_mass0).unsqueeze(-1) * self.obs_scales.mass_scale,     # Δmass
-            # (self.base_com - self.base_com0)[:, :3] * self.obs_scales.com_scale,            # Δcom(xy)
+            (self.base_mass - self.base_mass0).unsqueeze(-1) * self.obs_scales.mass_scale,     # Δmass
+            (self.base_com - self.base_com0)[:, :3] * self.obs_scales.com_scale,            # Δcom(xy)
             # self.base_inertia * self.obs_scales.inertia_scale,     ##比例
             # priv_load_feat,
             self.obs_buf), dim=-1)
