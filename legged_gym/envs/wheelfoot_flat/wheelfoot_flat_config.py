@@ -213,6 +213,9 @@ class BipedCfgWF(BaseConfig):
         load_duration_s = 3.0       # 负载持续时间（秒）    000
         load_interval_s = 5.0       # 两次负载添加之间的时间间隔（秒）
         load_contact_grace_s = 0.2  # 负载生成后忽略接触终止的宽限时间（秒）
+        # 负载判定滞回（降低 on/off 抖动）
+        load_on_body_on_steps = 2
+        load_on_body_off_steps = 3
         rand_force = False
         force_resampling_time_s = 15
         max_force = 50.0
@@ -381,6 +384,14 @@ class BipedCfgPPOWF(BaseConfig):
         est_learning_rate = 1.0e-3
         ts_learning_rate = 1.0e-4
         critic_take_latent = True
+        # Encoder extra loss weighting
+        extra_loss_vel_w = 1.0
+        extra_loss_mass_w = 2.0
+        extra_loss_com_w = 2.0
+        # 当样本检测到负载在体时，对mass/com监督加权
+        extra_loss_load_boost = 4.0
+        extra_loss_mass_eps = 1.0e-3
+        extra_loss_com_eps = 1.0e-3
 
     class runner:
         encoder_class_name = "MLP_Encoder"

@@ -87,6 +87,20 @@ class BipedWF(BaseTask):
                 torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
             )
             self.episode_sums[key][env_ids] = 0.0
+        # 负载标签覆盖率/一致性统计（用于诊断extra_loss监督有效样本）
+        if hasattr(self, "has_load"):
+            has_load_sub = self.has_load[env_ids]
+            self.extras["episode"]["load_has_ratio"] = has_load_sub.float().mean()
+
+            if hasattr(self, "load_on_body_last"):
+                on_body_sub = self.load_on_body_last[env_ids]
+                self.extras["episode"]["load_on_body_ratio"] = on_body_sub.float().mean()
+                denom = has_load_sub.float().sum().clamp_min(1.0)
+                self.extras["episode"]["load_on_body_given_has"] = (
+                    (on_body_sub & has_load_sub).float().sum() / denom
+                )
+            if hasattr(self, "load_hysteresis_agree_last"):
+                self.extras["episode"]["load_hysteresis_agree"] = self.load_hysteresis_agree_last
         # log additional curriculum info
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["group_terrain_level"] = torch.mean(

@@ -64,6 +64,12 @@ class PPO:
         critic_take_latent=False,
         early_stop=False,
         anneal_lr=False,
+        extra_loss_vel_w=1.0,
+        extra_loss_mass_w=1.0,
+        extra_loss_com_w=1.0,
+        extra_loss_load_boost=3.0,
+        extra_loss_mass_eps=1.0e-3,
+        extra_loss_com_eps=1.0e-3,
         device="cpu",
     ):
         self.device = device
@@ -103,6 +109,12 @@ class PPO:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        self.extra_loss_vel_w = float(extra_loss_vel_w)
+        self.extra_loss_mass_w = float(extra_loss_mass_w)
+        self.extra_loss_com_w = float(extra_loss_com_w)
+        self.extra_loss_load_boost = float(extra_loss_load_boost)
+        self.extra_loss_mass_eps = float(extra_loss_mass_eps)
+        self.extra_loss_com_eps = float(extra_loss_com_eps)
 
     def init_storage(
         self,
@@ -311,8 +323,34 @@ class PPO:
                     encode_batch = self.encoder.get_encoder_out()
 
                 if self.encoder.is_mlp_encoder:
+                    # 监督目标切片：速度(0:3), Δmass(3), Δcom(4:7)
+                    vel_target = critic_obs_batch[:, 0:3]
+                    mass_target = critic_obs_batch[:, 3:4]
+                    com_target = critic_obs_batch[:, 4:7]
+
+                    vel_pred = encode_batch[:, 0:3]
+                    mass_pred = encode_batch[:, 3:4]
+                    com_pred = encode_batch[:, 4:7]
+
+                    # 通过目标幅值估计“当前样本是否有负载在机体上”
+                    load_present = (
+                        (mass_target.abs() > self.extra_loss_mass_eps)
+                        | (com_target.norm(dim=1, keepdim=True) > self.extra_loss_com_eps)
+                    )
+                    load_weight = torch.where(
+                        load_present,
+                        torch.full_like(mass_target, self.extra_loss_load_boost),
+                        torch.ones_like(mass_target),
+                    )
+
+                    vel_loss = (vel_pred - vel_target).pow(2).mean()
+                    mass_loss = ((mass_pred - mass_target).pow(2) * load_weight).mean()
+                    com_loss = ((com_pred - com_target).pow(2) * load_weight).mean()
+
                     extra_loss = (
-                        (encode_batch[:, 0:7] - critic_obs_batch[:, 0:7]).pow(2).mean()
+                        self.extra_loss_vel_w * vel_loss
+                        + self.extra_loss_mass_w * mass_loss
+                        + self.extra_loss_com_w * com_loss
                     )
                     # if num_updates_extra == 0:
                     #     enc_slice = encode_batch[:, 0:3]
@@ -350,7 +388,7 @@ class PPO:
 
         mean_value_loss /= num_updates
         if num_updates_extra > 0:
-            mean_extra_loss /= num_updates
+            mean_extra_loss /= num_updates_extra
         mean_surrogate_loss /= num_updates
         mean_kl /= num_updates
         self.storage.clear()

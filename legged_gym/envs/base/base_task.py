@@ -239,6 +239,12 @@ class BaseTask:
         self.next_load_spawn_time[env_ids] = start_s
         if hasattr(self, "load_contact_grace_counter"):
             self.load_contact_grace_counter[env_ids] = 0
+        if hasattr(self, "load_on_body_state"):
+            self.load_on_body_state[env_ids] = False
+            self.load_on_body_on_counter[env_ids] = 0
+            self.load_on_body_off_counter[env_ids] = 0
+            self.load_on_body_raw_last[env_ids] = False
+            self.load_on_body_last[env_ids] = False
 
     def _maybe_spawn_loads(self):
         """Spawn/remove loads based on episode time thresholds.
@@ -265,6 +271,10 @@ class BaseTask:
             ids = remove_mask.nonzero(as_tuple=False).flatten()
             self.remove_load(ids)
             self.has_load[ids] = False
+            if hasattr(self, "load_on_body_state"):
+                self.load_on_body_state[ids] = False
+                self.load_on_body_on_counter[ids] = 0
+                self.load_on_body_off_counter[ids] = 0
 
         # 触发生成新负载（仅当未携带负载且到达触发时间）
         spawn_mask = (~self.has_load) & (t >= self.next_load_spawn_time)
@@ -1302,6 +1312,47 @@ class BaseTask:
 
         self.base_mass[env_ids] = m_eff
         self.base_com[env_ids] = com_eff
+
+    def _apply_load_on_body_hysteresis(self, env_ids, raw_on_body_mask):
+        """Apply on/off hysteresis to reduce load contact label jitter."""
+        if not hasattr(self, "load_on_body_state"):
+            return raw_on_body_mask
+
+        env_ids_t = self._to_env_ids_tensor(env_ids)
+        if env_ids_t.numel() == 0:
+            return raw_on_body_mask
+
+        # 无负载时强制关闭并清零计数
+        has_load_sub = self.has_load[env_ids_t]
+        raw_on_body_mask = raw_on_body_mask & has_load_sub
+
+        on_cnt = self.load_on_body_on_counter[env_ids_t]
+        off_cnt = self.load_on_body_off_counter[env_ids_t]
+
+        on_cnt = torch.where(raw_on_body_mask, on_cnt + 1, torch.zeros_like(on_cnt))
+        off_cnt = torch.where(~raw_on_body_mask, off_cnt + 1, torch.zeros_like(off_cnt))
+
+        state = self.load_on_body_state[env_ids_t]
+        state = torch.where(
+            (~state) & (on_cnt >= self.load_on_body_on_steps),
+            torch.ones_like(state),
+            state,
+        )
+        state = torch.where(
+            state & (off_cnt >= self.load_on_body_off_steps),
+            torch.zeros_like(state),
+            state,
+        )
+
+        # 无负载时保持关闭
+        state = state & has_load_sub
+        on_cnt = torch.where(has_load_sub, on_cnt, torch.zeros_like(on_cnt))
+        off_cnt = torch.where(has_load_sub, off_cnt, torch.zeros_like(off_cnt))
+
+        self.load_on_body_state[env_ids_t] = state
+        self.load_on_body_on_counter[env_ids_t] = on_cnt
+        self.load_on_body_off_counter[env_ids_t] = off_cnt
+        return state
     
     def is_load_on_body(
         self,
@@ -1312,6 +1363,7 @@ class BaseTask:
         margin=0.05,
         force_min=1.0,
         force_rel_tol=0.5,
+        apply_hysteresis=True,
     ):
         """判定负载是否位于机体顶部且与机体存在相当接触力。
 
@@ -1361,8 +1413,11 @@ class BaseTask:
             & (rel_err <= force_rel_tol)
         )
 
-        inside = pos_inside & force_match
-        return inside
+        inside_raw = pos_inside & force_match
+
+        if apply_hysteresis:
+            return self._apply_load_on_body_hysteresis(env_ids, inside_raw)
+        return inside_raw
         
     def compute_observations(self):
         """Computes observations"""
@@ -1572,20 +1627,49 @@ class BaseTask:
         self.dof_pos_int += (self.dof_pos - self.raw_default_dof_pos) * self.dt
         self.power = torch.abs(self.torques * self.dof_vel)
         self.compute_foot_state()
+        # 默认值：负载判定全False，避免未启用分支下局部变量未定义
+        load_on_body_mask_raw = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        load_on_body_mask = torch.zeros_like(load_on_body_mask_raw)
         # 生成/移除负载
         # if self.learning_iteration >= self.load_enable_iter:
         #     self._maybe_spawn_loads()
-        #     load_on_body_mask = self.is_load_on_body()
-        #     self._compute_mass_com(load_on_body_mask=load_on_body_mask)    #train
+        #     load_on_body_mask_raw = self.is_load_on_body(apply_hysteresis=False)
+        #     load_on_body_mask = self.is_load_on_body(apply_hysteresis=True)        #train
+        # 始终更新一次质量/质心：未启用时回到无负载状态，启用时使用平滑掩码
+       
         self._maybe_spawn_loads()
-        load_on_body_mask = self.is_load_on_body()
-        self._compute_mass_com(load_on_body_mask=load_on_body_mask)     #play
+        load_on_body_mask_raw = self.is_load_on_body(apply_hysteresis=False)
+        load_on_body_mask = self.is_load_on_body(apply_hysteresis=True)           #play
+        
+        
+        self._compute_mass_com(load_on_body_mask=load_on_body_mask)     
             
             
         self._post_physics_step_callback()
 
         # compute observations, rewards, resets, ...
         self.check_termination()
+        # 记录负载识别统计：覆盖率与平滑前后一致性
+        self.load_on_body_raw_last[:] = load_on_body_mask_raw
+        self.load_on_body_last[:] = load_on_body_mask
+        self.load_has_load_ratio_last = self.has_load.float().mean()
+        self.load_on_body_ratio_last = load_on_body_mask.float().mean()
+        has_load_count = self.has_load.float().sum().clamp_min(1.0)
+        self.load_on_body_given_has_load_last = (
+            (load_on_body_mask & self.has_load).float().sum() / has_load_count
+        )
+        self.load_hysteresis_agree_last = (
+            (load_on_body_mask == load_on_body_mask_raw).float().mean()
+        )
+        if self.load_debug and (self.debug_step_counter % 50 == 0):
+            print(
+                f"[load-mask] has={self.load_has_load_ratio_last.item():.3f} "
+                f"on={self.load_on_body_ratio_last.item():.3f} "
+                f"on|has={self.load_on_body_given_has_load_last.item():.3f} "
+                f"agree(raw,smooth)={self.load_hysteresis_agree_last.item():.3f}"
+            )
         # if self.load_debug and (self.debug_step_counter % 50 == 0):
         #     reset_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         #     active_load_ids = self.has_load.nonzero(as_tuple=False).flatten()
@@ -1718,6 +1802,21 @@ class BaseTask:
         self.has_load = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.next_load_spawn_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.load_remove_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.load_on_body_on_steps = int(getattr(self.cfg.domain_rand, "load_on_body_on_steps", 2))
+        self.load_on_body_off_steps = int(getattr(self.cfg.domain_rand, "load_on_body_off_steps", 3))
+        self.load_on_body_state = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.load_on_body_on_counter = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.load_on_body_off_counter = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.load_on_body_raw_last = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.load_on_body_last = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.load_has_load_ratio_last = torch.tensor(0.0, device=self.device)
+        self.load_on_body_ratio_last = torch.tensor(0.0, device=self.device)
+        self.load_on_body_given_has_load_last = torch.tensor(0.0, device=self.device)
+        self.load_hysteresis_agree_last = torch.tensor(1.0, device=self.device)
         self.load_contact_grace_steps = int(np.ceil(self.load_contact_grace_s / self.dt))
         self.load_contact_grace_counter = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device

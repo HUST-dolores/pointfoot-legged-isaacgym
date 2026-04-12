@@ -234,16 +234,16 @@ def play(args):
                     }
                 )
                 if (i % 50) == 0:
-                    obs_vec = obs[robot_index].detach().cpu().tolist()
-                    cmd_vec = env.commands[robot_index].detach().cpu().tolist()
+                    # obs_vec = obs[robot_index].detach().cpu().tolist()
+                    # cmd_vec = env.commands[robot_index].detach().cpu().tolist()
                     print(
                         f"[PLAY] t={i * env.dt:.2f}s "
                         f"extra_loss_vel={extra_loss_vel:.6f} "
                         f"extra_loss_mass={extra_loss_mass:.6f} "
                         f"extra_loss_com={extra_loss_com:.6f}"
                     )
-                    print(f"[PLAY] obs[{robot_index}]={obs_vec}")
-                    print(f"[PLAY] commands[{robot_index}]={cmd_vec}")
+                    # print(f"[PLAY] obs[{robot_index}]={obs_vec}")
+                    # print(f"[PLAY] commands[{robot_index}]={cmd_vec}")
             logger.log_states(
                     {
                         "est_lin_vel_x": est[robot_index, 0].item()
