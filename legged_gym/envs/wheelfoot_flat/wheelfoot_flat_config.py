@@ -32,9 +32,9 @@ from legged_gym.envs.base.base_config import BaseConfig
 
 class BipedCfgWF(BaseConfig):
     class env:
-        num_envs = 2048
+        num_envs = 3072
         num_observations = 30 + 6 - 2 - 4 - 2  # +6 means wheel obs,-2 means sin&cos clock, -4 means gait para nums -2 means wheels pos
-        num_critic_observations = 3 + num_observations
+        num_critic_observations = 7 + num_observations
         num_height_samples = 117
         num_actions = 8
         env_spacing = 3.0  # not used with heightfields/trimeshes
@@ -198,9 +198,9 @@ class BipedCfgWF(BaseConfig):
         randomize_restitution = True
         restitution_range = [0.0, 1.0]
         randomize_base_mass = True
-        added_mass_range = [-0.1, 0.1]        
+        added_mass_range = [-0.1, 0.1]         #
         add_random_load = True
-        add_load_range = [0.1, 3]  # [kg]这个mass是负载的mass，定义后不会改变。  000 
+        add_load_range = [2, 4]  # [kg]这个mass是负载的mass，定义后不会改变。  000 
         randomize_base_com = True
         load_enable_iter = 1000    #000 
         rand_com_vec = [0.03, 0.02, 0.03]
@@ -210,8 +210,9 @@ class BipedCfgWF(BaseConfig):
         push_robots = False
         push_interval_s = 7
         load_start_time_s = 0.5     # 机器人开始添加负载的时间（秒）
-        load_duration_s = 2.0       # 负载持续时间（秒）    000
-        load_interval_s = 4.0       # 两次负载添加之间的时间间隔（秒）
+        load_duration_s = 3.0       # 负载持续时间（秒）    000
+        load_interval_s = 5.0       # 两次负载添加之间的时间间隔（秒）
+        load_contact_grace_s = 0.2  # 负载生成后忽略接触终止的宽限时间（秒）
         rand_force = False
         force_resampling_time_s = 15
         max_force = 50.0
@@ -349,7 +350,7 @@ class BipedCfgPPOWF(BaseConfig):
     class MLP_Encoder:
         output_detach = True
         num_input_dim = BipedCfgWF.env.num_observations * BipedCfgWF.env.obs_history_length
-        num_output_dim = 3
+        num_output_dim = 7
         hidden_dims = [256, 128]  #曾经被我修改为[256,256, 128]
         activation = "elu"
         orthogonal_init = False

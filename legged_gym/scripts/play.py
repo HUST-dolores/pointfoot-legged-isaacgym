@@ -51,7 +51,7 @@ def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 30
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 10)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 2)
 
     env_cfg.terrain.num_rows = 10
     env_cfg.terrain.num_cols = 20
@@ -70,6 +70,7 @@ def play(args):
     env_cfg.domain_rand.randomize_motor_torque = False
     env_cfg.domain_rand.randomize_default_dof_pos = False
     env_cfg.domain_rand.randomize_action_delay = False
+    env_cfg.domain_rand.load_debug = True
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -120,7 +121,7 @@ def play(args):
     logger = Logger(env.dt)
     robot_index = 0  # which robot is used for logging
     joint_index = 1  # which joint is used for logging
-    stop_state_log = 200  # number of steps before plotting states
+    stop_state_log = 500  # number of steps before plotting states
     stop_rew_log = (
         env.max_episode_length + 1
     )  # number of steps before print average episode rewards
@@ -160,6 +161,19 @@ def play(args):
             # env.set_camera(camera_position, target_position)
 
         if i < stop_state_log:
+            # 实时计算“真实质量”：基础质量 + (负载在机体上时才加负载质量)
+            load_on_body = False
+            if hasattr(env, "is_load_on_body"):
+                load_on_body_mask = env.is_load_on_body(torch.tensor([robot_index], device=env.device, dtype=torch.long))
+                load_on_body = bool(load_on_body_mask[0].item())
+                if hasattr(env, "has_load"):
+                    load_on_body = load_on_body and bool(env.has_load[robot_index].item())
+
+            if hasattr(env, "base_mass0") and hasattr(env, "load_mass"):
+                current_true_mass = float(env.base_mass0[robot_index].item()) + (float(env.load_mass) if load_on_body else 0.0)
+            else:
+                current_true_mass = float(env.base_mass[robot_index].item())
+
             logger.log_states(
                 {
                     "dof_pos_target": actions[robot_index, joint_index].item() * action_scale,
@@ -185,10 +199,11 @@ def play(args):
                     "torque_hip_R": env.torques[robot_index, 5].item(),
                     "torque_knee_R": env.torques[robot_index, 6].item(),
                     "torque_wheel_R": env.torques[robot_index, 7].item(),
-                    "mass": env.base_mass[robot_index].item(),
+                    "mass": current_true_mass,
                     "CoM_x": env.base_com[robot_index, 0].item(),
                     "CoM_y": env.base_com[robot_index, 1].item(),
                     "CoM_z": env.base_com[robot_index, 2].item(),
+                    "load_on_body": float(load_on_body),
                     # "inertia_xx": env.base_inertia[robot_index, 0].item(),
                     # "inertia_yy": env.base_inertia[robot_index, 1].item(),
                     # "inertia_zz": env.base_inertia[robot_index, 2].item(),   
@@ -201,34 +216,34 @@ def play(args):
                 }
             )
             # print(torch.sum(env.power[robot_index, :]).item())
-            # if est != None:                # 计算并记录 extra_loss 分量（速度 / 质量 / 质心）
-            #     extra_loss_vel = (
-            #         (est[:, 0:3] - critic_obs[:, 0:3]).pow(2).mean().item()
-            #     )
-            #     extra_loss_mass = (
-            #         (est[:, 3] - critic_obs[:, 3]).pow(2).mean().item()
-            #     )
-            #     extra_loss_com = (
-            #         (est[:, 4:7] - critic_obs[:, 4:7]).pow(2).mean().item()
-            #     )
-            #     logger.log_states(
-            #         {
-            #             "extra_loss_vel": extra_loss_vel,
-            #             "extra_loss_mass": extra_loss_mass,
-            #             "extra_loss_com": extra_loss_com,
-            #         }
-            #     )
-            #     if (i % 50) == 0:
-            #         obs_vec = obs[robot_index].detach().cpu().tolist()
-            #         cmd_vec = env.commands[robot_index].detach().cpu().tolist()
-            #         print(
-            #             f"[PLAY] t={i * env.dt:.2f}s "
-            #             f"extra_loss_vel={extra_loss_vel:.6f} "
-            #             f"extra_loss_mass={extra_loss_mass:.6f} "
-            #             f"extra_loss_com={extra_loss_com:.6f}"
-            #         )
-            #         print(f"[PLAY] obs[{robot_index}]={obs_vec}")
-            #         print(f"[PLAY] commands[{robot_index}]={cmd_vec}")
+            if est != None:                # 计算并记录 extra_loss 分量（速度 / 质量 / 质心）
+                extra_loss_vel = (
+                    (est[:, 0:3] - critic_obs[:, 0:3]).pow(2).mean().item()
+                )
+                extra_loss_mass = (
+                    (est[:, 3] - critic_obs[:, 3]).pow(2).mean().item()
+                )
+                extra_loss_com = (
+                    (est[:, 4:7] - critic_obs[:, 4:7]).pow(2).mean().item()
+                )
+                logger.log_states(
+                    {
+                        "extra_loss_vel": extra_loss_vel,
+                        "extra_loss_mass": extra_loss_mass,
+                        "extra_loss_com": extra_loss_com,
+                    }
+                )
+                if (i % 50) == 0:
+                    obs_vec = obs[robot_index].detach().cpu().tolist()
+                    cmd_vec = env.commands[robot_index].detach().cpu().tolist()
+                    print(
+                        f"[PLAY] t={i * env.dt:.2f}s "
+                        f"extra_loss_vel={extra_loss_vel:.6f} "
+                        f"extra_loss_mass={extra_loss_mass:.6f} "
+                        f"extra_loss_com={extra_loss_com:.6f}"
+                    )
+                    print(f"[PLAY] obs[{robot_index}]={obs_vec}")
+                    print(f"[PLAY] commands[{robot_index}]={cmd_vec}")
             logger.log_states(
                     {
                         "est_lin_vel_x": est[robot_index, 0].item()
@@ -237,14 +252,14 @@ def play(args):
                         / env.cfg.normalization.obs_scales.lin_vel,
                         "est_lin_vel_z": est[robot_index, 2].item()
                         / env.cfg.normalization.obs_scales.lin_vel,                        
-                        # "mass_est": est[robot_index, 3].item()
-                #         / env.cfg.normalization.obs_scales.mass_scale + float(env.base_mass0[robot_index].item()),
-                #         "CoM_est_x": est[robot_index, 4].item()
-                #         / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 0].item()),
-                #         "CoM_est_y": est[robot_index, 5].item()
-                #         / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 1].item()),
-                #         "CoM_est_z": est[robot_index, 6].item()
-                #         / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 2].item()),
+                        "mass_est": est[robot_index, 3].item()
+                        / env.cfg.normalization.obs_scales.mass_scale + float(env.base_mass0[robot_index].item()),
+                        "CoM_est_x": est[robot_index, 4].item()
+                        / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 0].item()),
+                        "CoM_est_y": est[robot_index, 5].item()
+                        / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 1].item()),
+                        "CoM_est_z": est[robot_index, 6].item()
+                        / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 2].item()),
                     }
                 )
         elif i == stop_state_log:

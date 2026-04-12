@@ -312,7 +312,7 @@ class PPO:
 
                 if self.encoder.is_mlp_encoder:
                     extra_loss = (
-                        (encode_batch[:, 0:3] - critic_obs_batch[:, 0:7]).pow(2).mean()
+                        (encode_batch[:, 0:7] - critic_obs_batch[:, 0:7]).pow(2).mean()
                     )
                     # if num_updates_extra == 0:
                     #     enc_slice = encode_batch[:, 0:3]

@@ -109,6 +109,11 @@ class BaseTask:
         # 训练迭代计数由 runner 注入；负载默认在指定迭代后才启用
         self.learning_iteration = 0
         self.load_enable_iter = int(getattr(self.cfg.domain_rand, "load_enable_iter", 1000))
+        # 负载生成后的接触宽限时间（秒）：避免刚生成时瞬时冲击被误判为跌倒终止
+        self.load_contact_grace_s = float(
+            getattr(self.cfg.domain_rand, "load_contact_grace_s", 0.0)
+        )
+        self.load_debug = bool(getattr(self.cfg.domain_rand, "load_debug", False))
         self.time_out_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.bool
         )
@@ -152,32 +157,49 @@ class BaseTask:
                     
     #     # self.load_manager = {}  # Dictionary to manage loads dynamically
 
+    def _to_env_ids_tensor(self, env_ids):
+        """Normalize env_ids to a 1D torch.long tensor on current device."""
+        if isinstance(env_ids, int):
+            return torch.tensor([env_ids], device=self.device, dtype=torch.long)
+        if isinstance(env_ids, list):
+            return torch.tensor(env_ids, device=self.device, dtype=torch.long)
+        env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+        return env_ids_t.view(-1)
+
     def add_load(self, env_id, position, orientation):
-        """Dynamically add a load to the specified environment."""
-        # Update load state in the buffer
-        # print(f"self.root_states dtype: {self.root_states.dtype}, shape: {self.root_states.shape}")
-        # print(f"self.load_indices dtype: {self.load_indices.dtype}, shape: {self.load_indices.shape}")
-        # print(f"position dtype: {position.dtype}, shape: {position.shape}")
-                # Create load asset
-                    
-        # Ensure tensors keep device/dtype without rebuilding from torch.tensor (avoids warning)
+        """Dynamically add load(s) to one or multiple environments."""
+        env_ids = self._to_env_ids_tensor(env_id)
+        if env_ids.numel() == 0:
+            return
+
+        load_actor_ids = self.load_indices[env_ids]
+        n = env_ids.numel()
+
+        # position: [3] or [N,3]
         pos_t = torch.as_tensor(position, device=self.device, dtype=self.root_states.dtype)
+        if pos_t.ndim == 1:
+            pos_t = pos_t.view(1, 3).repeat(n, 1)
+        else:
+            pos_t = pos_t.view(n, 3)
+
+        # orientation: [4] or [N,4]
         ori_t = torch.as_tensor(orientation, device=self.device, dtype=self.root_states.dtype)
-        self.root_states[self.load_indices[env_id], 0:3] = pos_t
-        self.root_states[self.load_indices[env_id], 3:7] = ori_t
-        self.root_states[self.load_indices[env_id], 7:13] = torch.zeros_like(self.root_states[self.load_indices[env_id], 7:13]) # Reset velocities
+        if ori_t.ndim == 1:
+            ori_t = ori_t.view(1, 4).repeat(n, 1)
+        else:
+            ori_t = ori_t.view(n, 4)
 
-        
-        # Update simulation (single load actor)
-        load_indices = self.load_indices[env_id].to(torch.int32).view(1)
-        
+        self.root_states[load_actor_ids, 0:3] = pos_t
+        self.root_states[load_actor_ids, 3:7] = ori_t
+        self.root_states[load_actor_ids, 7:13] = 0.0
 
-
-
+        # Update simulation (batched load actors)
+        load_indices = load_actor_ids.to(torch.int32).view(-1)
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim,
             gymtorch.unwrap_tensor(self.root_states),
-            gymtorch.unwrap_tensor(load_indices), len(load_indices)
+            gymtorch.unwrap_tensor(load_indices),
+            len(load_indices),
         )
 
         
@@ -185,22 +207,26 @@ class BaseTask:
         
 
     def remove_load(self, env_id):
-        """Dynamically remove a load from the specified environment."""
+        """Dynamically remove load(s) from one or multiple environments."""
+        env_ids = self._to_env_ids_tensor(env_id)
+        if env_ids.numel() == 0:
+            return
+
         # Move load far away
-        far_position = torch.tensor([0.0, 0.0, -100.0], 
-                                device=self.device, 
-                                dtype=self.root_states.dtype)
+        far_position = torch.tensor(
+            [0.0, 0.0, -100.0], device=self.device, dtype=self.root_states.dtype
+        )
+        load_actor_ids = self.load_indices[env_ids]
+        self.root_states[load_actor_ids, 0:3] = far_position.view(1, 3)
+        self.root_states[load_actor_ids, 7:13] = 0.0
 
-        self.root_states[self.load_indices[env_id], 0:3] = far_position
-        self.root_states[self.load_indices[env_id], 7:13] = 0.0
-
-        
-        # Update simulation (single load actor)
-        load_indices = self.load_indices[env_id].to(torch.int32).view(1)
+        # Update simulation (batched load actors)
+        load_indices = load_actor_ids.to(torch.int32).view(-1)
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim,
             gymtorch.unwrap_tensor(self.root_states),
-            gymtorch.unwrap_tensor(load_indices), len(load_indices)
+            gymtorch.unwrap_tensor(load_indices),
+            len(load_indices),
         )
 
     def _reset_load_timers(self, env_ids):
@@ -211,9 +237,8 @@ class BaseTask:
         self.has_load[env_ids] = False
         self.load_remove_time[env_ids] = 0.0
         self.next_load_spawn_time[env_ids] = start_s
-        # ensure any existing load actor is moved away
-        for env_id in env_ids.tolist():
-            self.remove_load(env_id)
+        if hasattr(self, "load_contact_grace_counter"):
+            self.load_contact_grace_counter[env_ids] = 0
 
     def _maybe_spawn_loads(self):
         """Spawn/remove loads based on episode time thresholds.
@@ -237,37 +262,41 @@ class BaseTask:
         # 到期移除当前负载
         remove_mask = self.has_load & (t >= self.load_remove_time)
         if remove_mask.any():
-            ids = remove_mask.nonzero(as_tuple=False).flatten().tolist()
-            for env_id in ids:
-                self.remove_load(env_id)
-                self.has_load[env_id] = False
+            ids = remove_mask.nonzero(as_tuple=False).flatten()
+            self.remove_load(ids)
+            self.has_load[ids] = False
 
         # 触发生成新负载（仅当未携带负载且到达触发时间）
         spawn_mask = (~self.has_load) & (t >= self.next_load_spawn_time)
         if spawn_mask.any():
-            ids = spawn_mask.nonzero(as_tuple=False).flatten().tolist()
-            for env_id in ids:
-                # 在机体上方采样局部偏移
-                x_rng = self.load_offset_range["x"]
-                y_rng = self.load_offset_range["y"]
-                z_rng = self.load_offset_range["z"]
-                rx = torch.empty(1, device=self.device).uniform_(x_rng[0], x_rng[1]).item()
-                ry = torch.empty(1, device=self.device).uniform_(y_rng[0], y_rng[1]).item()
-                rz = torch.empty(1, device=self.device).uniform_(z_rng[0], z_rng[1]).item()
-                r_local = torch.tensor([rx, ry, rz], device=self.device)
+            ids = spawn_mask.nonzero(as_tuple=False).flatten()
+            n = ids.numel()
 
-                base_pos = self.root_states[self.actor_indices[env_id], 0:3]
-                base_quat = self.root_states[self.actor_indices[env_id], 3:7]
-                # quat_rotate expects batched inputs; add batch dim then squeeze back
-                pos_world = quat_rotate(base_quat.unsqueeze(0), r_local.unsqueeze(0)).squeeze(0) + base_pos
-                orientation = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
+            # 在机体上方采样局部偏移（按环境批量采样）
+            x_rng = self.load_offset_range["x"]
+            y_rng = self.load_offset_range["y"]
+            z_rng = self.load_offset_range["z"]
+            rx = torch.empty(n, device=self.device).uniform_(x_rng[0], x_rng[1])
+            ry = torch.empty(n, device=self.device).uniform_(y_rng[0], y_rng[1])
+            rz = torch.empty(n, device=self.device).uniform_(z_rng[0], z_rng[1])
+            r_local = torch.stack((rx, ry, rz), dim=-1)
 
-                self.add_load(env_id, pos_world, orientation)
-                self.has_load[env_id] = True
-                # 统计：累计生成次数 +1
-                self.loads_spawned_count[env_id] += 1
-                self.load_remove_time[env_id] = t[env_id] + dur_s
-                self.next_load_spawn_time[env_id] = t[env_id] + interval_s
+            base_pos = self.root_states[self.actor_indices[ids], 0:3]
+            base_quat = self.root_states[self.actor_indices[ids], 3:7]
+            pos_world = quat_rotate(base_quat, r_local) + base_pos
+            orientation = torch.tensor(
+                [0.0, 0.0, 0.0, 1.0], device=self.device, dtype=self.root_states.dtype
+            ).view(1, 4).repeat(n, 1)
+
+            self.add_load(ids, pos_world, orientation)
+            self.has_load[ids] = True
+            # 统计：累计生成次数 +1
+            self.loads_spawned_count[ids] += 1
+            self.load_remove_time[ids] = t[ids] + dur_s
+            self.next_load_spawn_time[ids] = t[ids] + interval_s
+            # 生成后短暂接触宽限，避免瞬时冲击造成误终止
+            if hasattr(self, "load_contact_grace_counter"):
+                self.load_contact_grace_counter[ids] = self.load_contact_grace_steps
 
     def get_load_stats(self):
         """返回负载统计信息用于日志：
@@ -388,13 +417,18 @@ class BaseTask:
         
     def check_termination(self):
         """Check if environments need to be reset"""
-        fail_buf = torch.any(
+        contact_fail_buf = torch.any(
             torch.norm(
                 self.contact_forces[:, self.termination_contact_indices, :], dim=-1
             )
             > 10.0,
             dim=1,
         )
+        # 负载生成后的短时间内忽略接触触发终止，避免“刚生成就重置”
+        if hasattr(self, "load_contact_grace_counter"):
+            contact_fail_buf &= self.load_contact_grace_counter <= 0
+
+        fail_buf = contact_fail_buf
         fail_buf |= self.projected_gravity[:, 2] > -0.1
         self.fail_buf += fail_buf
         self.time_out_buf = (
@@ -1315,7 +1349,8 @@ class BaseTask:
             return torch.zeros_like(pos_inside, dtype=torch.bool)
 
         load_norm = norms[:, load_body_idx]
-        robot_norms = torch.max(norms[:, : self.num_bodies], dim=1).values
+        # 机体接触力使用固定 base 刚体（索引 0）
+        robot_norms = norms[:, 0]
 
         rel_diff = torch.abs(robot_norms - load_norm)
         rel_scale = torch.clamp(torch.maximum(robot_norms, load_norm), min=1.0e-6)
@@ -1507,6 +1542,18 @@ class BaseTask:
         assert torch.unique(self.actor_indices).numel() == self.actor_indices.numel(), (
             "[diag] actor_indices contains duplicate entries; robot-env mapping may be wrong"
         )
+        if hasattr(self, "load_indices") and isinstance(self.load_indices, torch.Tensor) and self.load_indices.numel() > 0:
+            assert self.load_indices.numel() == self.num_envs, (
+                f"[diag] load_indices size mismatch: load_indices={self.load_indices.numel()}, "
+                f"num_envs={self.num_envs}"
+            )
+            assert torch.all((self.load_indices >= 0) & (self.load_indices < self.root_states.shape[0])), (
+                f"[diag] load_indices out of root_states range: min={int(self.load_indices.min().item())}, "
+                f"max={int(self.load_indices.max().item())}, total_root_states={self.root_states.shape[0]}"
+            )
+            assert torch.unique(self.load_indices).numel() == self.load_indices.numel(), (
+                "[diag] load_indices contains duplicate entries; load-env mapping may be wrong"
+            )
 
         self.episode_length_buf += 1
 
@@ -1526,14 +1573,32 @@ class BaseTask:
         self.power = torch.abs(self.torques * self.dof_vel)
         self.compute_foot_state()
         # 生成/移除负载
-        if self.learning_iteration >= self.load_enable_iter:
-            self._maybe_spawn_loads()
-            load_on_body_mask = self.is_load_on_body()
-            self._compute_mass_com(load_on_body_mask=load_on_body_mask)
+        # if self.learning_iteration >= self.load_enable_iter:
+        #     self._maybe_spawn_loads()
+        #     load_on_body_mask = self.is_load_on_body()
+        #     self._compute_mass_com(load_on_body_mask=load_on_body_mask)    #train
+        self._maybe_spawn_loads()
+        load_on_body_mask = self.is_load_on_body()
+        self._compute_mass_com(load_on_body_mask=load_on_body_mask)     #play
+            
+            
         self._post_physics_step_callback()
 
         # compute observations, rewards, resets, ...
         self.check_termination()
+        # if self.load_debug and (self.debug_step_counter % 50 == 0):
+        #     reset_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        #     active_load_ids = self.has_load.nonzero(as_tuple=False).flatten()
+        #     print(
+        #         f"[load-debug] step={int(self.debug_step_counter)} "
+        #         f"active_loads={int(self.has_load.sum().item())}/{self.num_envs} "
+        #         f"resets={int(reset_ids.numel())} "
+        #         f"spawned_total={int(self.loads_spawned_count.sum().item())}"
+        #     )
+        #     if reset_ids.numel() > 0:
+        #         print(f"[load-debug] reset env ids: {reset_ids[:10].tolist()}")
+        #     if active_load_ids.numel() > 0:
+        #         print(f"[load-debug] active load env ids: {active_load_ids[:10].tolist()}")
         self.compute_reward()
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids)
@@ -1570,6 +1635,11 @@ class BaseTask:
         self.last_root_vel[:] = self.root_states[self.actor_indices, 7:13]  #错误？
         self.last_base_position[:] = self.base_position[:]   
         self.last_foot_positions[:] = self.foot_positions[:]  
+        if hasattr(self, "load_contact_grace_counter"):
+            self.load_contact_grace_counter = torch.clamp(
+                self.load_contact_grace_counter - 1, min=0
+            )
+        self.debug_step_counter += 1
         
     def _action_clip(self, actions):
         target_pos = torch.clip(
@@ -1648,6 +1718,11 @@ class BaseTask:
         self.has_load = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.next_load_spawn_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.load_remove_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.load_contact_grace_steps = int(np.ceil(self.load_contact_grace_s / self.dt))
+        self.load_contact_grace_counter = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self.debug_step_counter = 0
         # 统计：每个环境累计生成的负载次数
         self.loads_spawned_count = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device

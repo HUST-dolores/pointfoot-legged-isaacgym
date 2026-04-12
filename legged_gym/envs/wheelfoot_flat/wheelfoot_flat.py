@@ -62,7 +62,7 @@ class BipedWF(BaseTask):
         self._reset_root_states(env_ids)
         self._resample_commands(env_ids)
         # self._resample_gaits(env_ids)
-        # self._reset_load(env_ids)   #修改 这里需要加吗？
+        self.remove_load(env_ids)
         # reset buffers
         self.last_actions[env_ids] = 0.0
         self.last_dof_pos[env_ids] = self.dof_pos[env_ids]
