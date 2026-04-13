@@ -389,9 +389,13 @@ class BipedCfgPPOWF(BaseConfig):
         extra_loss_mass_w = 2.0
         extra_loss_com_w = 2.0
         # 当样本检测到负载在体时，对mass/com监督加权
-        extra_loss_load_boost = 4.0
+        extra_loss_load_boost = 6.0
         extra_loss_mass_eps = 1.0e-3
         extra_loss_com_eps = 1.0e-3
+        # 额外监督回归形式："mse"(原方案) | "smooth_l1"/"huber"
+        extra_loss_regression = "huber"
+        # SmoothL1/Huber 的 beta(delta)
+        extra_loss_huber_delta = 1.0e-2
 
     class runner:
         encoder_class_name = "MLP_Encoder"

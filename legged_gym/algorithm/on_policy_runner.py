@@ -215,6 +215,7 @@ class OnPolicyRunner:
                 mean_extra_loss,
                 mean_surrogate_loss,
                 mean_kl,
+                extra_metrics,
             ) = self.alg.update()
             stop = time.time()
             learn_time = stop - start
@@ -281,6 +282,10 @@ class OnPolicyRunner:
             "Loss/value_function", locs["mean_value_loss"], locs["it"]
         )
         self.writer.add_scalar("Loss/encoder", locs["mean_extra_loss"], locs["it"])
+        if "extra_metrics" in locs and locs["extra_metrics"] is not None:
+            self.writer.add_scalar("Metric/vel_mse", locs["extra_metrics"]["vel_mse"], locs["it"])
+            self.writer.add_scalar("Metric/mass_mse", locs["extra_metrics"]["mass_mse"], locs["it"])
+            self.writer.add_scalar("Metric/com_mse", locs["extra_metrics"]["com_mse"], locs["it"])
         self.writer.add_scalar(
             "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
         )

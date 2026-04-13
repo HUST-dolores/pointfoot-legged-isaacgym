@@ -30,6 +30,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from .mlp_encoder import MLP_Encoder
@@ -70,6 +71,8 @@ class PPO:
         extra_loss_load_boost=3.0,
         extra_loss_mass_eps=1.0e-3,
         extra_loss_com_eps=1.0e-3,
+        extra_loss_regression="mse",
+        extra_loss_huber_delta=1.0e-2,
         device="cpu",
     ):
         self.device = device
@@ -115,6 +118,29 @@ class PPO:
         self.extra_loss_load_boost = float(extra_loss_load_boost)
         self.extra_loss_mass_eps = float(extra_loss_mass_eps)
         self.extra_loss_com_eps = float(extra_loss_com_eps)
+        self.extra_loss_regression = str(extra_loss_regression).lower()
+        if self.extra_loss_regression not in ["mse", "smooth_l1", "huber"]:
+            raise ValueError(
+                f"Unsupported extra_loss_regression={extra_loss_regression}, "
+                "expected one of ['mse', 'smooth_l1', 'huber']"
+            )
+        self.extra_loss_huber_delta = float(extra_loss_huber_delta)
+
+    def _elementwise_regression_loss(self, pred, target):
+        """Element-wise regression loss for extra supervision.
+
+        Supports:
+        - mse: (pred-target)^2
+        - smooth_l1 / huber: torch SmoothL1 with configurable beta(delta)
+        """
+        if self.extra_loss_regression == "mse":
+            return (pred - target).pow(2)
+        return F.smooth_l1_loss(
+            pred,
+            target,
+            reduction="none",
+            beta=self.extra_loss_huber_delta,
+        )
 
     def init_storage(
         self,
@@ -309,6 +335,10 @@ class PPO:
 
         num_updates_extra = 0
         mean_extra_loss = 0
+        mean_eval_mass_mse = 0.0
+        mean_eval_com_mse = 0.0
+        mean_eval_vel_mse = 0.0
+        
         if self.extra_optimizer is not None:
             generator = self.storage.encoder_mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs
@@ -343,15 +373,46 @@ class PPO:
                         torch.ones_like(mass_target),
                     )
 
-                    vel_loss = (vel_pred - vel_target).pow(2).mean()
-                    mass_loss = ((mass_pred - mass_target).pow(2) * load_weight).mean()
-                    com_loss = ((com_pred - com_target).pow(2) * load_weight).mean()
+                    vel_loss = self._elementwise_regression_loss(vel_pred, vel_target).mean()
+                    mass_loss = (
+                        self._elementwise_regression_loss(mass_pred, mass_target)
+                        * load_weight
+                    ).mean()
+                    com_loss = (
+                        self._elementwise_regression_loss(com_pred, com_target)
+                        * load_weight
+                    ).mean()
 
                     extra_loss = (
                         self.extra_loss_vel_w * vel_loss
                         + self.extra_loss_mass_w * mass_loss
                         + self.extra_loss_com_w * com_loss
                     )
+                    
+                    # -------------------------------------------------------------
+                    # 计算并记录供 TensorBoard 观察的【无加权的纯均方误差】（类似 play.py 的统计）
+                    # 仅在实际存在负载时，计算 mass 和 com 的纯预测误差，反映真实物理收敛水平。
+                    # -------------------------------------------------------------
+                    with torch.no_grad():
+                        vel_mse = (vel_pred - vel_target).pow(2).mean().item()
+                        
+                        # load_present 形状类似 (batch_size, 1)
+                        is_load_on = load_present.squeeze()
+                        
+                        if is_load_on.any():
+                            # 只统计真正带负载时刻的 mass 和 com 纯误差
+                            mass_mse = (mass_pred[is_load_on] - mass_target[is_load_on]).pow(2).mean().item()
+                            com_mse  = (com_pred[is_load_on] - com_target[is_load_on]).pow(2).mean().item()
+                        else:
+                            # 当前 batch 内如果完全没有负载（比如前 1000 iter），记为0或者最近的值
+                            mass_mse = 0.0
+                            com_mse  = 0.0
+                        
+                        mean_eval_vel_mse += vel_mse
+                        mean_eval_mass_mse += mass_mse
+                        mean_eval_com_mse += com_mse
+                    # -------------------------------------------------------------
+                    
                     # if num_updates_extra == 0:
                     #     enc_slice = encode_batch[:, 0:3]
                     #     crt_slice = critic_obs_batch[:, 0:3]
@@ -389,8 +450,17 @@ class PPO:
         mean_value_loss /= num_updates
         if num_updates_extra > 0:
             mean_extra_loss /= num_updates_extra
+            mean_eval_vel_mse /= max(1, num_updates_extra)
+            mean_eval_mass_mse /= max(1, num_updates_extra)
+            mean_eval_com_mse /= max(1, num_updates_extra)
         mean_surrogate_loss /= num_updates
         mean_kl /= num_updates
         self.storage.clear()
+        
+        extra_metrics = {
+            "vel_mse": mean_eval_vel_mse,
+            "mass_mse": mean_eval_mass_mse,
+            "com_mse": mean_eval_com_mse,
+        }
 
-        return (mean_value_loss, mean_extra_loss, mean_surrogate_loss, mean_kl)
+        return (mean_value_loss, mean_extra_loss, mean_surrogate_loss, mean_kl, extra_metrics)

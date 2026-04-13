@@ -244,19 +244,19 @@ class Logger:
         a = axs[0, 3]
         if log["extra_loss_vel"]:
             a.plot(time, log["extra_loss_vel"], label="extra_loss_vel")
-        a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_vel")
+        a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_vel_ave")
         a.legend()
         
         a = axs[1, 3]
         if log["extra_loss_mass"]:
             a.plot(time, log["extra_loss_mass"], label="extra_loss_mass")
-        a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_mass")
+        a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_mass_ave")
         a.legend()
         
         a = axs[2, 1]
         if log["extra_loss_com"]:
             a.plot(time, log["extra_loss_com"], label="extra_loss_com")
-        a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_com")
+        a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_com_ave")
         a.legend()
         plt.show()
 
