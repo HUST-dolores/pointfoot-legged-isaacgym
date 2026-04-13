@@ -51,7 +51,7 @@ def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 30
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 20)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 50)
 
     env_cfg.terrain.num_rows = 10
     env_cfg.terrain.num_cols = 20
@@ -77,7 +77,7 @@ def play(args):
     # get robot_type
     robot_type = os.getenv("ROBOT_TYPE")
     commands_val = to_torch([0.5, 0.0, 0, 0], device=env.device) if robot_type.startswith("PF")\
-        else to_torch([0.5, 0.0, 0.0], device=env.device) if robot_type == "WF_TRON1A" else to_torch([1.5, 0.0, 0.0, 0.0, 0.0])
+        else to_torch([0.0, 0.0, 0.0], device=env.device) if robot_type == "WF_TRON1A" else to_torch([1.5, 0.0, 0.0, 0.0, 0.0])
     action_scale = env.cfg.control.action_scale_pos if robot_type == "WF_TRON1A"\
         else env.cfg.control.action_scale
     obs, obs_history, commands, critic_obs = env.get_observations()
@@ -119,7 +119,7 @@ def play(args):
         )
 
     logger = Logger(env.dt)
-    robot_index = 0  # which robot is used for logging
+    robot_index = 3  # which robot is used for logging
     joint_index = 1  # which joint is used for logging
     stop_state_log = 500  # number of steps before plotting states
     stop_rew_log = (
