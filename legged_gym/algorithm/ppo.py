@@ -442,6 +442,7 @@ class PPO:
 
                 self.extra_optimizer.zero_grad()
                 extra_loss.backward()
+                nn.utils.clip_grad_norm_(self.encoder.parameters(), self.max_grad_norm)
                 self.extra_optimizer.step()
 
                 num_updates_extra += 1
