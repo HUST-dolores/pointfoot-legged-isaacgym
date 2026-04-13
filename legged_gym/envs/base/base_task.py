@@ -302,8 +302,23 @@ class BaseTask:
             self.has_load[ids] = True
             # 统计：累计生成次数 +1
             self.loads_spawned_count[ids] += 1
-            self.load_remove_time[ids] = t[ids] + dur_s
-            self.next_load_spawn_time[ids] = t[ids] + interval_s
+            
+            # 支持随机的 duration 和 interval
+            if hasattr(self.cfg.domain_rand, "load_duration_range_s"):
+                r_dur = self.cfg.domain_rand.load_duration_range_s
+                dur_s_tensor = torch.empty(n, device=self.device).uniform_(r_dur[0], r_dur[1])
+            else:
+                dur_s_tensor = dur_s
+            
+            if hasattr(self.cfg.domain_rand, "load_interval_range_s"):
+                r_int = self.cfg.domain_rand.load_interval_range_s
+                interval_s_tensor = torch.empty(n, device=self.device).uniform_(r_int[0], r_int[1])
+            else:
+                interval_s_tensor = interval_s
+
+            self.load_remove_time[ids] = t[ids] + dur_s_tensor
+            self.next_load_spawn_time[ids] = t[ids] + interval_s_tensor
+            
             # 生成后短暂接触宽限，避免瞬时冲击造成误终止
             if hasattr(self, "load_contact_grace_counter"):
                 self.load_contact_grace_counter[ids] = self.load_contact_grace_steps

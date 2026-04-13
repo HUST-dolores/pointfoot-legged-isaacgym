@@ -39,7 +39,7 @@ class BipedCfgWF(BaseConfig):
         num_actions = 8
         env_spacing = 3.0  # not used with heightfields/trimeshes
         send_timeouts = True  # send time out information to the algorithm
-        episode_length_s = 20  # episode length in seconds
+        episode_length_s = 40  # episode length in seconds
         obs_history_length = 10  # number of observations stacked together
         dof_vel_use_pos_diff = True
         fail_to_terminal_time_s = 0.5
@@ -210,8 +210,8 @@ class BipedCfgWF(BaseConfig):
         push_robots = False
         push_interval_s = 7
         load_start_time_s = 0.5     # 机器人开始添加负载的时间（秒）
-        load_duration_s = 3.0       # 负载持续时间（秒）    000
-        load_interval_s = 5.0       # 两次负载添加之间的时间间隔（秒）
+        load_duration_range_s = [2.0, 4.0] # 负载持续时间随机范围
+        load_interval_range_s = [5.0, 6.0] # 两次负载之间的时间随机范围
         load_contact_grace_s = 0.2  # 负载生成后忽略接触终止的宽限时间（秒）
         # 负载判定滞回（降低 on/off 抖动）
         load_on_body_on_steps = 2
