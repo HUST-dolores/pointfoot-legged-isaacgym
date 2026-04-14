@@ -1678,13 +1678,13 @@ class BaseTask:
         self.load_hysteresis_agree_last = (
             (load_on_body_mask == load_on_body_mask_raw).float().mean()
         )
-        if self.load_debug and (self.debug_step_counter % 50 == 0):
-            print(
-                f"[load-mask] has={self.load_has_load_ratio_last.item():.3f} "
-                f"on={self.load_on_body_ratio_last.item():.3f} "
-                f"on|has={self.load_on_body_given_has_load_last.item():.3f} "
-                f"agree(raw,smooth)={self.load_hysteresis_agree_last.item():.3f}"
-            )
+        # if self.load_debug and (self.debug_step_counter % 50 == 0):
+        #     print(
+        #         f"[load-mask] has={self.load_has_load_ratio_last.item():.3f} "
+        #         f"on={self.load_on_body_ratio_last.item():.3f} "
+        #         f"on|has={self.load_on_body_given_has_load_last.item():.3f} "
+        #         f"agree(raw,smooth)={self.load_hysteresis_agree_last.item():.3f}"
+        #     )
         # if self.load_debug and (self.debug_step_counter % 50 == 0):
         #     reset_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         #     active_load_ids = self.has_load.nonzero(as_tuple=False).flatten()

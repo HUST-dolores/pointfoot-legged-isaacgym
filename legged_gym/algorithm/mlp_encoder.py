@@ -33,7 +33,133 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
-from torch.nn.modules import rnn
+
+
+def get_activation(act_name):
+    if act_name == "elu":
+        return nn.ELU()
+    elif act_name == "selu":
+        return nn.SELU()
+    elif act_name == "relu":
+        return nn.ReLU()
+    elif act_name == "crelu":
+        return nn.ReLU()
+    elif act_name == "lrelu":
+        return nn.LeakyReLU()
+    elif act_name == "tanh":
+        return nn.Tanh()
+    elif act_name == "sigmoid":
+        return nn.Sigmoid()
+    else:
+        print("invalid activation function!")
+        return None
+
+
+def build_mlp(
+    input_dim,
+    output_dim,
+    hidden_dims,
+    activation_name,
+    orthogonal_init=False,
+    output_scale=0.01,
+):
+    layers = []
+    if len(hidden_dims) == 0:
+        layers.append(nn.Linear(input_dim, output_dim))
+        if orthogonal_init:
+            torch.nn.init.orthogonal_(layers[-1].weight, output_scale)
+            torch.nn.init.constant_(layers[-1].bias, 0.0)
+        return nn.Sequential(*layers)
+
+    layers.append(nn.Linear(input_dim, hidden_dims[0]))
+    if orthogonal_init:
+        torch.nn.init.orthogonal_(layers[-1].weight, np.sqrt(2))
+        torch.nn.init.constant_(layers[-1].bias, 0.0)
+    layers.append(get_activation(activation_name))
+
+    for l in range(len(hidden_dims) - 1):
+        layers.append(nn.Linear(hidden_dims[l], hidden_dims[l + 1]))
+        if orthogonal_init:
+            torch.nn.init.orthogonal_(layers[-1].weight, np.sqrt(2))
+            torch.nn.init.constant_(layers[-1].bias, 0.0)
+        layers.append(get_activation(activation_name))
+
+    layers.append(nn.Linear(hidden_dims[-1], output_dim))
+    if orthogonal_init:
+        torch.nn.init.orthogonal_(layers[-1].weight, output_scale)
+        torch.nn.init.constant_(layers[-1].bias, 0.0)
+    return nn.Sequential(*layers)
+
+
+class SharedBackboneDualHead(nn.Module):
+    def __init__(
+        self,
+        num_input_dim,
+        backbone_hidden_dims,
+        activation,
+        orthogonal_init,
+        vel_head_hidden_dims,
+        mass_head_hidden_dims,
+    ):
+        super().__init__()
+
+        if len(backbone_hidden_dims) == 0:
+            raise ValueError("backbone hidden_dims must contain at least 1 layer")
+
+        self.backbone = build_mlp(
+            num_input_dim,
+            backbone_hidden_dims[-1],
+            backbone_hidden_dims,
+            activation,
+            orthogonal_init=orthogonal_init,
+            output_scale=np.sqrt(2),
+        )
+        trunk_dim = backbone_hidden_dims[-1]
+        self.vel_head = build_mlp(
+            trunk_dim,
+            3,
+            vel_head_hidden_dims,
+            activation,
+            orthogonal_init=orthogonal_init,
+            output_scale=0.01,
+        )
+        self.mass_head = build_mlp(
+            trunk_dim,
+            4,
+            mass_head_hidden_dims,
+            activation,
+            orthogonal_init=orthogonal_init,
+            output_scale=0.01,
+        )
+
+    def forward(self, input):
+        trunk = self.backbone(input)
+        vel_out = self.vel_head(trunk)
+        mass_out = self.mass_head(trunk)
+        return torch.cat((vel_out, mass_out), dim=-1)
+
+
+class LegacySingleHead(nn.Module):
+    def __init__(
+        self,
+        num_input_dim,
+        num_output_dim,
+        hidden_dims,
+        activation,
+        orthogonal_init,
+    ):
+        super().__init__()
+        self.net = build_mlp(
+            num_input_dim,
+            num_output_dim,
+            hidden_dims,
+            activation,
+            orthogonal_init=orthogonal_init,
+            output_scale=0.01,
+        )
+
+    def forward(self, input):
+        return self.net(input)
 
 
 class MLP_Encoder(nn.Module):
@@ -45,6 +171,9 @@ class MLP_Encoder(nn.Module):
         num_input_dim,
         num_output_dim,
         hidden_dims=[256, 256], #之前我修改的是512256128 修改
+        use_dual_head=False,
+        vel_head_hidden_dims=[],
+        mass_head_hidden_dims=[],
         activation="elu",
         orthogonal_init=False,
         output_detach=False,
@@ -61,28 +190,35 @@ class MLP_Encoder(nn.Module):
         self.output_detach = output_detach
         self.num_input_dim = num_input_dim
         self.num_output_dim = num_output_dim
+        self.use_dual_head = use_dual_head
+        self.vel_head_out_dim = 3
+        self.mass_head_out_dim = 4
 
-        activation = get_activation(activation)
+        if self.use_dual_head and self.num_output_dim != (
+            self.vel_head_out_dim + self.mass_head_out_dim
+        ):
+            raise ValueError(
+                "Dual-head encoder requires num_output_dim == 7 "
+                f"(got {self.num_output_dim})."
+            )
 
-        # Encoder
-        encoder_layers = []
-        encoder_layers.append(nn.Linear(num_input_dim, hidden_dims[0]))
-        if self.orthogonal_init:
-            torch.nn.init.orthogonal_(encoder_layers[-1].weight, np.sqrt(2))
-        encoder_layers.append(activation)
-        for l in range(len(hidden_dims)):
-            if l == len(hidden_dims) - 1:
-                encoder_layers.append(nn.Linear(hidden_dims[l], num_output_dim))
-                if self.orthogonal_init:
-                    torch.nn.init.orthogonal_(encoder_layers[-1].weight, 0.01)
-                    torch.nn.init.constant_(encoder_layers[-1].bias, 0.0)
-            else:
-                encoder_layers.append(nn.Linear(hidden_dims[l], hidden_dims[l + 1]))
-                if self.orthogonal_init:
-                    torch.nn.init.orthogonal_(encoder_layers[-1].weight, np.sqrt(2))
-                    torch.nn.init.constant_(encoder_layers[-1].bias, 0.0)
-                encoder_layers.append(activation)
-        self.encoder = nn.Sequential(*encoder_layers)
+        if self.use_dual_head:
+            self.encoder = SharedBackboneDualHead(
+                num_input_dim,
+                hidden_dims,
+                activation,
+                self.orthogonal_init,
+                vel_head_hidden_dims,
+                mass_head_hidden_dims,
+            )
+        else:
+            self.encoder = LegacySingleHead(
+                num_input_dim,
+                num_output_dim,
+                hidden_dims,
+                activation,
+                self.orthogonal_init,
+            )
 
         print(f"Encoder MLP: {self.encoder}")
 
@@ -105,23 +241,3 @@ class MLP_Encoder(nn.Module):
     def inference(self, input):
         with torch.no_grad():
             return self.encoder(input)
-
-
-def get_activation(act_name):
-    if act_name == "elu":
-        return nn.ELU()
-    elif act_name == "selu":
-        return nn.SELU()
-    elif act_name == "relu":
-        return nn.ReLU()
-    elif act_name == "crelu":
-        return nn.ReLU()
-    elif act_name == "lrelu":
-        return nn.LeakyReLU()
-    elif act_name == "tanh":
-        return nn.Tanh()
-    elif act_name == "sigmoid":
-        return nn.Sigmoid()
-    else:
-        print("invalid activation function!")
-        return None

@@ -355,6 +355,9 @@ class BipedCfgPPOWF(BaseConfig):
         num_input_dim = BipedCfgWF.env.num_observations * BipedCfgWF.env.obs_history_length
         num_output_dim = 7
         hidden_dims = [256, 128]  #曾经被我修改为[256,256, 128]
+        use_dual_head = True
+        vel_head_hidden_dims = [64]
+        mass_head_hidden_dims = [64]
         activation = "elu"
         orthogonal_init = False
 
