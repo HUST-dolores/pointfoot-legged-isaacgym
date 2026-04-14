@@ -139,6 +139,72 @@ class SharedBackboneDualHead(nn.Module):
         return torch.cat((vel_out, mass_out), dim=-1)
 
 
+class SharedBackboneHierarchicalHead(nn.Module):
+    def __init__(
+        self,
+        num_input_dim,
+        backbone_hidden_dims,
+        activation,
+        orthogonal_init,
+        vel_head_hidden_dims,
+        mass_head_hidden_dims,
+        com_head_hidden_dims,
+        com_use_mass_detach=True,
+    ):
+        super().__init__()
+
+        if len(backbone_hidden_dims) == 0:
+            raise ValueError("backbone hidden_dims must contain at least 1 layer")
+
+        self.com_use_mass_detach = com_use_mass_detach
+        self.backbone = build_mlp(
+            num_input_dim,
+            backbone_hidden_dims[-1],
+            backbone_hidden_dims,
+            activation,
+            orthogonal_init=orthogonal_init,
+            output_scale=np.sqrt(2),
+        )
+        trunk_dim = backbone_hidden_dims[-1]
+
+        # Velocity branch (3): shared trunk -> vel
+        self.vel_head = build_mlp(
+            trunk_dim,
+            3,
+            vel_head_hidden_dims,
+            activation,
+            orthogonal_init=orthogonal_init,
+            output_scale=0.01,
+        )
+        # Mass branch (1): shared trunk -> mass
+        self.mass_head = build_mlp(
+            trunk_dim,
+            1,
+            mass_head_hidden_dims,
+            activation,
+            orthogonal_init=orthogonal_init,
+            output_scale=0.01,
+        )
+        # CoM branch (3): shared trunk + predicted mass -> com
+        self.com_head = build_mlp(
+            trunk_dim + 1,
+            3,
+            com_head_hidden_dims,
+            activation,
+            orthogonal_init=orthogonal_init,
+            output_scale=0.01,
+        )
+
+    def forward(self, input):
+        trunk = self.backbone(input)
+        vel_out = self.vel_head(trunk)
+        mass_out = self.mass_head(trunk)
+        mass_for_com = mass_out.detach() if self.com_use_mass_detach else mass_out
+        com_in = torch.cat((trunk, mass_for_com), dim=-1)
+        com_out = self.com_head(com_in)
+        return torch.cat((vel_out, mass_out, com_out), dim=-1)
+
+
 class LegacySingleHead(nn.Module):
     def __init__(
         self,
@@ -172,8 +238,11 @@ class MLP_Encoder(nn.Module):
         num_output_dim,
         hidden_dims=[256, 256], #之前我修改的是512256128 修改
         use_dual_head=False,
+        use_hierarchical_com_estimation=False,  
         vel_head_hidden_dims=[],
         mass_head_hidden_dims=[],
+        com_head_hidden_dims=[],
+        com_use_mass_detach=True,
         activation="elu",
         orthogonal_init=False,
         output_detach=False,
@@ -191,6 +260,7 @@ class MLP_Encoder(nn.Module):
         self.num_input_dim = num_input_dim
         self.num_output_dim = num_output_dim
         self.use_dual_head = use_dual_head
+        self.use_hierarchical_com_estimation = use_hierarchical_com_estimation
         self.vel_head_out_dim = 3
         self.mass_head_out_dim = 4
 
@@ -202,7 +272,18 @@ class MLP_Encoder(nn.Module):
                 f"(got {self.num_output_dim})."
             )
 
-        if self.use_dual_head:
+        if self.use_dual_head and self.use_hierarchical_com_estimation:
+            self.encoder = SharedBackboneHierarchicalHead(
+                num_input_dim,
+                hidden_dims,
+                activation,
+                self.orthogonal_init,
+                vel_head_hidden_dims,
+                mass_head_hidden_dims,
+                com_head_hidden_dims,
+                com_use_mass_detach,
+            )
+        elif self.use_dual_head:
             self.encoder = SharedBackboneDualHead(
                 num_input_dim,
                 hidden_dims,

@@ -355,9 +355,24 @@ class BipedCfgPPOWF(BaseConfig):
         num_input_dim = BipedCfgWF.env.num_observations * BipedCfgWF.env.obs_history_length
         num_output_dim = 7
         hidden_dims = [256, 128]  #曾经被我修改为[256,256, 128]
+        # sym:use_dual_head
         use_dual_head = True
+        # sym:use_hierarchical_com_estimation
+        use_hierarchical_com_estimation = True
+        # sym:com_use_mass_detach
+        com_use_mass_detach = True
+        #True：com 分支不把梯度回传到 mass 分支，更稳
+        #False：com/mass 强耦合联合优化，更激进
+        
+        # vel branch (3): trunk -> vel
+        # sym:vel_head_hidden_dims
         vel_head_hidden_dims = [64]
+        # mass branch (1): trunk -> mass
+        # sym:mass_head_hidden_dims
         mass_head_hidden_dims = [64]
+        # com branch (3): trunk + mass -> com
+        # sym:com_head_hidden_dims
+        com_head_hidden_dims = [64]
         activation = "elu"
         orthogonal_init = False
 
