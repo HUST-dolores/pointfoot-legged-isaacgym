@@ -76,6 +76,17 @@ class BipedWF(BaseTask):
         self.obs_history[env_ids] = 0
         obs_buf, _ = self.compute_group_observations()
         self.obs_history[env_ids] = obs_buf[env_ids].repeat(1, self.obs_history_length)
+        
+        raw_state_reset = obs_buf[env_ids, :self.filtered_size]
+        self.filtered_obs_buf[env_ids] = raw_state_reset
+        reset_filter_state = raw_state_reset[:, self.filter_feature_indices]
+        self.butter_x1[env_ids] = reset_filter_state
+        self.butter_x2[env_ids] = reset_filter_state
+        self.butter_y1[env_ids] = reset_filter_state
+        self.butter_y2[env_ids] = reset_filter_state
+        cat_obs = torch.cat([obs_buf[env_ids], self.filtered_obs_buf[env_ids]], dim=-1)
+        self.encoder_obs_history[env_ids] = cat_obs.repeat(1, self.obs_history_length)
+
         self.gait_indices[env_ids] = 0
         self.fail_buf[env_ids] = 0
         self.action_fifo[env_ids] = 0
@@ -168,7 +179,7 @@ class BipedWF(BaseTask):
             self.rew_buf,
             self.reset_buf,
             self.extras,
-            self.obs_history,
+            self.encoder_obs_history,
             self.commands[:, :3] * self.commands_scale,
             self.critic_obs_buf # make sure critic_obs update in every for loop
         )
@@ -206,6 +217,47 @@ class BipedWF(BaseTask):
         super().post_physics_step()
         self.wheel_lin_vel = self.foot_velocities[:, 0, :] + self.foot_velocities[:, 1, :]
 
+    def get_observations(self):
+        return (
+            self.obs_buf,
+            self.encoder_obs_history,
+            self.commands[:, :3] * self.commands_scale,
+            self.critic_obs_buf
+        )
+
+    def compute_observations(self):
+        # 1. Calls base_task's compute_observations() to populate obs_buf, add logic, update native obs_history
+        super().compute_observations()
+        
+        # 2. Build filtered branch with a true 2nd-order Butterworth low-pass filter.
+        raw_state = self.obs_buf[:, :self.filtered_size]
+        filtered_state = raw_state.clone()
+
+        x_now = raw_state[:, self.filter_feature_indices]
+        y_now = (
+            self.butter_b0 * x_now
+            + self.butter_b1 * self.butter_x1
+            + self.butter_b2 * self.butter_x2
+            - self.butter_a1 * self.butter_y1
+            - self.butter_a2 * self.butter_y2
+        )
+
+        self.butter_x2 = self.butter_x1
+        self.butter_x1 = x_now
+        self.butter_y2 = self.butter_y1
+        self.butter_y1 = y_now
+
+        filtered_state[:, self.filter_feature_indices] = y_now
+        self.filtered_obs_buf = filtered_state
+        
+        # 3. Concatenate BOTH raw `obs_buf` and `filtered_obs_buf` at EACH timestep
+        cat_obs = torch.cat([self.obs_buf, self.filtered_obs_buf], dim=-1)
+        
+        # 4. Update special `encoder_obs_history`
+        self.encoder_obs_history = torch.cat(
+            (self.encoder_obs_history[:, cat_obs.shape[1] :], cat_obs), dim=-1
+        )
+
     def compute_group_observations(self):
         # note that observation noise need to modified accordingly !!!
         dof_list = [0,1,2,4,5,6]
@@ -218,6 +270,7 @@ class BipedWF(BaseTask):
                 self.projected_gravity,
                 dof_pos * self.obs_scales.dof_pos,
                 self.dof_vel * self.obs_scales.dof_vel,
+                self.torques * self.obs_scales.torque,
                 self.actions,
                 # self.clock_inputs_sin.view(self.num_envs, 1),
                 # self.clock_inputs_cos.view(self.num_envs, 1),
@@ -348,13 +401,66 @@ class BipedWF(BaseTask):
         noise_vec[12:20] = (
             noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
         )
-        noise_vec[20:] = 0.0  # previous actions
+        noise_vec[20:28] = 0.0  # raw torques
+        noise_vec[28:] = 0.0  # previous actions
         return noise_vec
 
     def _init_buffers(self):
         super()._init_buffers()
         self.wheel_lin_vel = torch.zeros_like(self.foot_velocities)
         self.wheel_ang_vel = torch.zeros_like(self.base_ang_vel)
+
+        self.filtered_size = self.num_obs - self.cfg.env.num_actions
+        self.filter_feature_indices = torch.arange(
+            0, self.filtered_size, dtype=torch.long, device=self.device
+        )
+        # Keep dof_pos (6:12) unfiltered; torque uses the same filter path as other dynamic terms.
+        dof_pos_start = 6
+        dof_pos_end = 12
+        self.filter_feature_indices = torch.cat(
+            (
+                self.filter_feature_indices[:dof_pos_start],
+                self.filter_feature_indices[dof_pos_end:],
+            ),
+            dim=0,
+        )
+
+        cutoff_hz = float(getattr(self.cfg.env, "obs_butter_cutoff_hz", 10.0))
+        nyquist_hz = 0.5 / self.dt
+        cutoff_hz = max(1e-3, min(cutoff_hz, 0.99 * nyquist_hz))
+        w = math.tan(math.pi * cutoff_hz * self.dt)
+        w2 = w * w
+        sqrt2 = math.sqrt(2.0)
+        norm = 1.0 / (1.0 + sqrt2 * w + w2)
+        self.butter_b0 = w2 * norm
+        self.butter_b1 = 2.0 * self.butter_b0
+        self.butter_b2 = self.butter_b0
+        self.butter_a1 = 2.0 * (w2 - 1.0) * norm
+        self.butter_a2 = (1.0 - sqrt2 * w + w2) * norm
+        
+        self.filtered_obs_buf = torch.zeros(
+            self.num_envs, self.filtered_size, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        n_filtered_features = self.filter_feature_indices.numel()
+        self.butter_x1 = torch.zeros(
+            self.num_envs, n_filtered_features, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.butter_x2 = torch.zeros(
+            self.num_envs, n_filtered_features, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.butter_y1 = torch.zeros(
+            self.num_envs, n_filtered_features, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.butter_y2 = torch.zeros(
+            self.num_envs, n_filtered_features, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.encoder_obs_history = torch.zeros(
+            self.num_envs,
+            (self.num_obs + self.filtered_size) * self.obs_history_length,
+            dtype=torch.float,
+            device=self.device,
+            requires_grad=False,
+        )
 
     # ------------ reward functions----------------
 

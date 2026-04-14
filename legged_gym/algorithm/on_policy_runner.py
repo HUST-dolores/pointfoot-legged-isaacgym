@@ -89,7 +89,7 @@ class OnPolicyRunner:
             self.num_steps_per_env,
             [self.env.num_obs],
             [num_critic_obs],
-            [self.env.obs_history_length * self.env.num_obs],
+            [self.env.encoder_obs_history.shape[1]],
             [self.env.num_commands],
             [self.env.num_actions],
         )

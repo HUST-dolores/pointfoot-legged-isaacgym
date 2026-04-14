@@ -33,10 +33,11 @@ from legged_gym.envs.base.base_config import BaseConfig
 class BipedCfgWF(BaseConfig):
     class env:
         num_envs = 3072
-        num_observations = 30 + 6 - 2 - 4 - 2  # +6 means wheel obs,-2 means sin&cos clock, -4 means gait para nums -2 means wheels pos
+        num_observations = 30 + 6 - 2 - 4 - 2 + 8  # +8 raw torque
         num_critic_observations = 7 + num_observations
         num_height_samples = 117
         num_actions = 8
+        obs_butter_cutoff_hz = 10.0  # 2nd-order Butterworth low-pass cutoff for filtered branch
         env_spacing = 3.0  # not used with heightfields/trimeshes
         send_timeouts = True  # send time out information to the algorithm
         episode_length_s = 40  # episode length in seconds
@@ -352,13 +353,13 @@ class BipedCfgPPOWF(BaseConfig):
 
     class MLP_Encoder:
         output_detach = True
-        num_input_dim = BipedCfgWF.env.num_observations * BipedCfgWF.env.obs_history_length
+        num_input_dim = (BipedCfgWF.env.num_observations + BipedCfgWF.env.num_observations - BipedCfgWF.env.num_actions) * BipedCfgWF.env.obs_history_length
         num_output_dim = 7
         hidden_dims = [256, 128]  #曾经被我修改为[256,256, 128]
         # sym:use_dual_head
         use_dual_head = True
         # sym:use_hierarchical_com_estimation
-        use_hierarchical_com_estimation = True
+        use_hierarchical_com_estimation = False
         # sym:com_use_mass_detach
         com_use_mass_detach = True
         #True：com 分支不把梯度回传到 mass 分支，更稳
