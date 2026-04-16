@@ -66,6 +66,18 @@ class Logger:
         self.state_log.clear()
         self.rew_log.clear()
 
+    def save_to_mat(self, filepath):
+        import os
+        import scipy.io as sio
+        mat_dict = {}
+        for key, value in self.state_log.items():
+            mat_dict[key] = np.array(value)
+        mat_dict["dt"] = self.dt
+        
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        sio.savemat(filepath, mat_dict)
+        print(f"Saved play data to MATLAB format: {filepath}")
+
     def plot_states(self):
         self.plot_process = Process(target=self._plot)
         self.plot_process.start()
@@ -258,6 +270,39 @@ class Logger:
             a.plot(time, log["extra_loss_com"], label="extra_loss_com")
         a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_com_ave")
         a.legend()
+        
+        # Second figure for filtered signals
+        fig2, axs2 = plt.subplots(3, 1, figsize=(8, 10))
+        fig2.canvas.manager.set_window_title('Filtered vs Measured States')
+        
+        # 1. Joint Velocity
+        a = axs2[0]
+        if log["dof_vel"]:
+            a.plot(time, log["dof_vel"], label="measured", alpha=0.6)
+        if log["filtered_dof_vel"]:
+            a.plot(time, log["filtered_dof_vel"], label="filtered", linewidth=2)
+        a.set(xlabel="time [s]", ylabel="Velocity [rad/s]", title="Joint Velocity")
+        a.legend()
+        
+        # 2. Joint Torque
+        a = axs2[1]
+        if log["dof_torque"] != []:
+            a.plot(time, log["dof_torque"], label="measured", alpha=0.6)
+        if log["filtered_dof_torque"]:
+            a.plot(time, log["filtered_dof_torque"], label="filtered", linewidth=2)
+        a.set(xlabel="time [s]", ylabel="Joint Torque [Nm]", title="Joint Torque")
+        a.legend()
+        
+        # 3. Base Ang Vel Yaw
+        a = axs2[2]
+        if log["base_vel_yaw"]:
+            a.plot(time, log["base_vel_yaw"], label="measured", alpha=0.6)
+        if log["filtered_base_vel_yaw"]:
+            a.plot(time, log["filtered_base_vel_yaw"], label="filtered", linewidth=2)
+        a.set(xlabel="time [s]", ylabel="base ang vel [rad/s]", title="Base Velocity Yaw")
+        a.legend()
+        
+        plt.tight_layout()
         plt.show()
 
     def print_rewards(self):

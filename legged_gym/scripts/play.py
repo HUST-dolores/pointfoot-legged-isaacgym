@@ -120,7 +120,7 @@ def play(args):
 
     logger = Logger(env.dt)
     robot_index = 3  # which robot is used for logging
-    joint_index = 1  # which joint is used for logging
+    joint_index = 2  # which joint is used for logging
     stop_state_log = 1000  # number of steps before plotting states
     stop_rew_log = (
         env.max_episode_length + 1
@@ -182,7 +182,9 @@ def play(args):
                         - env.raw_default_dof_pos[joint_index]
                     ).item(),
                     "dof_vel": env.dof_vel[robot_index, joint_index].item(),
+                    "filtered_dof_vel": env.filtered_obs_buf[robot_index, 12 + joint_index].item() / env.cfg.normalization.obs_scales.dof_vel if hasattr(env, "filtered_obs_buf") else 0.0,
                     "dof_torque": env.torques[robot_index, joint_index].item(),
+                    "filtered_dof_torque": env.filtered_obs_buf[robot_index, 20 + joint_index].item() / env.cfg.normalization.obs_scales.torque if hasattr(env, "filtered_obs_buf") else 0.0,
                     "command_x": env.commands[robot_index, 0].item(),
                     "command_y": env.commands[robot_index, 1].item(),
                     "command_yaw": env.commands[robot_index, 2].item(),
@@ -190,6 +192,7 @@ def play(args):
                     "base_vel_y": env.base_lin_vel[robot_index, 1].item(),
                     "base_vel_z": env.base_lin_vel[robot_index, 2].item(),
                     "base_vel_yaw": env.base_ang_vel[robot_index, 2].item(),
+                    "filtered_base_vel_yaw": env.filtered_obs_buf[robot_index, 2].item() / env.cfg.normalization.obs_scales.ang_vel if hasattr(env, "filtered_obs_buf") else 0.0,
                     "power": torch.sum(env.power[robot_index, :]).item(),
                     "torque_abad_L": env.torques[robot_index, 0].item(),
                     "torque_hip_L": env.torques[robot_index, 1].item(),
@@ -263,6 +266,8 @@ def play(args):
                     }
                 )
         elif i == stop_state_log:
+            mat_path = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", args.task, train_cfg.runner.experiment_name, "exported", "play_data.mat")
+            logger.save_to_mat(mat_path)
             logger.plot_states()
 
         if 0 < i < stop_rew_log:

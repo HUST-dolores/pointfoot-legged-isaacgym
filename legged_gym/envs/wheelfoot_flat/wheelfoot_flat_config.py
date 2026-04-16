@@ -37,7 +37,7 @@ class BipedCfgWF(BaseConfig):
         num_critic_observations = 7 + num_observations
         num_height_samples = 117
         num_actions = 8
-        obs_butter_cutoff_hz = 10.0  # 2nd-order Butterworth low-pass cutoff for filtered branch
+        obs_butter_cutoff_hz = 2.0  # 2nd-order Butterworth low-pass cutoff for filtered branch
         env_spacing = 3.0  # not used with heightfields/trimeshes
         send_timeouts = True  # send time out information to the algorithm
         episode_length_s = 40  # episode length in seconds
@@ -406,7 +406,7 @@ class BipedCfgPPOWF(BaseConfig):
         # Encoder extra loss weighting
         extra_loss_vel_w = 1.0
         extra_loss_mass_w = 2.0
-        extra_loss_com_w = 2.0
+        extra_loss_com_w = 6.0
         # 当样本检测到负载在体时，对mass/com监督加权
         extra_loss_load_boost = 6.0
         extra_loss_mass_eps = 1.0e-3
