@@ -32,7 +32,7 @@ from legged_gym.envs.base.base_config import BaseConfig
 
 class BipedCfgWF(BaseConfig):
     class env:
-        num_envs = 3072
+        num_envs = 2048
         num_observations = 30 + 6 - 2 - 4 - 2 + 8  # +8 raw torque
         num_critic_observations = 7 + num_observations
         num_height_samples = 117
@@ -353,6 +353,8 @@ class BipedCfgPPOWF(BaseConfig):
 
     class MLP_Encoder:
         output_detach = True
+        is_gru = True
+        obs_history_length = BipedCfgWF.env.obs_history_length
         num_input_dim = (BipedCfgWF.env.num_observations + BipedCfgWF.env.num_observations - BipedCfgWF.env.num_actions) * BipedCfgWF.env.obs_history_length
         num_output_dim = 7
         hidden_dims = [256, 128]  #曾经被我修改为[256,256, 128]

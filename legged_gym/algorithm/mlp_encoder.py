@@ -100,21 +100,35 @@ class SharedBackboneDualHead(nn.Module):
         orthogonal_init,
         vel_head_hidden_dims,
         mass_head_hidden_dims,
+        is_gru=False,
+        obs_history_length=10,
     ):
         super().__init__()
 
-        if len(backbone_hidden_dims) == 0:
-            raise ValueError("backbone hidden_dims must contain at least 1 layer")
+        self.is_gru = is_gru
+        self.obs_history_length = obs_history_length
 
-        self.backbone = build_mlp(
-            num_input_dim,
-            backbone_hidden_dims[-1],
-            backbone_hidden_dims,
-            activation,
-            orthogonal_init=orthogonal_init,
-            output_scale=np.sqrt(2),
-        )
-        trunk_dim = backbone_hidden_dims[-1]
+        if self.is_gru:
+            # For GRU, the actual input feature size per step
+            self.input_size = num_input_dim // self.obs_history_length
+            self.gru_hidden_size = backbone_hidden_dims[-1]
+            self.gru_num_layers = max(1, len(backbone_hidden_dims) - 1)
+            self.gru = nn.GRU(self.input_size, self.gru_hidden_size, self.gru_num_layers, batch_first=True)
+            trunk_dim = self.gru_hidden_size
+        else:
+            if len(backbone_hidden_dims) == 0:
+                raise ValueError("backbone hidden_dims must contain at least 1 layer")
+
+            self.backbone = build_mlp(
+                num_input_dim,
+                backbone_hidden_dims[-1],
+                backbone_hidden_dims,
+                activation,
+                orthogonal_init=orthogonal_init,
+                output_scale=np.sqrt(2),
+            )
+            trunk_dim = backbone_hidden_dims[-1]
+
         self.vel_head = build_mlp(
             trunk_dim,
             3,
@@ -133,7 +147,30 @@ class SharedBackboneDualHead(nn.Module):
         )
 
     def forward(self, input):
-        trunk = self.backbone(input)
+        if self.is_gru:
+            if input.dim() == 1:
+                input = input.unsqueeze(0)
+            elif input.dim() != 2:
+                raise ValueError(
+                    f"GRU encoder expects 1D or 2D input, got shape {tuple(input.shape)}"
+                )
+
+            batch_size, flat_dim = input.shape
+            expected_flat_dim = self.obs_history_length * self.input_size
+            if flat_dim != expected_flat_dim:
+                raise ValueError(
+                    f"GRU encoder input dim mismatch: got {flat_dim}, expected {expected_flat_dim} "
+                    f"(obs_history_length={self.obs_history_length}, input_size={self.input_size})"
+                )
+
+            # Reshape from (batch, seq_len * input_size) -> (batch, seq_len, input_size)
+            x = input.reshape(batch_size, self.obs_history_length, self.input_size)
+            gru_out, hidden = self.gru(x)
+            # Use the output from the last time step
+            trunk = gru_out[:, -1, :]
+        else:
+            trunk = self.backbone(input)
+            
         vel_out = self.vel_head(trunk)
         mass_out = self.mass_head(trunk)
         return torch.cat((vel_out, mass_out), dim=-1)
@@ -150,22 +187,34 @@ class SharedBackboneHierarchicalHead(nn.Module):
         mass_head_hidden_dims,
         com_head_hidden_dims,
         com_use_mass_detach=True,
+        is_gru=False,
+        obs_history_length=10,
     ):
         super().__init__()
 
-        if len(backbone_hidden_dims) == 0:
-            raise ValueError("backbone hidden_dims must contain at least 1 layer")
-
+        self.is_gru = is_gru
+        self.obs_history_length = obs_history_length
         self.com_use_mass_detach = com_use_mass_detach
-        self.backbone = build_mlp(
-            num_input_dim,
-            backbone_hidden_dims[-1],
-            backbone_hidden_dims,
-            activation,
-            orthogonal_init=orthogonal_init,
-            output_scale=np.sqrt(2),
-        )
-        trunk_dim = backbone_hidden_dims[-1]
+
+        if self.is_gru:
+            self.input_size = num_input_dim // self.obs_history_length
+            self.gru_hidden_size = backbone_hidden_dims[-1]
+            self.gru_num_layers = max(1, len(backbone_hidden_dims) - 1)
+            self.gru = nn.GRU(self.input_size, self.gru_hidden_size, self.gru_num_layers, batch_first=True)
+            trunk_dim = self.gru_hidden_size
+        else:
+            if len(backbone_hidden_dims) == 0:
+                raise ValueError("backbone hidden_dims must contain at least 1 layer")
+
+            self.backbone = build_mlp(
+                num_input_dim,
+                backbone_hidden_dims[-1],
+                backbone_hidden_dims,
+                activation,
+                orthogonal_init=orthogonal_init,
+                output_scale=np.sqrt(2),
+            )
+            trunk_dim = backbone_hidden_dims[-1]
 
         # Velocity branch (3): shared trunk -> vel
         self.vel_head = build_mlp(
@@ -196,7 +245,28 @@ class SharedBackboneHierarchicalHead(nn.Module):
         )
 
     def forward(self, input):
-        trunk = self.backbone(input)
+        if self.is_gru:
+            if input.dim() == 1:
+                input = input.unsqueeze(0)
+            elif input.dim() != 2:
+                raise ValueError(
+                    f"GRU encoder expects 1D or 2D input, got shape {tuple(input.shape)}"
+                )
+
+            batch_size, flat_dim = input.shape
+            expected_flat_dim = self.obs_history_length * self.input_size
+            if flat_dim != expected_flat_dim:
+                raise ValueError(
+                    f"GRU encoder input dim mismatch: got {flat_dim}, expected {expected_flat_dim} "
+                    f"(obs_history_length={self.obs_history_length}, input_size={self.input_size})"
+                )
+
+            x = input.reshape(batch_size, self.obs_history_length, self.input_size)
+            gru_out, hidden = self.gru(x)
+            trunk = gru_out[:, -1, :]
+        else:
+            trunk = self.backbone(input)
+            
         vel_out = self.vel_head(trunk)
         mass_out = self.mass_head(trunk)
         mass_for_com = mass_out.detach() if self.com_use_mass_detach else mass_out
@@ -246,6 +316,8 @@ class MLP_Encoder(nn.Module):
         activation="elu",
         orthogonal_init=False,
         output_detach=False,
+        is_gru=False,
+        obs_history_length=10,
         **kwargs,
     ):
         if kwargs:
@@ -282,6 +354,8 @@ class MLP_Encoder(nn.Module):
                 mass_head_hidden_dims,
                 com_head_hidden_dims,
                 com_use_mass_detach,
+                is_gru,
+                obs_history_length,
             )
         elif self.use_dual_head:
             self.encoder = SharedBackboneDualHead(
@@ -291,6 +365,8 @@ class MLP_Encoder(nn.Module):
                 self.orthogonal_init,
                 vel_head_hidden_dims,
                 mass_head_hidden_dims,
+                is_gru,
+                obs_history_length,
             )
         else:
             self.encoder = LegacySingleHead(
