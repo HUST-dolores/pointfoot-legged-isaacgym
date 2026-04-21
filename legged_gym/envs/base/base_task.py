@@ -1045,7 +1045,9 @@ class BaseTask:
         hf_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         hf_params.restitution = self.cfg.terrain.restitution
 
-        self.gym.add_heightfield(self.sim, self.terrain.heightsamples, hf_params)
+        # Isaac Gym expects a contiguous 1D height buffer with length nbRows * nbColumns.
+        height_samples = np.ascontiguousarray(self.terrain.heightsamples, dtype=np.int16).reshape(-1)
+        self.gym.add_heightfield(self.sim, height_samples, hf_params)
         self.height_samples = (
             torch.tensor(self.terrain.heightsamples)
             .view(self.terrain.tot_rows, self.terrain.tot_cols)
@@ -1065,10 +1067,18 @@ class BaseTask:
         tm_params.static_friction = self.cfg.terrain.static_friction
         tm_params.dynamic_friction = self.cfg.terrain.dynamic_friction
         tm_params.restitution = self.cfg.terrain.restitution
+
+        # Isaac Gym expects contiguous float32 vertices and uint32 triangle indices.
+        vertices = np.ascontiguousarray(self.terrain.vertices, dtype=np.float32).reshape(-1)
+        triangles = np.ascontiguousarray(self.terrain.triangles, dtype=np.uint32).reshape(-1)
+        print(
+            f"[Terrain] trimesh upload: vertices={tm_params.nb_vertices}, "
+            f"triangles={tm_params.nb_triangles}"
+        )
         self.gym.add_triangle_mesh(
             self.sim,
-            self.terrain.vertices.flatten(order="C"),
-            self.terrain.triangles.flatten(order="C"),
+            vertices,
+            triangles,
             tm_params,
         )
         self.height_samples = (
@@ -1089,7 +1099,7 @@ class BaseTask:
         x = torch.tensor(
             self.cfg.terrain.measured_points_x, device=self.device, requires_grad=False
         )
-        grid_x, grid_y = torch.meshgrid(x, y)
+        grid_x, grid_y = torch.meshgrid(x, y, indexing="ij")
 
         self.num_height_points = grid_x.numel()
         points = torch.zeros(

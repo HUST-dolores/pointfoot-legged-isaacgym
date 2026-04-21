@@ -32,7 +32,8 @@ from legged_gym.envs.base.base_config import BaseConfig
 
 class BipedCfgWF(BaseConfig):
     class env:
-        num_envs = 2048
+        # 8GB-class GPU friendly default; increase gradually after stability is confirmed.
+        num_envs = 1024
         num_observations = 30 + 6 - 2 - 4 - 2 + 8  # +8 raw torque
         num_critic_observations = 7 + num_observations
         num_height_samples = 117
@@ -46,7 +47,7 @@ class BipedCfgWF(BaseConfig):
         fail_to_terminal_time_s = 0.5
 
     class terrain:
-        mesh_type = "plane"  # "heightfield" # none, plane, heightfield or trimesh
+        mesh_type = "trimesh"  # "heightfield" # none, plane, heightfield or trimesh
         horizontal_scale = 0.1  # [m]
         vertical_scale = 0.005  # [m]
         border_size = 25  # [m]
@@ -75,13 +76,14 @@ class BipedCfgWF(BaseConfig):
         measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4]
         selected = False  # select a unique terrain type and pass all arguments
         terrain_kwargs = None  # Dict of arguments for selected terrain
-        max_init_terrain_level = 5 + 4  # starting curriculum state
+        max_init_terrain_level = 2  # starting curriculum state
         terrain_length = 8.0
         terrain_width = 8.0
-        num_rows = 10  # number of terrain rows (levels)
+        num_rows = 3  # number of terrain rows (levels)
         num_cols = 20  # number of terrain cols (types)
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
+        # terrain_proportions = [0.5, 0.5, 0, 0, 0]
         # trimesh only:
         slope_treshold = (
             0.75  # slopes above this threshold will be corrected to vertical surfaces
@@ -250,7 +252,7 @@ class BipedCfgWF(BaseConfig):
             nominal_foot_position = 4.0
             leg_symmetry = 0.5
             same_foot_x_position = -50 # 0.5
-            same_foot_z_position = -100
+            same_foot_z_position = -10
             lin_vel_z = -0.3
             ang_vel_xy = -0.3 #原来是-0.3，改成-0.1试试 修改
             torques = -0.00016

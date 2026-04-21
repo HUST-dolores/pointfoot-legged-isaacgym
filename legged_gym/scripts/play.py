@@ -51,13 +51,31 @@ def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 60
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs, 50)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs,10)
 
     env_cfg.terrain.num_rows = 10
     env_cfg.terrain.num_cols = 20
-    env_cfg.terrain.terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
-    env_cfg.terrain.max_init_terrain_level = 4
+    # env_cfg.terrain.terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
+    env_cfg.terrain.terrain_proportions = [0, 1, 0, 0, 0]
+    env_cfg.terrain.max_init_terrain_level = 2
     env_cfg.terrain.curriculum = True
+
+    # Trimesh can crash silently when the mesh is too large for GPU PhysX.
+    # Use a lighter terrain map in play mode for debugging.
+    if env_cfg.terrain.mesh_type == "trimesh":
+        env_cfg.terrain.num_rows = 2
+        env_cfg.terrain.num_cols = 10
+        env_cfg.terrain.terrain_length = 6.0
+        env_cfg.terrain.terrain_width = 6.0
+        env_cfg.terrain.border_size = 8
+        env_cfg.terrain.max_init_terrain_level = 1
+        print(
+            "[PLAY] Using reduced trimesh size for stability: "
+            f"rows={env_cfg.terrain.num_rows}, cols={env_cfg.terrain.num_cols}, "
+            f"length={env_cfg.terrain.terrain_length}, width={env_cfg.terrain.terrain_width}, "
+            f"border={env_cfg.terrain.border_size}"
+        )
+
     env_cfg.noise.add_noise = True
     env_cfg.noise.noise_level = 0.5
     env_cfg.domain_rand.randomize_friction = False
@@ -74,10 +92,28 @@ def play(args):
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+
+    if hasattr(env, "terrain_types"):
+        terrain_types_cpu = env.terrain_types.detach().cpu()
+        unique_types, counts = torch.unique(terrain_types_cpu, return_counts=True)
+        per_type = {int(t.item()): int(c.item()) for t, c in zip(unique_types, counts)}
+        print(f"[PLAY] terrain_types(count by type id): {per_type}")
+
+        smooth_cnt = int(((terrain_types_cpu >= 0) & (terrain_types_cpu < 2)).sum().item())
+        rough_cnt = int(((terrain_types_cpu >= 2) & (terrain_types_cpu < 4)).sum().item())
+        stairs_up_cnt = int(((terrain_types_cpu >= 4) & (terrain_types_cpu < 11)).sum().item())
+        stairs_down_cnt = int(((terrain_types_cpu >= 11) & (terrain_types_cpu < 16)).sum().item())
+        discrete_cnt = int(((terrain_types_cpu >= 16) & (terrain_types_cpu < 20)).sum().item())
+        print(
+            "[PLAY] terrain group counts: "
+            f"smooth={smooth_cnt}, rough={rough_cnt}, stairs_up={stairs_up_cnt}, "
+            f"stairs_down={stairs_down_cnt}, discrete={discrete_cnt}"
+        )
+
     # get robot_type
     robot_type = os.getenv("ROBOT_TYPE")
     commands_val = to_torch([0.5, 0.0, 0, 0], device=env.device) if robot_type.startswith("PF")\
-        else to_torch([0.0, 0.0, 0.0], device=env.device) if robot_type == "WF_TRON1A" else to_torch([1.5, 0.0, 0.0, 0.0, 0.0])
+        else to_torch([0.5, 0.0, 0.0], device=env.device) if robot_type == "WF_TRON1A" else to_torch([1.5, 0.0, 0.0, 0.0, 0.0])
     action_scale = env.cfg.control.action_scale_pos if robot_type == "WF_TRON1A"\
         else env.cfg.control.action_scale
     obs, obs_history, commands, critic_obs = env.get_observations()
