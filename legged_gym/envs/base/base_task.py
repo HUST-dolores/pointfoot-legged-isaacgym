@@ -981,7 +981,7 @@ class BaseTask:
         self.max_episode_length = np.ceil(self.max_episode_length_s / self.dt)
 
         self.cfg.domain_rand.push_interval = np.ceil(
-            self.cfg.domain_rand.push_interval_s / self.dt
+            self.cfg.domain_rand.push_interval_s / self.sim_params.dt
         )
         self.gaits_ranges = class_to_dict(self.cfg.gait.ranges)
         
@@ -1121,7 +1121,26 @@ class BaseTask:
             
     def set_learning_iteration(self, it: int):
         """Runner可在每个训练迭代开始前调用，告知当前迭代计数。"""
-        self.learning_iteration = int(it)    
+        self.learning_iteration = int(it)
+        self.current_max_push_vel_xy = self._get_curriculum_push_vel_xy()
+
+    def _get_curriculum_push_vel_xy(self):
+        """Return the current push strength after applying the iteration curriculum."""
+        max_push_vel_xy = float(getattr(self.cfg.domain_rand, "max_push_vel_xy", 0.0))
+        if not getattr(self.cfg.domain_rand, "push_curriculum", False):
+            return max_push_vel_xy
+
+        min_push_vel_xy = float(
+            getattr(self.cfg.domain_rand, "push_curriculum_min_vel_xy", max_push_vel_xy)
+        )
+        start_iter = int(getattr(self.cfg.domain_rand, "push_curriculum_start_iter", 0))
+        end_iter = int(getattr(self.cfg.domain_rand, "push_curriculum_end_iter", start_iter))
+        if end_iter <= start_iter:
+            return max_push_vel_xy
+
+        progress = (self.learning_iteration - start_iter) / float(end_iter - start_iter)
+        progress = min(1.0, max(0.0, progress))
+        return min_push_vel_xy + progress * (max_push_vel_xy - min_push_vel_xy)
         
     def _prepare_reward_function(self):
         """Prepares a list of reward functions, whcih will be called to compute the total reward.
@@ -1277,10 +1296,14 @@ class BaseTask:
             
     def _push_robots(self):
         """Random pushes the robots."""
+        push_interval_steps = max(
+            1,
+            int(np.ceil(self.cfg.domain_rand.push_interval_s / self.sim_params.dt)),
+        )
         env_ids = (
             (
                 self.envs_steps_buf
-                % int(self.cfg.domain_rand.push_interval_s / self.sim_params.dt)
+                % push_interval_steps
                 == 0
             )
             .nonzero(as_tuple=False)
@@ -1289,17 +1312,23 @@ class BaseTask:
         if len(env_ids) == 0:
             return
 
-        max_push_force = (
-            self.base_mass.mean().item()
-            * self.cfg.domain_rand.max_push_vel_xy
+        current_max_push_vel_xy = self._get_curriculum_push_vel_xy()
+        self.current_max_push_vel_xy = current_max_push_vel_xy
+        if current_max_push_vel_xy <= 0.0:
+            return
+
+        self.rigid_body_external_forces[:] = 0
+        push_masses = self.base_mass[env_ids].clamp_min(1e-6)
+        max_push_forces = (
+            push_masses
+            * current_max_push_vel_xy
             / self.sim_params.dt
         )
-        self.rigid_body_external_forces[:] = 0
         rigid_body_external_forces = torch_rand_float(
-            -max_push_force, max_push_force, (self.num_envs, 3), device=self.device
-        )
+            -1.0, 1.0, (len(env_ids), 3), device=self.device
+        ) * max_push_forces.unsqueeze(-1)
         self.rigid_body_external_forces[env_ids, 0, 0:3] = quat_rotate(
-            self.base_quat[env_ids], rigid_body_external_forces[env_ids]
+            self.base_quat[env_ids], rigid_body_external_forces
         )
         self.rigid_body_external_forces[env_ids, 0, 2] *= 0.5
 
@@ -1999,12 +2028,10 @@ class BaseTask:
             self.base_quat, self.root_states[self.actor_indices, 10:13]
         )
         self.rigid_body_external_forces = torch.zeros(
-            (self.num_envs, self.num_bodies, 3), device=self.device, requires_grad=False
-            # (self.num_envs, self.num_bodies_total, 3), device=self.device, requires_grad=False
+            (self.num_envs, self.num_bodies_total, 3), device=self.device, requires_grad=False
         )
         self.rigid_body_external_torques = torch.zeros(
-            (self.num_envs, self.num_bodies, 3), device=self.device, requires_grad=False
-            # (self.num_envs, self.num_bodies_total, 3), device=self.device, requires_grad=False
+            (self.num_envs, self.num_bodies_total, 3), device=self.device, requires_grad=False
         )
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         self.base_height = torch.zeros_like(self.root_states[self.actor_indices, 2])

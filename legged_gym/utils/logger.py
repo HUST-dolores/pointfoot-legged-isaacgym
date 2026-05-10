@@ -252,6 +252,21 @@ class Logger:
             a.plot(time, log["CoM_est_z"], label="Estimated")
         a.set(xlabel="time [s]", ylabel="CoM_z [m]", title="CoM_z")
         a.legend()
+
+        # Fourth figure for all joint positions (8 motors)
+        fig4, axs4 = plt.subplots(4, 2, figsize=(12, 12))
+        fig4.canvas.manager.set_window_title('All Joints Positions')
+
+        joint_names = ["abad_L", "hip_L", "knee_L", "wheel_L", "abad_R", "hip_R", "knee_R", "wheel_R"]
+        position_keys = [f"joint_pos_{name}" for name in joint_names]
+
+        for ax, key, name in zip(axs4.flatten(), position_keys, joint_names):
+            if log[key]:
+                ax.plot(time, log[key], linewidth=2)
+            ax.set(xlabel="time [s]", ylabel="Angle [rad]", title=f"Joint Angle: {name}")
+            ax.grid(True, alpha=0.3)
+
+        fig4.tight_layout()
         
         a = axs[0, 3]
         if log["extra_loss_vel"]:
@@ -270,6 +285,69 @@ class Logger:
             a.plot(time, log["extra_loss_com"], label="extra_loss_com")
         a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_com_ave")
         a.legend()
+
+        # Third figure for load estimation outputs
+        fig3, axs3 = plt.subplots(3, 1, figsize=(8, 10))
+        fig3.canvas.manager.set_window_title('Load Estimation')
+
+        a = axs3[0]
+        if log["payload_mass"]:
+            a.plot(time, log["payload_mass"], label="Estimated")
+        if log["payload_mass_ref"]:
+            a.plot(time, log["payload_mass_ref"], label="Actual")
+        a.set(xlabel="time [s]", ylabel="mass [kg]", title="Estimated Payload Mass")
+        a.legend()
+
+        a = axs3[1]
+        if log["load_x"]:
+            a.plot(time, log["load_x"], label="Estimated")
+        if log["load_x_ref"]:
+            a.plot(time, log["load_x_ref"], label="Actual")
+        a.set(xlabel="time [s]", ylabel="x [m]", title="Estimated Load X")
+        a.legend()
+
+        a = axs3[2]
+        if log["load_y"]:
+            a.plot(time, log["load_y"], label="Estimated")
+        if log["load_y_ref"]:
+            a.plot(time, log["load_y_ref"], label="Actual")
+        a.set(xlabel="time [s]", ylabel="y [m]", title="Estimated Load Y")
+        a.legend()
+
+        fig5, axs5 = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+        fig5.canvas.manager.set_window_title('Estimated Robot COM vs Actual')
+        comparison_specs = [
+            ("robot_mass_est", "robot_mass_actual", "mass [kg]", "Robot Mass With Payload"),
+            ("robot_com_x_est", "robot_com_x_actual", "x [m]", "Robot COM X With Payload"),
+            ("robot_com_y_est", "robot_com_y_actual", "y [m]", "Robot COM Y With Payload"),
+        ]
+        for ax, est_key, actual_key, ylabel, title in [
+            (axs5[i], *spec) for i, spec in enumerate(comparison_specs)
+        ]:
+            if log[est_key]:
+                ax.plot(time, log[est_key], label="estimated from _compute_load_estimates", linewidth=2)
+            if log[actual_key]:
+                ax.plot(time, log[actual_key], label="actual", linestyle="--")
+            ax.set(xlabel="time [s]", ylabel=ylabel, title=title)
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+        fig5.tight_layout()
+
+        # Fourth figure for all joint torques (8 motors)
+        fig4, axs4 = plt.subplots(4, 2, figsize=(12, 12))
+        fig4.canvas.manager.set_window_title('All Joints Torques')
+
+        joint_names = ["abad_L", "hip_L", "knee_L", "wheel_L", "abad_R", "hip_R", "knee_R", "wheel_R"]
+        torque_keys = [f"torque_{name}" for name in joint_names]
+        
+        for idx, (ax, key, name) in enumerate(zip(axs4.flatten(), torque_keys, joint_names)):
+            if log[key]:
+                ax.plot(time, log[key], linewidth=2)
+                ax.set(xlabel="time [s]", ylabel="Torque [Nm]", title=f"Torque: {name}")
+                ax.grid(True, alpha=0.3)
+                ax.legend()
+        
+        fig4.tight_layout()
         
         # Second figure for filtered signals
         fig2, axs2 = plt.subplots(3, 1, figsize=(8, 10))

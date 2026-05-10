@@ -34,7 +34,7 @@ class BipedCfgWF(BaseConfig):
     class env:
         # 8GB-class GPU friendly default; increase gradually after stability is confirmed.
         num_envs = 1024
-        num_observations = 30 + 6 - 2 - 4 - 2 + 8  # +8 raw torque
+        num_observations = 30 + 6 - 2 - 4 - 2 + 8 + 8  # +8 raw torque, +8 load estimation features
         num_critic_observations = 7 + num_observations
         num_height_samples = 117
         num_actions = 8
@@ -175,6 +175,15 @@ class BipedCfgWF(BaseConfig):
         name = "wheelfoot_flat"
         foot_name = "wheel"
         foot_radius = 0.127
+        load_estimation_thigh_length = 0.30000206  # URDF hip->knee sagittal length
+        load_estimation_zero_thigh_angle = 2.0943951023931953  # 120 deg zero pose
+        load_estimation_mass_offset = 12.08
+        load_estimation_body_mass = 9.58
+        load_estimation_filter_cutoff_normalized = 1.0 / 10.0  # butter(1, 1/10, "low")
+        load_estimation_robot_width = 0.251
+        load_estimation_position_limit = 0.5
+        load_estimation_position_zero_mass_threshold = 1.0
+        load_estimation_com_x_bias = 0.2632  #0.0932+0.19 前者为髋关节到机体下表面，后者为机体厚度
         penalize_contacts_on = ["knee", "hip"]
         terminate_after_contacts_on = ["abad", "knee", "hip"]
         disable_gravity = False
@@ -210,10 +219,14 @@ class BipedCfgWF(BaseConfig):
         # load_offset_range_xy = [0.13, 0.12]   #000
         randomize_inertia = True
         randomize_inertia_range = [0.95, 1.05]
-        push_robots = False
-        push_interval_s = 7
+        push_robots = True
+        push_interval_s = 3.0
+        push_curriculum = True
+        push_curriculum_start_iter = 0
+        push_curriculum_end_iter = 4000
+        push_curriculum_min_vel_xy = 0.5
         load_start_time_s = 0.5     # 机器人开始添加负载的时间（秒）
-        load_duration_range_s = [2.0, 4.0] # 负载持续时间随机范围
+        load_duration_range_s = [3.0, 4.0] # 负载持续时间随机范围
         load_interval_range_s = [5.0, 6.0] # 两次负载之间的时间随机范围
         load_contact_grace_s = 0.2  # 负载生成后忽略接触终止的宽限时间（秒）
         # 负载判定滞回（降低 on/off 抖动）
@@ -235,7 +248,7 @@ class BipedCfgWF(BaseConfig):
         randomize_imu_offset = True
         randomize_imu_offset_range = [-1.2, 1.2]
         delay_ms_range = [0, 20]
-        max_push_vel_xy = 1.5
+        max_push_vel_xy = 2.0
 
     class rewards:
         class scales:
@@ -301,6 +314,8 @@ class BipedCfgWF(BaseConfig):
             height_measurements = 5.0
             contact_forces = 0.01
             torque = 0.05
+            load_mass = 0.25
+            load_pos = 2.0
             mass_scale = 0.05
             com_scale = 5.0
             inertia_scale = 5.0

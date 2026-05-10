@@ -74,6 +74,8 @@ class BipedWF(BaseTask):
         self.envs_steps_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
         self.obs_history[env_ids] = 0
+        if hasattr(self, "load_estimation_filter_initialized"):
+            self.load_estimation_filter_initialized[env_ids] = False
         obs_buf, _ = self.compute_group_observations()
         self.obs_history[env_ids] = obs_buf[env_ids].repeat(1, self.obs_history_length)
         
@@ -112,6 +114,10 @@ class BipedWF(BaseTask):
                 )
             if hasattr(self, "load_hysteresis_agree_last"):
                 self.extras["episode"]["load_hysteresis_agree"] = self.load_hysteresis_agree_last
+        if self.cfg.domain_rand.push_robots:
+            self.extras["episode"]["max_push_vel_xy"] = torch.tensor(
+                self._get_curriculum_push_vel_xy(), device=self.device
+            )
         # log additional curriculum info
         if self.cfg.terrain.curriculum:
             self.extras["episode"]["group_terrain_level"] = torch.mean(
@@ -263,6 +269,20 @@ class BipedWF(BaseTask):
         dof_list = [0,1,2,4,5,6]
         dof_pos = (self.dof_pos - self.default_dof_pos)[:,dof_list]
         # dof_pos = torch.remainder(dof_pos + self.pi, 2 * self.pi) - self.pi
+        load_estimates = self._compute_load_estimates()
+        load_estimation_obs = torch.stack(
+            (
+                load_estimates["payload_mass"] * self.obs_scales.load_mass,
+                load_estimates["load_x"] * self.obs_scales.load_pos,
+                load_estimates["load_y"] * self.obs_scales.load_pos,
+                load_estimates["payload_present"],
+                load_estimates["sin_lieangle_L_thigh"],
+                load_estimates["cos_lieangle_L_thigh"],
+                load_estimates["sin_lieangle_R_thigh"],
+                load_estimates["cos_lieangle_R_thigh"],
+            ),
+            dim=-1,
+        )
 
         obs_buf = torch.cat(
             (
@@ -271,6 +291,7 @@ class BipedWF(BaseTask):
                 dof_pos * self.obs_scales.dof_pos,
                 self.dof_vel * self.obs_scales.dof_vel,
                 self.torques * self.obs_scales.torque,
+                load_estimation_obs,
                 self.actions,
                 # self.clock_inputs_sin.view(self.num_envs, 1),
                 # self.clock_inputs_cos.view(self.num_envs, 1),
@@ -286,6 +307,155 @@ class BipedWF(BaseTask):
             # priv_load_feat,
             self.obs_buf), dim=-1)
         return obs_buf, critic_obs_buf
+    
+    def _compute_load_estimates(self):
+        """
+        基于动力学估算环境内机器人的负载状态(质量和负载x/y坐标)。
+        你可以将该函数的输出加入到 observation 中，以帮助策略网络更好地感知当前的负载情况。
+        """
+        def _dof_index(name: str, fallback: int):
+            return self.dof_names.index(name) if name in self.dof_names else fallback
+
+        hip_L_idx = _dof_index("hip_L_Joint", 1)
+        hip_R_idx = _dof_index("hip_R_Joint", 5)
+        knee_L_idx = _dof_index("knee_L_Joint", 2)
+        knee_R_idx = _dof_index("knee_R_Joint", 6)
+
+        power_lhip = self.torques[:, hip_L_idx]
+        power_lknee = self.torques[:, knee_L_idx]
+        power_rhip = self.torques[:, hip_R_idx]
+        power_rknee = self.torques[:, knee_R_idx]
+
+        theta_lhip = self.dof_pos[:, hip_L_idx]
+        theta_rhip = self.dof_pos[:, hip_R_idx]
+
+        # 这里用四元数直接恢复 pitch，避免依赖额外的 euler 状态缓存
+        qx = self.base_quat[:, 0]
+        qy = self.base_quat[:, 1]
+        qz = self.base_quat[:, 2]
+        qw = self.base_quat[:, 3]
+        pitch = torch.asin(torch.clamp(2.0 * (qw * qy - qz * qx), -1.0 + 1e-6, 1.0 - 1e-6))
+
+        zero_thigh_angle = float(getattr(self.cfg.asset, "load_estimation_zero_thigh_angle", 2.0 * math.pi / 3.0))
+        thigh_len = float(getattr(self.cfg.asset, "load_estimation_thigh_length", 0.3))
+        gravity_cfg = getattr(self.sim_params, "gravity", None)
+        if gravity_cfg is None:
+            gravity = 9.81
+        else:
+            gravity_z = getattr(gravity_cfg, "z", None)
+            if gravity_z is None:
+                gravity = 9.81
+            else:
+                gravity = float(abs(gravity_z))
+        mass_offset = float(getattr(self.cfg.asset, "load_estimation_mass_offset", 9.585))
+        robot_width = float(getattr(self.cfg.asset, "load_estimation_robot_width", 0.251))
+        com_x_bias = float(getattr(self.cfg.asset, "load_estimation_com_x_bias", 0.2632))
+        position_limit = float(getattr(self.cfg.asset, "load_estimation_position_limit", 0.5))
+        position_zero_mass_threshold = float(
+            getattr(self.cfg.asset, "load_estimation_position_zero_mass_threshold", 1.0)
+        )
+
+        # WF_TRON1A zero pose: thigh is 120 deg from +X in the sagittal plane.
+        # Left hip axis is +Y, right hip axis is -Y, so the hip angle signs differ.
+        lieangle_L_thigh = 3.14159 - (zero_thigh_angle - theta_lhip) - pitch   #zero_thigh_angle - theta_lhip应该是机体和髋夹角
+        lieangle_R_thigh = 3.14159 - (zero_thigh_angle + theta_rhip) - pitch   #zero_thigh_angle + theta_lhip应该是机体和髋夹角
+
+        sin_lieangle_L_thigh = torch.sin(lieangle_L_thigh)
+        cos_lieangle_L_thigh = torch.cos(lieangle_L_thigh)
+        sin_lieangle_R_thigh = torch.sin(lieangle_R_thigh)
+        cos_lieangle_R_thigh = torch.cos(lieangle_R_thigh)
+
+        cos_l = cos_lieangle_L_thigh
+        cos_l = torch.where(
+            torch.abs(cos_l) < 1e-3,
+            torch.where(cos_l >= 0.0, torch.full_like(cos_l, 1e-3), torch.full_like(cos_l, -1e-3)),
+            cos_l,
+        )
+        cos_r = cos_lieangle_R_thigh
+        cos_r = torch.where(
+            torch.abs(cos_r) < 1e-3,
+            torch.where(cos_r >= 0.0, torch.full_like(cos_r, 1e-3), torch.full_like(cos_r, -1e-3)),
+            cos_r,
+        )
+        sin_pitch = torch.sin(pitch)
+        sin_pitch = torch.where(
+            torch.abs(sin_pitch) < 1e-3,
+            torch.where(sin_pitch >= 0.0, torch.full_like(sin_pitch, 1e-3), torch.full_like(sin_pitch, -1e-3)),
+            sin_pitch,
+        )
+        tan_pitch = torch.tan(pitch)
+        cos_pitch = torch.cos(pitch)
+        load_torque_left = -power_lknee - power_lhip
+        load_torque_right = power_rknee + power_rhip
+        payload_mass_left = 0.5*(load_torque_left / ((thigh_len * cos_r+0.05144) * gravity )- mass_offset)
+        payload_mass_right = 0.5*(load_torque_right / ((thigh_len * cos_r+0.05144) * gravity )- mass_offset)
+
+        payload_mass = payload_mass_left + payload_mass_right  # mass_offset 是为了修正机体质量引入的一个经验值，实际使用时可以根据具体情况调整或通过校准获得。 000
+        payload_mass_safe = torch.clamp(payload_mass, min=1e-6)
+
+
+        load_y = 0.5 * robot_width * (payload_mass_left - payload_mass_right) / payload_mass_safe
+        load_x = ((-power_rhip + power_lhip) / payload_mass_safe / gravity / cos_pitch) - com_x_bias * tan_pitch - 0.05144
+        low_payload_mass = payload_mass_safe < position_zero_mass_threshold
+        load_x = torch.where(low_payload_mass, torch.zeros_like(load_x), load_x)
+        load_y = torch.where(low_payload_mass, torch.zeros_like(load_y), load_y)
+        load_x = torch.clamp(load_x, -position_limit, position_limit)
+        load_y = torch.clamp(load_y, -position_limit, position_limit)
+
+        self.estimated_payload_mass_raw = payload_mass_safe
+        self.estimated_load_y_raw = load_y
+        self.estimated_load_x_raw = load_x
+        payload_mass_safe, load_x, load_y = self._filter_load_estimation_outputs(
+            payload_mass_safe, load_x, load_y
+        )
+
+        self.estimated_payload_mass = payload_mass_safe
+        self.estimated_load_y = load_y
+        self.estimated_load_x = load_x
+        payload_present = (payload_mass_safe >= position_zero_mass_threshold).float()
+        self.estimated_payload_present = payload_present
+        self.load_estimation_sin_lieangle_L_thigh = sin_lieangle_L_thigh
+        self.load_estimation_cos_lieangle_L_thigh = cos_lieangle_L_thigh
+        self.load_estimation_sin_lieangle_R_thigh = sin_lieangle_R_thigh
+        self.load_estimation_cos_lieangle_R_thigh = cos_lieangle_R_thigh
+
+        load_estimates = {
+            "payload_mass": payload_mass_safe,
+            "load_x": load_x,
+            "load_y": load_y,
+            "payload_present": payload_present,
+            "sin_lieangle_L_thigh": sin_lieangle_L_thigh,
+            "cos_lieangle_L_thigh": cos_lieangle_L_thigh,
+            "sin_lieangle_R_thigh": sin_lieangle_R_thigh,
+            "cos_lieangle_R_thigh": cos_lieangle_R_thigh,
+        }
+        self.last_load_estimates = load_estimates
+        return load_estimates
+
+    def _filter_load_estimation_outputs(self, payload_mass, load_x, load_y):
+        if not hasattr(self, "load_estimation_filter_x1"):
+            return payload_mass, load_x, load_y
+
+        x_now = torch.stack((payload_mass, load_x, load_y), dim=-1)
+        y_now = (
+            self.load_estimation_b0 * x_now
+            + self.load_estimation_b1 * self.load_estimation_filter_x1
+            - self.load_estimation_a1 * self.load_estimation_filter_y1
+        )
+
+        init_mask = ~self.load_estimation_filter_initialized
+        if init_mask.any():
+            y_now = torch.where(init_mask.unsqueeze(-1), x_now, y_now)
+
+        self.load_estimation_filter_x1 = x_now
+        self.load_estimation_filter_y1 = y_now
+        self.load_estimation_filter_initialized[:] = True
+
+        return y_now[:, 0], y_now[:, 1], y_now[:, 2]
+    
+    
+    
+    
     
     def _post_physics_step_callback(self):
         """Callback called before computing terminations, rewards, and observations
@@ -402,7 +572,8 @@ class BipedWF(BaseTask):
             noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
         )
         noise_vec[20:28] = 0.0  # raw torques
-        noise_vec[28:] = 0.0  # previous actions
+        noise_vec[28:36] = 0.0  # load estimation features
+        noise_vec[36:] = 0.0  # previous actions
         return noise_vec
 
     def _init_buffers(self):
@@ -453,6 +624,25 @@ class BipedWF(BaseTask):
         )
         self.butter_y2 = torch.zeros(
             self.num_envs, n_filtered_features, dtype=torch.float, device=self.device, requires_grad=False
+        )
+
+        load_cutoff_normalized = float(
+            getattr(self.cfg.asset, "load_estimation_filter_cutoff_normalized", 1.0 / 10.0)
+        )
+        load_cutoff_normalized = max(1e-6, min(load_cutoff_normalized, 0.999999))
+        load_filter_w = math.tan(0.5 * math.pi * load_cutoff_normalized)
+        load_filter_norm = 1.0 / (1.0 + load_filter_w)
+        self.load_estimation_b0 = load_filter_w * load_filter_norm
+        self.load_estimation_b1 = self.load_estimation_b0
+        self.load_estimation_a1 = (load_filter_w - 1.0) * load_filter_norm
+        self.load_estimation_filter_x1 = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.load_estimation_filter_y1 = torch.zeros(
+            self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False
+        )
+        self.load_estimation_filter_initialized = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
         )
         self.encoder_obs_history = torch.zeros(
             self.num_envs,

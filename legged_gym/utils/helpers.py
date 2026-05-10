@@ -228,6 +228,35 @@ def get_args():
             "help": "Maximum number of training iterations. Overrides config file if provided.",
         },
         {"name": "--exptid", "type": str, "default": "", "help": "exptid"},
+        {
+            "name": "--test_joint_mode",
+            "action": "store_true",
+            "default": False,
+            "help": "Enable single-joint test mode for play.py",
+        },
+        {
+            "name": "--test_joint_name",
+            "type": str,
+            "help": "Name of the joint to test in test_joint_mode (e.g., 'hip_L_Joint')",
+        },
+        {
+            "name": "--test_joint_amplitude",
+            "type": float,
+            "default": 0.3,
+            "help": "Amplitude of joint rotation in radians (default: 0.3)",
+        },
+        {
+            "name": "--test_joint_period",
+            "type": float,
+            "default": 4.0,
+            "help": "Period of joint rotation in seconds (default: 4.0)",
+        },
+        {
+            "name": "--test_joint_offset",
+            "type": float,
+            "default": 0.0,
+            "help": "Offset of joint angle in radians (default: 0.0)",
+        },
     ]
     # parse arguments
     args = gymutil.parse_arguments(
