@@ -266,7 +266,7 @@ def evaluate_loaded_runner(env, ppo_runner, args):
 
     with torch.no_grad():
         for _ in range(num_steps):
-            est = encoder(obs_history)
+            est = encoder(obs_history, obs)
             actions = policy(torch.cat((est, obs, commands), dim=-1).detach())
 
             env.commands[:, :] = commands_val

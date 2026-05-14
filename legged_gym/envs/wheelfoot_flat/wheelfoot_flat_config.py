@@ -34,7 +34,7 @@ class BipedCfgWF(BaseConfig):
     class env:
         # 8GB-class GPU friendly default; increase gradually after stability is confirmed.
         num_envs = 1024
-        num_observations = 30 + 6 - 2 - 4 - 2 + 8 + 8  # +8 raw torque, +8 load estimation features
+        num_observations = 30 + 6 - 2 - 4 - 2 + 8 + 8 + 4  # +8 raw torque, +8 load estimation, +4 QS latent baseline
         num_critic_observations = 7 + num_observations
         num_height_samples = 117
         num_actions = 8
@@ -179,6 +179,8 @@ class BipedCfgWF(BaseConfig):
         load_estimation_zero_thigh_angle = 2.0943951023931953  # 120 deg zero pose
         load_estimation_mass_offset = 12.08
         load_estimation_body_mass = 9.58
+        load_estimation_body_com0 = [0.04576, 0.00014, -0.16398]
+        load_estimation_load_z = 0.10
         load_estimation_filter_cutoff_normalized = 1.0 / 10.0  # butter(1, 1/10, "low")
         load_estimation_robot_width = 0.251
         load_estimation_position_limit = 0.5
@@ -426,6 +428,8 @@ class BipedCfgPPOWF(BaseConfig):
         extra_loss_vel_w = 1.0
         extra_loss_mass_w = 2.0
         extra_loss_com_w = 6.0
+        use_load_residual_estimation = True
+        load_residual_baseline_obs_start = 36
         # 当样本检测到负载在体时，对mass/com监督加权
         extra_loss_load_boost = 6.0
         extra_loss_mass_eps = 1.0e-3

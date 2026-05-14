@@ -307,7 +307,8 @@ class RolloutStorage:
                 end = (i + 1) * mini_batch_size
                 batch_idx = indices[start:end]
 
+                obs_batch = observations[batch_idx]
                 next_obs_batch = next_observations[batch_idx]
                 critic_obs_batch = critic_obs[batch_idx]
                 obs_history_batch = obs_history[batch_idx]
-                yield next_obs_batch, critic_obs_batch, obs_history_batch
+                yield obs_batch, next_obs_batch, critic_obs_batch, obs_history_batch

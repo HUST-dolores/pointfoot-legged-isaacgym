@@ -73,6 +73,8 @@ class PPO:
         extra_loss_com_eps=1.0e-3,
         extra_loss_regression="mse",
         extra_loss_huber_delta=1.0e-2,
+        use_load_residual_estimation=False,
+        load_residual_baseline_obs_start=36,
         device="cpu",
     ):
         self.device = device
@@ -125,6 +127,8 @@ class PPO:
                 "expected one of ['mse', 'smooth_l1', 'huber']"
             )
         self.extra_loss_huber_delta = float(extra_loss_huber_delta)
+        self.use_load_residual_estimation = bool(use_load_residual_estimation)
+        self.load_residual_baseline_obs_start = int(load_residual_baseline_obs_start)
 
     def _elementwise_regression_loss(self, pred, target):
         """Element-wise regression loss for extra supervision.
@@ -141,6 +145,31 @@ class PPO:
             reduction="none",
             beta=self.extra_loss_huber_delta,
         )
+
+    def _get_load_residual_baseline(self, obs):
+        if not self.use_load_residual_estimation:
+            return None
+        start = self.load_residual_baseline_obs_start
+        end = start + 4
+        if obs.shape[-1] < end:
+            raise ValueError(
+                "Residual load estimation expects a 4D quasi-static baseline in "
+                f"obs[:, {start}:{end}], but obs dim is {obs.shape[-1]}."
+            )
+        return obs[:, start:end]
+
+    def _apply_load_residual_to_encoder_out(self, encoder_out, obs):
+        if not self.use_load_residual_estimation:
+            return encoder_out
+        if encoder_out.shape[-1] < 7:
+            return encoder_out
+        baseline = self._get_load_residual_baseline(obs)
+        corrected_mass_com = baseline + encoder_out[:, 3:7]
+        return torch.cat((encoder_out[:, 0:3], corrected_mass_com, encoder_out[:, 7:]), dim=-1)
+
+    def encode_for_policy(self, obs_history, obs):
+        encoder_out = self.encoder.encode(obs_history)
+        return self._apply_load_residual_to_encoder_out(encoder_out, obs)
 
     def init_storage(
         self,
@@ -172,7 +201,7 @@ class PPO:
     def act(self, obs, obs_history, commands, critic_obs):
         critic_obs = torch.cat((critic_obs, commands), dim=-1)
         # act
-        encoder_out = self.encoder.encode(obs_history)
+        encoder_out = self.encode_for_policy(obs_history, obs)
         self.transition.actions = self.actor_critic.act(
             torch.cat((encoder_out, obs, commands), dim=-1)
         ).detach()
@@ -239,7 +268,10 @@ class PPO:
             old_mu_batch,
             old_sigma_batch,
         ) in generator:
-            encoder_out_batch = self.encoder.encode(obs_history_batch)
+            encoder_out_batch_raw = self.encoder.encode(obs_history_batch)
+            encoder_out_batch = self._apply_load_residual_to_encoder_out(
+                encoder_out_batch_raw, obs_batch
+            )
             commands_batch = group_commands_batch
             self.actor_critic.act(
                 torch.cat(
@@ -344,6 +376,7 @@ class PPO:
                 self.num_mini_batches, self.num_learning_epochs
             )
             for (
+                obs_batch,
                 next_obs_batch,
                 critic_obs_batch,
                 obs_history_batch,
@@ -357,6 +390,13 @@ class PPO:
                     vel_target = critic_obs_batch[:, 0:3]
                     mass_target = critic_obs_batch[:, 3:4]
                     com_target = critic_obs_batch[:, 4:7]
+                    if self.use_load_residual_estimation:
+                        residual_baseline = self._get_load_residual_baseline(obs_batch)
+                        mass_supervision_target = mass_target - residual_baseline[:, 0:1]
+                        com_supervision_target = com_target - residual_baseline[:, 1:4]
+                    else:
+                        mass_supervision_target = mass_target
+                        com_supervision_target = com_target
 
                     vel_pred = encode_batch[:, 0:3]
                     mass_pred = encode_batch[:, 3:4]
@@ -375,11 +415,11 @@ class PPO:
 
                     vel_loss = self._elementwise_regression_loss(vel_pred, vel_target).mean()
                     mass_loss = (
-                        self._elementwise_regression_loss(mass_pred, mass_target)
+                        self._elementwise_regression_loss(mass_pred, mass_supervision_target)
                         * load_weight
                     ).mean()
                     com_loss = (
-                        self._elementwise_regression_loss(com_pred, com_target)
+                        self._elementwise_regression_loss(com_pred, com_supervision_target)
                         * load_weight
                     ).mean()
 
@@ -395,14 +435,19 @@ class PPO:
                     # -------------------------------------------------------------
                     with torch.no_grad():
                         vel_mse = (vel_pred - vel_target).pow(2).mean().item()
+                        corrected_encode_batch = self._apply_load_residual_to_encoder_out(
+                            encode_batch, obs_batch
+                        )
+                        mass_eval_pred = corrected_encode_batch[:, 3:4]
+                        com_eval_pred = corrected_encode_batch[:, 4:7]
                         
                         # load_present 形状类似 (batch_size, 1)
                         is_load_on = load_present.squeeze()
                         
                         if is_load_on.any():
                             # 只统计真正带负载时刻的 mass 和 com 纯误差
-                            mass_mse = (mass_pred[is_load_on] - mass_target[is_load_on]).pow(2).mean().item()
-                            com_mse  = (com_pred[is_load_on] - com_target[is_load_on]).pow(2).mean().item()
+                            mass_mse = (mass_eval_pred[is_load_on] - mass_target[is_load_on]).pow(2).mean().item()
+                            com_mse  = (com_eval_pred[is_load_on] - com_target[is_load_on]).pow(2).mean().item()
                         else:
                             # 当前 batch 内如果完全没有负载（比如前 1000 iter），记为0或者最近的值
                             mass_mse = 0.0

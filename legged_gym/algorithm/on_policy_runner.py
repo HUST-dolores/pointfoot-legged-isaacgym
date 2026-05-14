@@ -203,7 +203,7 @@ class OnPolicyRunner:
 
                 critic_obs_ = torch.cat((critic_obs, commands), dim=-1)
                 if self.alg.critic_take_latent:
-                    encoder_out = self.alg.encoder.encode(obs_history)
+                    encoder_out = self.alg.encode_for_policy(obs_history, obs)
                     self.alg.compute_returns(
                         torch.cat((critic_obs_, encoder_out), dim=-1)
                     )
@@ -402,7 +402,13 @@ class OnPolicyRunner:
         self.alg.encoder.eval()  # switch to evaluation mode (dropout for example)
         if device is not None:
             self.alg.encoder.to(device)
-        return self.alg.encoder.encode
+
+        def _encode(obs_history, obs=None):
+            if obs is None:
+                return self.alg.encoder.encode(obs_history)
+            return self.alg.encode_for_policy(obs_history, obs)
+
+        return _encode
 
     def get_actor_critic(self, device=None):
         self.alg.actor_critic.eval()  # switch to evaluation mode (dropout for example)

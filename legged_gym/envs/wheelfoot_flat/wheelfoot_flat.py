@@ -283,6 +283,13 @@ class BipedWF(BaseTask):
             ),
             dim=-1,
         )
+        load_residual_baseline_obs = torch.cat(
+            (
+                load_estimates["qs_mass_delta"].unsqueeze(-1) * self.obs_scales.mass_scale,
+                load_estimates["qs_com_delta"] * self.obs_scales.com_scale,
+            ),
+            dim=-1,
+        )
 
         obs_buf = torch.cat(
             (
@@ -292,6 +299,7 @@ class BipedWF(BaseTask):
                 self.dof_vel * self.obs_scales.dof_vel,
                 self.torques * self.obs_scales.torque,
                 load_estimation_obs,
+                load_residual_baseline_obs,
                 self.actions,
                 # self.clock_inputs_sin.view(self.num_envs, 1),
                 # self.clock_inputs_cos.view(self.num_envs, 1),
@@ -413,11 +421,39 @@ class BipedWF(BaseTask):
         self.estimated_load_y = load_y
         self.estimated_load_x = load_x
         payload_present = (payload_mass_safe >= position_zero_mass_threshold).float()
+        body_mass = float(getattr(self.cfg.asset, "load_estimation_body_mass", 9.58))
+        body_com0_cfg = getattr(
+            self.cfg.asset,
+            "load_estimation_body_com0",
+            [0.0, 0.0, 0.0],
+        )
+        load_z = float(getattr(self.cfg.asset, "load_estimation_load_z", 0.10))
+        qs_mass_delta = torch.where(
+            payload_present > 0.0,
+            payload_mass_safe,
+            torch.zeros_like(payload_mass_safe),
+        )
+        load_pos = torch.stack(
+            (load_x, load_y, torch.full_like(load_x, load_z)),
+            dim=-1,
+        )
+        body_com0 = torch.as_tensor(
+            body_com0_cfg,
+            device=self.device,
+            dtype=load_pos.dtype,
+        ).view(1, 3)
+        qs_total_mass = body_mass + qs_mass_delta
+        qs_com = (
+            body_mass * body_com0 + qs_mass_delta.unsqueeze(-1) * load_pos
+        ) / qs_total_mass.clamp_min(1e-6).unsqueeze(-1)
+        qs_com_delta = qs_com - body_com0
         self.estimated_payload_present = payload_present
         self.load_estimation_sin_lieangle_L_thigh = sin_lieangle_L_thigh
         self.load_estimation_cos_lieangle_L_thigh = cos_lieangle_L_thigh
         self.load_estimation_sin_lieangle_R_thigh = sin_lieangle_R_thigh
         self.load_estimation_cos_lieangle_R_thigh = cos_lieangle_R_thigh
+        self.load_estimation_qs_mass_delta = qs_mass_delta
+        self.load_estimation_qs_com_delta = qs_com_delta
 
         load_estimates = {
             "payload_mass": payload_mass_safe,
@@ -428,6 +464,8 @@ class BipedWF(BaseTask):
             "cos_lieangle_L_thigh": cos_lieangle_L_thigh,
             "sin_lieangle_R_thigh": sin_lieangle_R_thigh,
             "cos_lieangle_R_thigh": cos_lieangle_R_thigh,
+            "qs_mass_delta": qs_mass_delta,
+            "qs_com_delta": qs_com_delta,
         }
         self.last_load_estimates = load_estimates
         return load_estimates
@@ -573,7 +611,8 @@ class BipedWF(BaseTask):
         )
         noise_vec[20:28] = 0.0  # raw torques
         noise_vec[28:36] = 0.0  # load estimation features
-        noise_vec[36:] = 0.0  # previous actions
+        noise_vec[36:40] = 0.0  # quasi-static latent baseline for residual learning
+        noise_vec[40:] = 0.0  # previous actions
         return noise_vec
 
     def _init_buffers(self):

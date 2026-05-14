@@ -219,7 +219,7 @@ def play(args):
                 print(f"[TEST-MODE] step={i} time={time_s:.2f}s target_angle={target_angle:.4f} rad phase={phase:.2f}")
         else:
             # 正常策略推理模式
-            est = encoder(obs_history)
+            est = encoder(obs_history, obs)
             actions = policy(torch.cat((est, obs, commands), dim=-1).detach())
 
         env.commands[:, :] = commands_val
