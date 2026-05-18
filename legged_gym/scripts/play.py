@@ -88,8 +88,8 @@ def play(args):
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.randomize_restitution = False
     env_cfg.domain_rand.randomize_base_com = False
-    env_cfg.domain_rand.push_robots = True
-    env_cfg.domain_rand.push_interval_s = 3
+    env_cfg.domain_rand.push_robots = False
+    env_cfg.domain_rand.push_interval_s = 5
     env_cfg.domain_rand.push_curriculum = False
     env_cfg.domain_rand.max_push_vel_xy = 2.0
     env_cfg.domain_rand.randomize_Kp = False
@@ -296,6 +296,10 @@ def play(args):
                 payload_mass_est = load_est["payload_mass"][robot_index].item()
                 load_y_est = load_est["load_y"][robot_index].item()
                 load_x_est = load_est["load_x"][robot_index].item()
+                # raw (pre-filter) QS estimates for comparison
+                payload_mass_raw = env.estimated_payload_mass_raw[robot_index].item() if hasattr(env, "estimated_payload_mass_raw") else payload_mass_est
+                load_x_raw = env.estimated_load_x_raw[robot_index].item() if hasattr(env, "estimated_load_x_raw") else load_x_est
+                load_y_raw = env.estimated_load_y_raw[robot_index].item() if hasattr(env, "estimated_load_y_raw") else load_y_est
                 body_mass_for_load_estimation = float(
                     getattr(env.cfg.asset, "load_estimation_body_mass", 9.58)
                 )
@@ -344,19 +348,27 @@ def play(args):
                 est_load_x = min(load_x_est, 0.5)
                 ref_load_x = min(actual_load_x, 0.5)
 
+                payload_mass_left = load_est["payload_mass_left"][robot_index].item() if "payload_mass_left" in load_est else 0.0
+                payload_mass_right = load_est["payload_mass_right"][robot_index].item() if "payload_mass_right" in load_est else 0.0
+
                 logger.log_states(
                     {
                         "payload_mass": est_payload_mass,
                         "payload_mass_ref": ref_payload_mass,
+                        "payload_mass_left": payload_mass_left,
+                        "payload_mass_right": payload_mass_right,
                         "load_y": est_load_y,
                         "load_y_ref": ref_load_y,
                         "load_x": est_load_x,
                         "load_x_ref": ref_load_x,
                         "payload_mass_est": payload_mass_est,
+                        "payload_mass_raw": payload_mass_raw,
                         "payload_mass_actual": current_true_load_mass,
                         "load_x_est": load_x_est,
+                        "load_x_raw": load_x_raw,
                         "load_x_actual": actual_load_x,
                         "load_y_est": load_y_est,
+                        "load_y_raw": load_y_raw,
                         "load_y_actual": actual_load_y,
                         "robot_mass_est": estimated_total_mass,
                         "robot_mass_actual": actual_total_mass,

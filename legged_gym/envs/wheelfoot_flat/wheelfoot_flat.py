@@ -328,6 +328,8 @@ class BipedWF(BaseTask):
         hip_R_idx = _dof_index("hip_R_Joint", 5)
         knee_L_idx = _dof_index("knee_L_Joint", 2)
         knee_R_idx = _dof_index("knee_R_Joint", 6)
+        abad_L_idx = _dof_index("abad_L_Joint", 0)
+        abad_R_idx = _dof_index("abad_R_Joint", 4)
 
         power_lhip = self.torques[:, hip_L_idx]
         power_lknee = self.torques[:, knee_L_idx]
@@ -336,6 +338,8 @@ class BipedWF(BaseTask):
 
         theta_lhip = self.dof_pos[:, hip_L_idx]
         theta_rhip = self.dof_pos[:, hip_R_idx]
+        theta_labad = self.dof_pos[:, abad_L_idx]
+        theta_rabad = self.dof_pos[:, abad_R_idx]
 
         # 这里用四元数直接恢复 pitch，避免依赖额外的 euler 状态缓存
         qx = self.base_quat[:, 0]
@@ -362,6 +366,12 @@ class BipedWF(BaseTask):
         position_zero_mass_threshold = float(
             getattr(self.cfg.asset, "load_estimation_position_zero_mass_threshold", 1.0)
         )
+        # abad-related geometry: effective vertical drop from abad axis to wheel-ground contact
+        # at zero pose; used to convert abad joint angle into lateral foot shift.
+        leg_eff_length = float(getattr(self.cfg.asset, "load_estimation_leg_eff_length", 0.55))
+        # Sign of right-leg abad axis relative to left-leg's. If URDF gives both legs same +X
+        # axis, set to +1; if opposite axes (typical, mirrors hip convention), set to -1.
+        abad_R_sign = float(getattr(self.cfg.asset, "load_estimation_abad_R_sign", -1.0))
 
         # WF_TRON1A zero pose: thigh is 120 deg from +X in the sagittal plane.
         # Left hip axis is +Y, right hip axis is -Y, so the hip angle signs differ.
@@ -393,17 +403,51 @@ class BipedWF(BaseTask):
         )
         tan_pitch = torch.tan(pitch)
         cos_pitch = torch.cos(pitch)
+
+        # abad correction factor 1: hip/knee torque axes tilt by abad angle, so a vertical
+        # foot force F_w produces tau_hip = x_foot * F_w * cos(theta_abad). To back out F_w
+        # from measured torque we therefore divide by cos(theta_abad).
+        cos_abad_L = torch.cos(theta_labad)
+        cos_abad_R = torch.cos(theta_rabad)
+        # avoid div-by-zero near +-pi/2
+        cos_abad_L_safe = torch.where(
+            torch.abs(cos_abad_L) < 1e-3,
+            torch.where(cos_abad_L >= 0.0, torch.full_like(cos_abad_L, 1e-3), torch.full_like(cos_abad_L, -1e-3)),
+            cos_abad_L,
+        )
+        cos_abad_R_safe = torch.where(
+            torch.abs(cos_abad_R) < 1e-3,
+            torch.where(cos_abad_R >= 0.0, torch.full_like(cos_abad_R, 1e-3), torch.full_like(cos_abad_R, -1e-3)),
+            cos_abad_R,
+        )
+
         load_torque_left = -power_lknee - power_lhip
         load_torque_right = power_rknee + power_rhip
-        payload_mass_left = 0.5*(load_torque_left / ((thigh_len * cos_r+0.05144) * gravity )- mass_offset)
-        payload_mass_right = 0.5*(load_torque_right / ((thigh_len * cos_r+0.05144) * gravity )- mass_offset)
+        payload_mass_left = 0.75*(load_torque_left / ((thigh_len * cos_l+0.05144) * gravity * cos_abad_L_safe)- mass_offset)-2.5
+        payload_mass_right = 0.75*(load_torque_right / ((thigh_len * cos_r+0.05144) * gravity * cos_abad_R_safe)- mass_offset)+0.65
 
         payload_mass = payload_mass_left + payload_mass_right  # mass_offset 是为了修正机体质量引入的一个经验值，实际使用时可以根据具体情况调整或通过校准获得。 000
-        payload_mass_safe = torch.clamp(payload_mass, min=1e-6)
+        # payload_mass_safe = torch.clamp(payload_mass, min=1e-6)
+        payload_mass_safe = payload_mass
 
+        # abad correction factor 2: each foot's actual lateral position in body frame is
+        # shifted by leg_eff_length * sin(theta_abad). Asymmetric abad angles thus produce
+        # a y bias if we keep using +-W/2 as the foot positions.
+        y_foot_L = 0.5 * robot_width + leg_eff_length * torch.sin(theta_labad)
+        y_foot_R = -0.5 * robot_width + abad_R_sign * leg_eff_length * torch.sin(theta_rabad)
 
-        load_y = 0.5 * robot_width * (payload_mass_left - payload_mass_right) / payload_mass_safe
-        load_x = ((-power_rhip + power_lhip) / payload_mass_safe / gravity / cos_pitch) - com_x_bias * tan_pitch - 0.05144
+        # Moment balance about body X-axis (roll), using actual foot y-positions:
+        #   y_L * m_L = y_foot_L * m_left + y_foot_R * m_right
+        payload_mass_safe_for_div = torch.where(
+            torch.abs(payload_mass_safe) < 1e-3,
+            torch.where(payload_mass_safe >= 0.0, torch.full_like(payload_mass_safe, 1e-3), torch.full_like(payload_mass_safe, -1e-3)),
+            payload_mass_safe,
+        )
+        load_y = (y_foot_L * payload_mass_left + y_foot_R * payload_mass_right) / payload_mass_safe_for_div + 0.05
+        T_body_x = float(getattr(self.cfg.asset, "load_estimation_t_body_x", 14.0))  # 标定值
+        load_x = ((-power_rhip + power_lhip - T_body_x) / payload_mass_safe / gravity / cos_pitch) - com_x_bias * tan_pitch + 0.12
+
+        # load_x = ((-power_rhip + power_lhip) / payload_mass_safe / gravity / cos_pitch) - com_x_bias * tan_pitch - 0.23
         low_payload_mass = payload_mass_safe < position_zero_mass_threshold
         load_x = torch.where(low_payload_mass, torch.zeros_like(load_x), load_x)
         load_y = torch.where(low_payload_mass, torch.zeros_like(load_y), load_y)
@@ -457,6 +501,8 @@ class BipedWF(BaseTask):
 
         load_estimates = {
             "payload_mass": payload_mass_safe,
+            "payload_mass_left": payload_mass_left,
+            "payload_mass_right": payload_mass_right,
             "load_x": load_x,
             "load_y": load_y,
             "payload_present": payload_present,
@@ -666,7 +712,7 @@ class BipedWF(BaseTask):
         )
 
         load_cutoff_normalized = float(
-            getattr(self.cfg.asset, "load_estimation_filter_cutoff_normalized", 1.0 / 10.0)
+            getattr(self.cfg.asset, "load_estimation_filter_cutoff_normalized", 1.0 / 1000.0)
         )
         load_cutoff_normalized = max(1e-6, min(load_cutoff_normalized, 0.999999))
         load_filter_w = math.tan(0.5 * math.pi * load_cutoff_normalized)

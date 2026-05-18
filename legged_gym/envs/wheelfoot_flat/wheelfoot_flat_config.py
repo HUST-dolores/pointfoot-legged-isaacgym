@@ -47,7 +47,7 @@ class BipedCfgWF(BaseConfig):
         fail_to_terminal_time_s = 0.5
 
     class terrain:
-        mesh_type = "trimesh"  # "heightfield" # none, plane, heightfield or trimesh
+        mesh_type = "plane"  # "heightfield" # none, plane, heightfield or trimesh
         horizontal_scale = 0.1  # [m]
         vertical_scale = 0.005  # [m]
         border_size = 25  # [m]
@@ -181,11 +181,14 @@ class BipedCfgWF(BaseConfig):
         load_estimation_body_mass = 9.58
         load_estimation_body_com0 = [0.04576, 0.00014, -0.16398]
         load_estimation_load_z = 0.10
-        load_estimation_filter_cutoff_normalized = 1.0 / 10.0  # butter(1, 1/10, "low")
+        load_estimation_filter_cutoff_normalized = 1.0 /20  # butter(1, 1/10, "low")  截止频率  1/100几乎直线
         load_estimation_robot_width = 0.251
         load_estimation_position_limit = 0.5
-        load_estimation_position_zero_mass_threshold = 1.0
+        load_estimation_position_zero_mass_threshold = 0.3
         load_estimation_com_x_bias = 0.2632  #0.0932+0.19 前者为髋关节到机体下表面，后者为机体厚度
+        # abad-related geometry for load estimation (compensates non-zero abad angle)
+        load_estimation_leg_eff_length = 0.55  # vertical distance from abad axis to wheel-ground contact at zero pose
+        load_estimation_abad_R_sign = 1.0     # sign of right abad axis relative to left (-1 if URDF axes mirror like hip)
         penalize_contacts_on = ["knee", "hip"]
         terminate_after_contacts_on = ["abad", "knee", "hip"]
         disable_gravity = False
@@ -222,7 +225,7 @@ class BipedCfgWF(BaseConfig):
         randomize_inertia = True
         randomize_inertia_range = [0.95, 1.05]
         push_robots = True
-        push_interval_s = 3.0
+        push_interval_s = 5.0
         push_curriculum = True
         push_curriculum_start_iter = 0
         push_curriculum_end_iter = 4000

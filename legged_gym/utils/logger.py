@@ -220,37 +220,37 @@ class Logger:
             a.plot(time, log["dof_torque"], label="measured")
         a.set(xlabel="time [s]", ylabel="Joint Torque [Nm]", title="Torque")
         a.legend()
-        # plot mass     
+        # plot mass (RL encoder output)
         a = axs[3, 3]
         if log["mass"]:
-            a.plot(time, log["mass"], label="Actual")
+            a.plot(time, log["mass"], label="Ground Truth", linestyle="--", color="k")
         if log["mass_est"]:
-            a.plot(time, log["mass_est"], label="Estimated")
-        a.set(xlabel="time [s]", ylabel="mass [kg]", title="mass")
+            a.plot(time, log["mass_est"], label="RL Encoder (QS+residual)", linewidth=2)
+        a.set(xlabel="time [s]", ylabel="mass [kg]", title="[RL] Robot Mass")
         a.legend()
-        
+
         a = axs[3, 0]
         if log["CoM_x"]:
-            a.plot(time, log["CoM_x"], label="Actual")
+            a.plot(time, log["CoM_x"], label="Ground Truth", linestyle="--", color="k")
         if log["CoM_est_x"]:
-            a.plot(time, log["CoM_est_x"], label="Estimated")
-        a.set(xlabel="time [s]", ylabel="CoM_x [m]", title="CoM_x")
+            a.plot(time, log["CoM_est_x"], label="RL Encoder (QS+residual)", linewidth=2)
+        a.set(xlabel="time [s]", ylabel="CoM_x [m]", title="[RL] Robot CoM X")
         a.legend()
 
         a = axs[3, 1]
         if log["CoM_y"]:
-            a.plot(time, log["CoM_y"], label="Actual")
+            a.plot(time, log["CoM_y"], label="Ground Truth", linestyle="--", color="k")
         if log["CoM_est_y"]:
-            a.plot(time, log["CoM_est_y"], label="Estimated")
-        a.set(xlabel="time [s]", ylabel="CoM_y [m]", title="CoM_y")
+            a.plot(time, log["CoM_est_y"], label="RL Encoder (QS+residual)", linewidth=2)
+        a.set(xlabel="time [s]", ylabel="CoM_y [m]", title="[RL] Robot CoM Y")
         a.legend()
-        
+
         a = axs[3, 2]
         if log["CoM_z"]:
-            a.plot(time, log["CoM_z"], label="Actual")
+            a.plot(time, log["CoM_z"], label="Ground Truth", linestyle="--", color="k")
         if log["CoM_est_z"]:
-            a.plot(time, log["CoM_est_z"], label="Estimated")
-        a.set(xlabel="time [s]", ylabel="CoM_z [m]", title="CoM_z")
+            a.plot(time, log["CoM_est_z"], label="RL Encoder (QS+residual)", linewidth=2)
+        a.set(xlabel="time [s]", ylabel="CoM_z [m]", title="[RL] Robot CoM Z")
         a.legend()
 
         # Fourth figure for all joint positions (8 motors)
@@ -286,48 +286,64 @@ class Logger:
         a.set(xlabel="time [s]", ylabel="loss", title="extra_loss_com_ave")
         a.legend()
 
-        # Third figure for load estimation outputs
-        fig3, axs3 = plt.subplots(3, 1, figsize=(8, 10))
-        fig3.canvas.manager.set_window_title('Load Estimation')
+        # Third figure for quasi-static load estimation outputs
+        fig3, axs3 = plt.subplots(4, 1, figsize=(8, 13))
+        fig3.canvas.manager.set_window_title('QS Payload Estimation (Quasi-Static Only)')
 
         a = axs3[0]
+        if log["payload_mass_raw"]:
+            a.plot(time, log["payload_mass_raw"], label="QS raw (pre-filter)", alpha=0.5, linestyle=":")
         if log["payload_mass"]:
-            a.plot(time, log["payload_mass"], label="Estimated")
+            a.plot(time, log["payload_mass"], label="QS filtered", linewidth=2)
         if log["payload_mass_ref"]:
-            a.plot(time, log["payload_mass_ref"], label="Actual")
-        a.set(xlabel="time [s]", ylabel="mass [kg]", title="Estimated Payload Mass")
+            a.plot(time, log["payload_mass_ref"], label="Ground Truth", linestyle="--", color="k")
+        a.set(xlabel="time [s]", ylabel="mass [kg]", title="[QS] Payload Mass Estimation")
         a.legend()
 
         a = axs3[1]
+        if log["load_x_raw"]:
+            a.plot(time, log["load_x_raw"], label="QS raw (pre-filter)", alpha=0.5, linestyle=":")
         if log["load_x"]:
-            a.plot(time, log["load_x"], label="Estimated")
+            a.plot(time, log["load_x"], label="QS filtered", linewidth=2)
         if log["load_x_ref"]:
-            a.plot(time, log["load_x_ref"], label="Actual")
-        a.set(xlabel="time [s]", ylabel="x [m]", title="Estimated Load X")
+            a.plot(time, log["load_x_ref"], label="Ground Truth", linestyle="--", color="k")
+        a.set(xlabel="time [s]", ylabel="x [m]", title="[QS] Payload CoM X Estimation")
         a.legend()
 
         a = axs3[2]
+        if log["load_y_raw"]:
+            a.plot(time, log["load_y_raw"], label="QS raw (pre-filter)", alpha=0.5, linestyle=":")
         if log["load_y"]:
-            a.plot(time, log["load_y"], label="Estimated")
+            a.plot(time, log["load_y"], label="QS filtered", linewidth=2)
         if log["load_y_ref"]:
-            a.plot(time, log["load_y_ref"], label="Actual")
-        a.set(xlabel="time [s]", ylabel="y [m]", title="Estimated Load Y")
+            a.plot(time, log["load_y_ref"], label="Ground Truth", linestyle="--", color="k")
+        a.set(xlabel="time [s]", ylabel="y [m]", title="[QS] Payload CoM Y Estimation")
+        a.legend()
+
+        a = axs3[3]
+        if log["payload_mass_left"]:
+            a.plot(time, log["payload_mass_left"], label="Left leg estimate", linewidth=2)
+        if log["payload_mass_right"]:
+            a.plot(time, log["payload_mass_right"], label="Right leg estimate", linewidth=2)
+        if log["payload_mass_ref"]:
+            a.plot(time, log["payload_mass_ref"], label="Ground Truth", linestyle="--", color="k")
+        a.set(xlabel="time [s]", ylabel="mass [kg]", title="[QS] Per-Leg Payload Mass (Left vs Right)")
         a.legend()
 
         fig5, axs5 = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
-        fig5.canvas.manager.set_window_title('Estimated Robot COM vs Actual')
+        fig5.canvas.manager.set_window_title('QS-based Robot Total COM vs Actual (Quasi-Static Only)')
         comparison_specs = [
-            ("robot_mass_est", "robot_mass_actual", "mass [kg]", "Robot Mass With Payload"),
-            ("robot_com_x_est", "robot_com_x_actual", "x [m]", "Robot COM X With Payload"),
-            ("robot_com_y_est", "robot_com_y_actual", "y [m]", "Robot COM Y With Payload"),
+            ("robot_mass_est", "robot_mass_actual", "mass [kg]", "[QS] Robot Total Mass (body + payload)"),
+            ("robot_com_x_est", "robot_com_x_actual", "x [m]", "[QS] Robot Total COM X"),
+            ("robot_com_y_est", "robot_com_y_actual", "y [m]", "[QS] Robot Total COM Y"),
         ]
         for ax, est_key, actual_key, ylabel, title in [
             (axs5[i], *spec) for i, spec in enumerate(comparison_specs)
         ]:
             if log[est_key]:
-                ax.plot(time, log[est_key], label="estimated from _compute_load_estimates", linewidth=2)
+                ax.plot(time, log[est_key], label="QS estimate", linewidth=2)
             if log[actual_key]:
-                ax.plot(time, log[actual_key], label="actual", linestyle="--")
+                ax.plot(time, log[actual_key], label="Ground Truth", linestyle="--", color="k")
             ax.set(xlabel="time [s]", ylabel=ylabel, title=title)
             ax.grid(True, alpha=0.3)
             ax.legend()
