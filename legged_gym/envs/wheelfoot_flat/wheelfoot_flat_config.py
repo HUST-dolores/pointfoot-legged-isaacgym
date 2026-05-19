@@ -51,6 +51,8 @@ class BipedCfgWF(BaseConfig):
         horizontal_scale = 0.1  # [m]
         vertical_scale = 0.005  # [m]
         border_size = 25  # [m]
+        # 用 curriculum=True 走 curiculum() 函数，配合 num_rows=1 → difficulty=0/1=0 (最易)。
+        # curriculum=False 会走 randomized_terrain，那里硬编码用 [0.5, 0.75, 0.9] 中高难度。
         curriculum = True
         static_friction = 0.4
         dynamic_friction = 0.4
@@ -76,10 +78,10 @@ class BipedCfgWF(BaseConfig):
         measured_points_y = [-0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4]
         selected = False  # select a unique terrain type and pass all arguments
         terrain_kwargs = None  # Dict of arguments for selected terrain
-        max_init_terrain_level = 2  # starting curriculum state
+        max_init_terrain_level = 0  # 仅第一级
         terrain_length = 8.0
         terrain_width = 8.0
-        num_rows = 3  # number of terrain rows (levels)
+        num_rows = 1  # 只保留 1 行难度（最易），不再多级
         num_cols = 20  # number of terrain cols (types)
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]

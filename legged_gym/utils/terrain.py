@@ -66,8 +66,9 @@ class Terrain:
         self.tot_rows = int(cfg.num_rows * self.length_per_env_pixels) + 2 * self.border
 
         self.height_field_raw = np.zeros((self.tot_rows, self.tot_cols), dtype=np.int16)
+        # make_terrain() reads/writes self.terrain_num regardless of branch; init unconditionally.
+        self.terrain_num = np.zeros(7, dtype=np.int16)
         if cfg.curriculum:
-            self.terrain_num = np.zeros(7, dtype=np.int16)
             self.curiculum()
         elif cfg.selected:
             self.selected_terrain()
