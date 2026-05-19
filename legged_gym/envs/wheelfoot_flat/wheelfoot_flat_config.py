@@ -448,7 +448,7 @@ class BipedCfgPPOWF(BaseConfig):
         use_load_residual_estimation = True
         load_residual_baseline_obs_start = 36
         # 当样本检测到负载在体时，对mass/com监督加权
-        extra_loss_load_boost = 6.0
+        extra_loss_load_boost = 3.0
         extra_loss_mass_eps = 1.0e-3
         extra_loss_com_eps = 1.0e-3
         # 额外监督回归形式："mse"(原方案) | "smooth_l1"/"huber"

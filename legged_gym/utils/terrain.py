@@ -111,9 +111,13 @@ class Terrain:
             # Env coordinates in the world
             (i, j) = np.unravel_index(k, (self.cfg.num_rows, self.cfg.num_cols))
 
+            # NOTE: SubTerrain 的 width/length 内部约定跟 cfg 的 terrain_width/length 是
+            # 转置关系——它输出的 height_field_raw.shape == (width_arg, length_arg)。
+            # 而 add_terrain_to_map 的目标 slot 期望 (length_per_env_pixels, width_per_env_pixels)。
+            # 所以这里要把 cfg 的两个维度 swap 后传进去，才能形状对得上。
             terrain = terrain_utils.SubTerrain(
                 "terrain",
-                width=self.width_per_env_pixels,
+                width=self.length_per_env_pixels,
                 length=self.width_per_env_pixels,
                 vertical_scale=self.vertical_scale,
                 horizontal_scale=self.horizontal_scale,
@@ -123,9 +127,10 @@ class Terrain:
             self.add_terrain_to_map(terrain, i, j)
 
     def make_terrain(self, choice, difficulty):
+        # SubTerrain 内部 width/length 转置：见 selected_terrain() 上方的 NOTE。
         terrain = terrain_utils.SubTerrain(
             "terrain",
-            width=self.width_per_env_pixels,
+            width=self.length_per_env_pixels,
             length=self.width_per_env_pixels,
             vertical_scale=self.cfg.vertical_scale,
             horizontal_scale=self.cfg.horizontal_scale,

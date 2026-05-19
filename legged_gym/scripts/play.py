@@ -47,6 +47,60 @@ import torch
 import matplotlib.pyplot as plt
 
 
+def _print_metrics_pretty(m):
+    """Pretty-print metrics returned by _compute_experiment_metrics."""
+    def g(k1, k2):
+        try:
+            v = m[k1][k2]
+            return f"{v:+.4f}" if v >= 0 else f"{v:+.4f}"
+        except Exception:
+            return "  N/A "
+
+    def gpos(k1, k2):
+        try:
+            v = m[k1][k2]
+            return f"{v:.4f}" if v >= 0 else "  N/A "
+        except Exception:
+            return "  N/A "
+
+    print("[play] ============= experiment metrics =============")
+    print(f"  num_envs = {m.get('num_envs', '?')}")
+    print(f"  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络")
+    print(f"")
+    print(f"  ====== LOAD MASS (kg) ======")
+    print(f"    [QS]  RMSE={gpos('rmse','mass')}  bias={g('bias','mass')}  "
+          f"per_env={gpos('rmse_per_env_mean','mass')}±{gpos('rmse_per_env_std','mass')}")
+    print(f"    [RL]  RMSE={gpos('rmse','enc_mass')}  bias={g('bias','enc_mass')}  "
+          f"per_env={gpos('rmse_per_env_mean','enc_mass')}±{gpos('rmse_per_env_std','enc_mass')}")
+    print(f"")
+    print(f"  ====== LOAD POSITION in body frame (m) — [QS] only task ======")
+    print(f"    [QS]  com_x RMSE={gpos('rmse','com_x')}  bias={g('bias','com_x')}")
+    print(f"    [QS]  com_y RMSE={gpos('rmse','com_y')}  bias={g('bias','com_y')}")
+    print(f"")
+    print(f"  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======")
+    print(f"    [QS]  x: RMSE={gpos('rmse','dcom_x_mc')}  bias={g('bias','dcom_x_mc')}  |  "
+          f"y: RMSE={gpos('rmse','dcom_y_mc')}  bias={g('bias','dcom_y_mc')}")
+    print(f"    [RL]  x: RMSE={gpos('rmse','dcom_x_e')}   bias={g('bias','dcom_x_e')}   |  "
+          f"y: RMSE={gpos('rmse','dcom_y_e')}   bias={g('bias','dcom_y_e')}")
+    print(f"")
+    print(f"  ====== convergence (mass < {m.get('thresholds',{}).get('mass_kg','?')} kg, "
+          f"hold ≥ {m.get('thresholds',{}).get('hold_s','?')} s) ======")
+    print(f"    [QS]  reached={gpos('conv_time_reached_frac','mass')}  @ avg "
+          f"{gpos('conv_time_per_env_mean','mass')} s")
+    print(f"    [RL]  reached={gpos('conv_time_reached_frac','enc_mass')}  @ avg "
+          f"{gpos('conv_time_per_env_mean','enc_mass')} s")
+    print(f"")
+    print(f"  ====== dynamic-phase RMSE (|vx| > "
+          f"{m.get('thresholds',{}).get('motion_v_mps','?')} m/s) ======")
+    print(f"    [QS]  mass={gpos('dyn_phase_per_env_mean','mass')} kg  "
+          f"dcom_x={gpos('dyn_phase_per_env_mean','dcom_x_mc')} m  "
+          f"dcom_y={gpos('dyn_phase_per_env_mean','dcom_y_mc')} m")
+    print(f"    [RL]  mass={gpos('dyn_phase_per_env_mean','enc_mass')} kg  "
+          f"dcom_x={gpos('dyn_phase_per_env_mean','dcom_x_e')} m  "
+          f"dcom_y={gpos('dyn_phase_per_env_mean','dcom_y_e')} m")
+    print("[play] =============================================")
+
+
 def _compute_experiment_metrics(logger, dt):
     """Compute headline metrics from Logger.
 
@@ -80,10 +134,22 @@ def _compute_experiment_metrics(logger, dt):
         v = logger.state_log.get(key)
         return np.asarray(v) if v else None
 
+    # (label, est_key, ref_key, threshold).
+    # 三组对比：
+    #   mass / enc_mass: 都是 load_mass (kg)，可直接比；ref 是真实 load mass。
+    #   com_x / com_y:   Model C 预测的"载荷在机体系下的 x/y 位置"，ref 是真实载荷位置。
+    #   dcom_*_mc / dcom_*_e: Model C 和 encoder 各自预测的 com_delta，ref 是真值 com_delta。
+    # 注意 com_x / com_y 跟 dcom_x/y 不是同一物理量（前者是载荷位置，后者是总 CoM 偏移），
+    # 但 dcom_*_mc vs dcom_*_e 是同一量，可以直接比较"残差网络好坏"。
     pairs = [
-        ("mass",  "payload_mass",     "payload_mass_ref",  0.5),    # threshold 0.5 kg
-        ("com_x", "load_x",           "load_x_ref",        0.05),
-        ("com_y", "load_y",           "load_y_ref",        0.05),
+        ("mass",       "payload_mass",        "payload_mass_ref",   0.5),    # Model C load mass
+        ("enc_mass",   "encoder_mass",        "payload_mass_ref",   0.5),    # Encoder load mass
+        ("com_x",      "load_x",              "load_x_ref",         0.05),   # Model C load 位置 x
+        ("com_y",      "load_y",              "load_y_ref",         0.05),   # Model C load 位置 y
+        ("dcom_x_mc",  "modelC_com_delta_x",  "true_com_delta_x",   0.02),   # Model C com_delta x
+        ("dcom_x_e",   "encoder_com_delta_x", "true_com_delta_x",   0.02),   # Encoder com_delta x
+        ("dcom_y_mc",  "modelC_com_delta_y",  "true_com_delta_y",   0.02),   # Model C com_delta y
+        ("dcom_y_e",   "encoder_com_delta_y", "true_com_delta_y",   0.02),   # Encoder com_delta y
     ]
     hold_s = 0.5
     hold_steps = max(1, int(round(hold_s / dt)))
@@ -202,29 +268,29 @@ def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 60
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs,1)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs,20)
 
     env_cfg.terrain.num_rows = 10
     env_cfg.terrain.num_cols = 20
-    # env_cfg.terrain.terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
-    env_cfg.terrain.terrain_proportions = [0, 1, 0, 0, 0]
-    env_cfg.terrain.max_init_terrain_level = 2
-    env_cfg.terrain.curriculum = True
+    # 跟训练 config 对齐：使用相同的地形 patch 类型分布
+    env_cfg.terrain.terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
+    env_cfg.terrain.max_init_terrain_level = 0  # 全部最低难度
+    env_cfg.terrain.curriculum = True  # 保持 True 走 curiculum() → difficulty=i/num_rows=0
 
     # Trimesh can crash silently when the mesh is too large for GPU PhysX.
-    # Use a lighter terrain map in play mode for debugging.
+    # 加大 patch 和 border，让机器人走 40s × 0.5 m/s = 20m 都不到边界，避免 reset 打断。
     if env_cfg.terrain.mesh_type == "trimesh":
-        env_cfg.terrain.num_rows = 2
+        env_cfg.terrain.num_rows = 1           # 只 1 级难度，无升级空间
         env_cfg.terrain.num_cols = 10
-        env_cfg.terrain.terrain_length = 6.0
-        env_cfg.terrain.terrain_width = 6.0
-        env_cfg.terrain.border_size = 8
-        env_cfg.terrain.max_init_terrain_level = 1
+        env_cfg.terrain.terrain_length = 20.0  # X 方向每个 patch 20m (走得开)
+        env_cfg.terrain.terrain_width = 10.0   # Y 方向每个 patch 10m
+        env_cfg.terrain.border_size = 20       # 周围 20m 平坦 border 作余量
+        env_cfg.terrain.max_init_terrain_level = 0  # 强制 level 0
         print(
-            "[PLAY] Using reduced trimesh size for stability: "
+            "[PLAY] trimesh layout (all level-0, non-flat, spacious for sustained walking): "
             f"rows={env_cfg.terrain.num_rows}, cols={env_cfg.terrain.num_cols}, "
-            f"length={env_cfg.terrain.terrain_length}, width={env_cfg.terrain.terrain_width}, "
-            f"border={env_cfg.terrain.border_size}"
+            f"length={env_cfg.terrain.terrain_length}m, width={env_cfg.terrain.terrain_width}m, "
+            f"border={env_cfg.terrain.border_size}m, max_init_level={env_cfg.terrain.max_init_terrain_level}"
         )
 
     env_cfg.noise.add_noise = True
@@ -560,10 +626,10 @@ def play(args):
                     _actual_lx = torch.zeros(_N, device=_dev)
                     _actual_ly = torch.zeros(_N, device=_dev)
 
-                logger.log_states_full({
-                    "payload_mass": load_est["payload_mass"],
-                    "payload_mass_ref": _true_mass,
-                    "load_x": load_est["load_x"],
+                full_dict = {
+                    "payload_mass": load_est["payload_mass"],     # Model C load mass (filtered, kg)
+                    "payload_mass_ref": _true_mass,                # truth load mass (kg)
+                    "load_x": load_est["load_x"],                  # Model C load 位置 x (m)
                     "load_x_ref": _actual_lx,
                     "load_y": load_est["load_y"],
                     "load_y_ref": _actual_ly,
@@ -573,7 +639,33 @@ def play(args):
                     "base_ang_vel_z": env.base_ang_vel[:, 2],
                     "command_x": env.commands[:, 0],
                     "command_yaw": env.commands[:, 2],
-                })
+                }
+
+                # Encoder 输出（反归一化到物理单位，跟 logger.plot_states 的 `mass_est` / `CoM_est_*` 一致）
+                if est is not None and est.shape[-1] >= 4:
+                    _mass_scale = float(env.cfg.normalization.obs_scales.mass_scale)
+                    full_dict["encoder_mass"] = est[:, 3] / _mass_scale  # encoder 预测 load mass (kg)
+                    if est.shape[-1] >= 7:
+                        _com_scale = float(env.cfg.normalization.obs_scales.com_scale)
+                        full_dict["encoder_com_delta_x"] = est[:, 4] / _com_scale  # encoder com_delta x (m)
+                        full_dict["encoder_com_delta_y"] = est[:, 5] / _com_scale
+                        full_dict["encoder_com_delta_z"] = est[:, 6] / _com_scale
+
+                # Model C 的 com_delta 预测（已存在 env.last_load_estimates["qs_com_delta"] 里）
+                if "qs_com_delta" in load_est:
+                    _qs_cd = load_est["qs_com_delta"]
+                    full_dict["modelC_com_delta_x"] = _qs_cd[:, 0]
+                    full_dict["modelC_com_delta_y"] = _qs_cd[:, 1]
+                    full_dict["modelC_com_delta_z"] = _qs_cd[:, 2]
+
+                # 真值 com_delta = (base_com - base_com0)，跟 encoder 预测同单位
+                if hasattr(env, "base_com") and hasattr(env, "base_com0"):
+                    _cd_true = env.base_com - env.base_com0
+                    full_dict["true_com_delta_x"] = _cd_true[:, 0]
+                    full_dict["true_com_delta_y"] = _cd_true[:, 1]
+                    full_dict["true_com_delta_z"] = _cd_true[:, 2]
+
+                logger.log_states_full(full_dict)
 
             logger.log_states(
                     {
@@ -712,7 +804,7 @@ def play(args):
             }
             logger.save_to_mat(mat_path, extra={"metrics": metrics, "meta": run_meta})
             print(f"[play] saved: {mat_path}")
-            print(f"[play] metrics: {metrics}")
+            _print_metrics_pretty(metrics)
             logger.plot_states()
 
         if 0 < i < stop_rew_log:
