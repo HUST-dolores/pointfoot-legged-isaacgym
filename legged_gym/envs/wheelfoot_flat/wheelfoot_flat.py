@@ -359,9 +359,16 @@ class BipedWF(BaseTask):
                 gravity = 9.81
             else:
                 gravity = float(abs(gravity_z))
-        mass_offset = float(getattr(self.cfg.asset, "load_estimation_mass_offset", 9.585))
+        mass_offset = float(getattr(self.cfg.asset, "load_estimation_mass_offset", 9.585))  # 旧公式用
         robot_width = float(getattr(self.cfg.asset, "load_estimation_robot_width", 0.251))
         com_x_bias = float(getattr(self.cfg.asset, "load_estimation_com_x_bias", 0.2632))
+        # Model C 标定参数：alpha_L, alpha_R, gamma_L, gamma_R, beta_hip, t_body_x, x_offset
+        alpha_L = float(getattr(self.cfg.asset, "load_estimation_alpha_L", 0.367))
+        alpha_R = float(getattr(self.cfg.asset, "load_estimation_alpha_R", 0.429))
+        gamma_L = float(getattr(self.cfg.asset, "load_estimation_gamma_L", 0.158))
+        gamma_R = float(getattr(self.cfg.asset, "load_estimation_gamma_R", -0.499))
+        beta_hip = float(getattr(self.cfg.asset, "load_estimation_beta_hip", -8.507))
+        x_offset = float(getattr(self.cfg.asset, "load_estimation_x_offset", -0.037))
         position_limit = float(getattr(self.cfg.asset, "load_estimation_position_limit", 0.5))
         position_zero_mass_threshold = float(
             getattr(self.cfg.asset, "load_estimation_position_zero_mass_threshold", 1.0)
@@ -423,10 +430,21 @@ class BipedWF(BaseTask):
 
         load_torque_left = -power_lknee - power_lhip
         load_torque_right = power_rknee + power_rhip
-        payload_mass_left = 0.75*(load_torque_left / ((thigh_len * cos_l+0.05144) * gravity * cos_abad_L_safe)- mass_offset)-2.5
-        payload_mass_right = 0.75*(load_torque_right / ((thigh_len * cos_r+0.05144) * gravity * cos_abad_R_safe)- mass_offset)+0.65
 
-        payload_mass = payload_mass_left + payload_mass_right  # mass_offset 是为了修正机体质量引入的一个经验值，实际使用时可以根据具体情况调整或通过校准获得。 000
+        # ===== 旧公式 (Model A, 在 (0,0,5kg) 处手调，远端偏差大) =====
+        # payload_mass_left  = 0.75*(load_torque_left  / ((thigh_len * cos_l + 0.05144) * gravity * cos_abad_L_safe) - mass_offset) - 2.5
+        # payload_mass_right = 0.75*(load_torque_right / ((thigh_len * cos_r + 0.05144) * gravity * cos_abad_R_safe) - mass_offset) + 0.65
+        # ============================================================
+
+        # Model C：左右独立 alpha / gamma + 对称 hip_diff 修正项。
+        # 4 个 mass × 16 (x,y) 工况拟合得到，mass RMSE 0.77 kg、x RMSE 0.021 m、y RMSE 0.066 m。
+        hip_diff = theta_lhip - theta_rhip
+        R_L = load_torque_left  / ((thigh_len * cos_l + 0.05144) * gravity * cos_abad_L_safe)
+        R_R = load_torque_right / ((thigh_len * cos_r + 0.05144) * gravity * cos_abad_R_safe)
+        payload_mass_left  = alpha_L * R_L + gamma_L + beta_hip * hip_diff
+        payload_mass_right = alpha_R * R_R + gamma_R + beta_hip * hip_diff
+
+        payload_mass = payload_mass_left + payload_mass_right
         # payload_mass_safe = torch.clamp(payload_mass, min=1e-6)
         payload_mass_safe = payload_mass
 
@@ -443,11 +461,18 @@ class BipedWF(BaseTask):
             torch.where(payload_mass_safe >= 0.0, torch.full_like(payload_mass_safe, 1e-3), torch.full_like(payload_mass_safe, -1e-3)),
             payload_mass_safe,
         )
-        load_y = (y_foot_L * payload_mass_left + y_foot_R * payload_mass_right) / payload_mass_safe_for_div + 0.05
-        T_body_x = float(getattr(self.cfg.asset, "load_estimation_t_body_x", 14.0))  # 标定值
-        load_x = ((-power_rhip + power_lhip - T_body_x) / payload_mass_safe / gravity / cos_pitch) - com_x_bias * tan_pitch + 0.12
+        load_y = (y_foot_L * payload_mass_left + y_foot_R * payload_mass_right) / payload_mass_safe_for_div
 
+        # ===== 旧 load_x 公式（手调 T_body_x=14, +0.12 偏置）=====
+        # T_body_x_old = 14.0
+        # load_x = ((-power_rhip + power_lhip - T_body_x_old) / payload_mass_safe / gravity / cos_pitch) - 0.2632 * tan_pitch + 0.12
+        # 更早版本：
         # load_x = ((-power_rhip + power_lhip) / payload_mass_safe / gravity / cos_pitch) - com_x_bias * tan_pitch - 0.23
+        # =========================================================
+
+        # Model C：T_body_x=6.17, com_x_bias=0.649, x_offset=-0.037
+        T_body_x = float(getattr(self.cfg.asset, "load_estimation_t_body_x", 6.17))
+        load_x = ((-power_rhip + power_lhip - T_body_x) / payload_mass_safe / gravity / cos_pitch) - com_x_bias * tan_pitch + x_offset
         low_payload_mass = payload_mass_safe < position_zero_mass_threshold
         load_x = torch.where(low_payload_mass, torch.zeros_like(load_x), load_x)
         load_y = torch.where(low_payload_mass, torch.zeros_like(load_y), load_y)

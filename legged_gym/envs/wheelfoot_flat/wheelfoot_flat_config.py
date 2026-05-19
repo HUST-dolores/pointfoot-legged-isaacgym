@@ -47,7 +47,7 @@ class BipedCfgWF(BaseConfig):
         fail_to_terminal_time_s = 0.5
 
     class terrain:
-        mesh_type = "plane"  # "heightfield" # none, plane, heightfield or trimesh
+        mesh_type = "trimesh"  # "heightfield" # none, plane, heightfield or trimesh
         horizontal_scale = 0.1  # [m]
         vertical_scale = 0.005  # [m]
         border_size = 25  # [m]
@@ -177,7 +177,7 @@ class BipedCfgWF(BaseConfig):
         foot_radius = 0.127
         load_estimation_thigh_length = 0.30000206  # URDF hip->knee sagittal length
         load_estimation_zero_thigh_angle = 2.0943951023931953  # 120 deg zero pose
-        load_estimation_mass_offset = 12.08
+        load_estimation_mass_offset = 12.08  # 仅旧版本公式 (Model A) 使用，Model C 不再使用
         load_estimation_body_mass = 9.58
         load_estimation_body_com0 = [0.04576, 0.00014, -0.16398]
         load_estimation_load_z = 0.10
@@ -185,7 +185,19 @@ class BipedCfgWF(BaseConfig):
         load_estimation_robot_width = 0.251
         load_estimation_position_limit = 0.5
         load_estimation_position_zero_mass_threshold = 0.3
-        load_estimation_com_x_bias = 0.2632  #0.0932+0.19 前者为髋关节到机体下表面，后者为机体厚度
+        # Model C 标定参数（2026-05-18 用 fit_load_estimation.py 在 4 个 mass × 16 (x,y) 工况上拟合得到）
+        # mass:  m_L = alpha_L * R_L + gamma_L + beta_hip * (theta_lhip - theta_rhip)
+        # mass:  m_R = alpha_R * R_R + gamma_R + beta_hip * (theta_lhip - theta_rhip)
+        # x:     load_x = (tau_lhip - tau_rhip - T_body_x) / (m * g * cos_pitch) - com_x_bias * tan_pitch + x_offset
+        load_estimation_alpha_L = 0.367
+        load_estimation_alpha_R = 0.429
+        load_estimation_gamma_L = 0.158
+        load_estimation_gamma_R = -0.499
+        load_estimation_beta_hip = -8.507
+        load_estimation_t_body_x = 6.17
+        load_estimation_com_x_bias = 0.649  # Model C 拟合值
+        # load_estimation_com_x_bias = 0.2632  # 旧值 (0.0932+0.19 前者为髋关节到机体下表面，后者为机体厚度)
+        load_estimation_x_offset = -0.037
         # abad-related geometry for load estimation (compensates non-zero abad angle)
         load_estimation_leg_eff_length = 0.55  # vertical distance from abad axis to wheel-ground contact at zero pose
         load_estimation_abad_R_sign = 1.0     # sign of right abad axis relative to left (-1 if URDF axes mirror like hip)
@@ -214,7 +226,7 @@ class BipedCfgWF(BaseConfig):
         friction_range = [0.2, 1.6]
         randomize_restitution = True
         restitution_range = [0.0, 1.0]
-        randomize_base_mass = True
+        randomize_base_mass = False
         added_mass_range = [-0.1, 0.1]         #
         add_random_load = True
         add_load_range = [2, 4]  # [kg]这个mass是负载的mass，定义后不会改变。  000 

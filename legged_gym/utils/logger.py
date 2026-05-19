@@ -36,25 +36,37 @@ import torch
 
 class Logger:
     def __init__(self, dt):
-        self.state_log = defaultdict(list)
+        self.state_log = defaultdict(list)       # 1D series for robot_index=0 (used by plot)
+        self.state_log_full = defaultdict(list)  # full per-env arrays; saved to .mat as 2D (T,N)
         self.rew_log = defaultdict(list)
         self.dt = dt
         self.num_episodes = 0
         self.plot_process = None
 
-    def log_state(self, key, value):        
-        if isinstance(value, torch.Tensor): 
-            value = value.detach().cpu() 
-            if value.numel() == 1: 
-                value = value.item() 
-            else: 
-                value = value.numpy() 
+    def log_state(self, key, value):
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu()
+            if value.numel() == 1:
+                value = value.item()
+            else:
+                value = value.numpy()
 
         self.state_log[key].append(value)
 
     def log_states(self, dict):
         for key, value in dict.items():
             self.log_state(key, value)
+
+    def log_states_full(self, dict_of_tensors):
+        """Append per-env arrays at the current timestep. Values are (num_envs,)
+        tensors or 1-D numpy arrays. On save these become (T, N) matrices in .mat
+        with key suffixed by '_all'."""
+        for key, value in dict_of_tensors.items():
+            if isinstance(value, torch.Tensor):
+                value = value.detach().cpu().numpy()
+            else:
+                value = np.asarray(value)
+            self.state_log_full[key].append(value)
 
     def log_rewards(self, dict, num_episodes):
         for key, value in dict.items():
@@ -66,14 +78,27 @@ class Logger:
         self.state_log.clear()
         self.rew_log.clear()
 
-    def save_to_mat(self, filepath):
+    def save_to_mat(self, filepath, extra=None):
+        """Save logged state to .mat. Optional `extra` dict is merged at top level
+        (nested dicts become MATLAB structs).
+
+        Saves:
+          - <key>     : 1D array (T,) from state_log (robot 0 only; backward compatible)
+          - <key>_all : 2D array (T, num_envs) from state_log_full (all envs)
+        """
         import os
         import scipy.io as sio
         mat_dict = {}
         for key, value in self.state_log.items():
             mat_dict[key] = np.array(value)
+        for key, value_list in self.state_log_full.items():
+            arr = np.stack(value_list, axis=0)  # (T, N)
+            mat_dict[f"{key}_all"] = arr
         mat_dict["dt"] = self.dt
-        
+        if extra:
+            for k, v in extra.items():
+                mat_dict[k] = v
+
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         sio.savemat(filepath, mat_dict)
         print(f"Saved play data to MATLAB format: {filepath}")

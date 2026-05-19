@@ -257,6 +257,12 @@ def get_args():
             "default": 0.0,
             "help": "Offset of joint angle in radians (default: 0.0)",
         },
+        {
+            "name": "--exp_tag",
+            "type": str,
+            "default": "",
+            "help": "Tag for this play/experiment run; appended to output .mat filename to avoid overwrite",
+        },
     ]
     # parse arguments
     args = gymutil.parse_arguments(

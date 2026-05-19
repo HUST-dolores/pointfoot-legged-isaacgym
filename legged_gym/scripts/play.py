@@ -47,6 +47,150 @@ import torch
 import matplotlib.pyplot as plt
 
 
+def _compute_experiment_metrics(logger, dt):
+    """Compute headline metrics from Logger.
+
+    Uses logger.state_log_full when available (per-env arrays, shape (T, N)) to
+    compute statistics over ALL envs at once. Falls back to state_log (robot 0
+    only, shape (T,)) if full data is missing.
+
+    Returns nested dict → MATLAB struct with:
+      rmse:      {mass, com_x, com_y} overall RMSE across (T, N) samples (kg / m).
+      rmse_per_env_mean/std: per-env RMSE distribution stats (N envs).
+      bias:      signed mean error over (T, N).
+      conv_time_per_env_mean/std: per-env convergence time stats (s); env=-1 if never.
+      dyn_phase: per-env RMS error restricted to time steps with |base_lin_vel_x| > thr.
+      num_envs:  effective env count.
+    """
+    import numpy as np
+
+    metrics = {}
+
+    # Prefer per-env data when available; else fall back to 1D series.
+    have_full = (
+        "payload_mass" in logger.state_log_full
+        and "payload_mass_ref" in logger.state_log_full
+    )
+
+    def _arr_full(key):
+        lst = logger.state_log_full.get(key)
+        return np.stack(lst, axis=0) if lst else None  # (T, N)
+
+    def _arr_1d(key):
+        v = logger.state_log.get(key)
+        return np.asarray(v) if v else None
+
+    pairs = [
+        ("mass",  "payload_mass",     "payload_mass_ref",  0.5),    # threshold 0.5 kg
+        ("com_x", "load_x",           "load_x_ref",        0.05),
+        ("com_y", "load_y",           "load_y_ref",        0.05),
+    ]
+    hold_s = 0.5
+    hold_steps = max(1, int(round(hold_s / dt)))
+    motion_thresh = 0.15
+
+    rmse, rmse_per_env_mean, rmse_per_env_std = {}, {}, {}
+    bias = {}
+    conv_per_env_mean, conv_per_env_std, conv_frac_reached = {}, {}, {}
+    dyn_per_env_mean = {}
+    n_envs = -1
+
+    if have_full:
+        bv_all = _arr_full("base_lin_vel_x")        # (T, N) or None
+        motion_mask_all = np.abs(bv_all) > motion_thresh if bv_all is not None else None
+
+        for name, est_key, ref_key, thr in pairs:
+            est = _arr_full(est_key)               # (T, N)
+            ref = _arr_full(ref_key)
+            if est is None or ref is None or est.shape != ref.shape:
+                rmse[name] = -1.0; bias[name] = 0.0
+                rmse_per_env_mean[name] = -1.0; rmse_per_env_std[name] = -1.0
+                conv_per_env_mean[name] = -1.0; conv_per_env_std[name] = -1.0
+                conv_frac_reached[name] = 0.0; dyn_per_env_mean[name] = -1.0
+                continue
+            err = est - ref                        # (T, N)
+            T, N = err.shape
+            n_envs = N
+            rmse[name] = float(np.sqrt(np.mean(err ** 2)))
+            bias[name] = float(np.mean(err))
+            per_env = np.sqrt(np.mean(err ** 2, axis=0))  # (N,)
+            rmse_per_env_mean[name] = float(per_env.mean())
+            rmse_per_env_std[name] = float(per_env.std())
+
+            # Per-env convergence time: first t with hold_steps consecutive |err|<thr.
+            within = np.abs(err) < thr             # (T, N)
+            ct = np.full(N, -1.0)
+            for j in range(N):
+                run = 0
+                for i in range(T):
+                    run = run + 1 if within[i, j] else 0
+                    if run >= hold_steps:
+                        ct[j] = (i - hold_steps + 1) * dt
+                        break
+            reached = ct >= 0
+            conv_frac_reached[name] = float(reached.mean())
+            conv_per_env_mean[name] = float(ct[reached].mean()) if reached.any() else -1.0
+            conv_per_env_std[name] = float(ct[reached].std()) if reached.any() else -1.0
+
+            # Dynamic-phase per-env: keep only timesteps where env is moving
+            if motion_mask_all is not None and motion_mask_all.shape == err.shape:
+                masked_sq = np.where(motion_mask_all, err ** 2, 0.0)
+                cnt = motion_mask_all.sum(axis=0).astype(float)
+                cnt_safe = np.where(cnt > 0, cnt, 1.0)
+                per_env_dyn = np.sqrt(masked_sq.sum(axis=0) / cnt_safe)
+                per_env_dyn = np.where(cnt > 0, per_env_dyn, -1.0)
+                valid = per_env_dyn >= 0
+                dyn_per_env_mean[name] = float(per_env_dyn[valid].mean()) if valid.any() else -1.0
+            else:
+                dyn_per_env_mean[name] = -1.0
+    else:
+        # Fallback to 1D (robot 0 only). Same structure but stats are degenerate.
+        n_envs = 1
+        bv = _arr_1d("base_lin_vel_x") or _arr_1d("base_vel_x")
+        motion_mask = (np.abs(bv) > motion_thresh) if bv is not None else None
+        for name, est_key, ref_key, thr in pairs:
+            est, ref = _arr_1d(est_key), _arr_1d(ref_key)
+            if est is None or ref is None or est.shape != ref.shape:
+                rmse[name] = -1.0; bias[name] = 0.0
+                rmse_per_env_mean[name] = -1.0; rmse_per_env_std[name] = 0.0
+                conv_per_env_mean[name] = -1.0; conv_per_env_std[name] = 0.0
+                conv_frac_reached[name] = 0.0; dyn_per_env_mean[name] = -1.0
+                continue
+            err = est - ref
+            rmse[name] = float(np.sqrt(np.mean(err ** 2)))
+            bias[name] = float(np.mean(err))
+            rmse_per_env_mean[name] = rmse[name]; rmse_per_env_std[name] = 0.0
+            within = np.abs(err) < thr
+            ct = -1.0
+            if within.any():
+                run = 0
+                for i, ok in enumerate(within):
+                    run = run + 1 if ok else 0
+                    if run >= hold_steps:
+                        ct = (i - hold_steps + 1) * dt; break
+            conv_per_env_mean[name] = ct
+            conv_per_env_std[name] = 0.0
+            conv_frac_reached[name] = 1.0 if ct >= 0 else 0.0
+            if motion_mask is not None and motion_mask.shape == err.shape and motion_mask.any():
+                dyn_per_env_mean[name] = float(np.sqrt(np.mean(err[motion_mask] ** 2)))
+            else:
+                dyn_per_env_mean[name] = -1.0
+
+    metrics["rmse"] = rmse
+    metrics["bias"] = bias
+    metrics["rmse_per_env_mean"] = rmse_per_env_mean
+    metrics["rmse_per_env_std"] = rmse_per_env_std
+    metrics["conv_time_per_env_mean"] = conv_per_env_mean
+    metrics["conv_time_per_env_std"] = conv_per_env_std
+    metrics["conv_time_reached_frac"] = conv_frac_reached
+    metrics["dyn_phase_per_env_mean"] = dyn_per_env_mean
+    metrics["num_envs"] = n_envs
+    metrics["thresholds"] = {
+        "mass_kg": 0.5, "com_m": 0.05, "hold_s": hold_s, "motion_v_mps": motion_thresh,
+    }
+    return metrics
+
+
 def play(args):
     # 单关节测试模式：通过位置控制让指定关节缓慢旋转，观察动力学
     test_joint_mode = getattr(args, 'test_joint_mode', False)
@@ -386,6 +530,51 @@ def play(args):
                         f"load_y={est_load_y:.4f}/{ref_load_y:.4f}"
                     )
 
+                # --- per-env logging: write all-env tensors to logger.state_log_full ---
+                # Saved as <key>_all of shape (T, num_envs) in .mat. Plots still use robot 0.
+                _N = env.num_envs
+                _dev = env.device
+
+                # All-env load-on-body mask
+                if hasattr(env, "is_load_on_body"):
+                    _all_ids = torch.arange(_N, device=_dev, dtype=torch.long)
+                    _on_body = env.is_load_on_body(_all_ids)
+                    if hasattr(env, "has_load"):
+                        _on_body = _on_body & env.has_load
+                else:
+                    _on_body = torch.zeros(_N, dtype=torch.bool, device=_dev)
+
+                # True load mass per env (env.load_mass is a scalar in this codebase)
+                _true_mass = torch.full((_N,), float(env.load_mass), device=_dev)
+                _true_mass = torch.where(_on_body, _true_mass, torch.zeros_like(_true_mass))
+
+                # Actual (x, y) of load in each env's body frame; 0 if not on body
+                if hasattr(env, "actor_indices") and hasattr(env, "load_indices"):
+                    _base_pos = env.root_states[env.actor_indices, 0:3]
+                    _base_quat = env.root_states[env.actor_indices, 3:7]
+                    _load_pos = env.root_states[env.load_indices, 0:3]
+                    _rel_body = quat_rotate_inverse(_base_quat, _load_pos - _base_pos)
+                    _actual_lx = torch.where(_on_body, _rel_body[:, 0], torch.zeros(_N, device=_dev))
+                    _actual_ly = torch.where(_on_body, _rel_body[:, 1], torch.zeros(_N, device=_dev))
+                else:
+                    _actual_lx = torch.zeros(_N, device=_dev)
+                    _actual_ly = torch.zeros(_N, device=_dev)
+
+                logger.log_states_full({
+                    "payload_mass": load_est["payload_mass"],
+                    "payload_mass_ref": _true_mass,
+                    "load_x": load_est["load_x"],
+                    "load_x_ref": _actual_lx,
+                    "load_y": load_est["load_y"],
+                    "load_y_ref": _actual_ly,
+                    "load_on_body": _on_body.float(),
+                    "base_lin_vel_x": env.base_lin_vel[:, 0],
+                    "base_lin_vel_y": env.base_lin_vel[:, 1],
+                    "base_ang_vel_z": env.base_ang_vel[:, 2],
+                    "command_x": env.commands[:, 0],
+                    "command_yaw": env.commands[:, 2],
+                })
+
             logger.log_states(
                     {
                         "dof_pos_target": actions[robot_index, joint_index].item() * action_scale,
@@ -499,8 +688,31 @@ def play(args):
                     }
                 )
         elif i == stop_state_log:
-            mat_path = os.path.join(LEGGED_GYM_ROOT_DIR, "logs", args.task, train_cfg.runner.experiment_name, "exported", "play_data.mat")
-            logger.save_to_mat(mat_path)
+            # Build a unique filename so successive runs never overwrite each other.
+            # Format: play_data_<YYYYMMDD-HHMMSS>[_<exp_tag>].mat
+            from datetime import datetime as _dt
+            ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+            tag = getattr(args, "exp_tag", "") or ""
+            tag_suffix = f"_{tag}" if tag else ""
+            mat_name = f"play_data_{ts}{tag_suffix}.mat"
+            mat_dir = os.path.join(
+                LEGGED_GYM_ROOT_DIR, "logs", args.task,
+                train_cfg.runner.experiment_name, "exported",
+            )
+            os.makedirs(mat_dir, exist_ok=True)
+            mat_path = os.path.join(mat_dir, mat_name)
+            # Inject experiment-level metadata + computed metrics before save.
+            metrics = _compute_experiment_metrics(logger, env.dt)
+            run_meta = {
+                "exp_tag": tag,
+                "timestamp": ts,
+                "load_run": str(getattr(args, "load_run", "") or ""),
+                "checkpoint": str(getattr(args, "checkpoint", "") or ""),
+                "dt": float(env.dt),
+            }
+            logger.save_to_mat(mat_path, extra={"metrics": metrics, "meta": run_meta})
+            print(f"[play] saved: {mat_path}")
+            print(f"[play] metrics: {metrics}")
             logger.plot_states()
 
         if 0 < i < stop_rew_log:
