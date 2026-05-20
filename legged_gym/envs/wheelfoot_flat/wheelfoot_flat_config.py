@@ -34,7 +34,12 @@ class BipedCfgWF(BaseConfig):
     class env:
         # 8GB-class GPU friendly default; increase gradually after stability is confirmed.
         num_envs = 1024
-        num_observations = 30 + 6 - 2 - 4 - 2 + 8 + 8 + 4  # +8 raw torque, +8 load estimation, +4 QS latent baseline
+        # Ablation flag: True = main method (Model C QS estimates fed into obs as features).
+        #                False = history_only baseline (encoder must learn QS info itself from obs history).
+        #                False 时 obs 减少 12 维（8 维 load_est + 4 维 qs_baseline），并自动关 use_load_residual_estimation。
+        use_qs_in_obs = True
+        _qs_obs_dims = (8 + 4) if use_qs_in_obs else 0
+        num_observations = 30 + 6 - 2 - 4 - 2 + 8 + _qs_obs_dims  # +8 raw torque, [+12 QS if use_qs_in_obs]
         num_critic_observations = 7 + num_observations
         num_height_samples = 117
         num_actions = 8
@@ -445,7 +450,8 @@ class BipedCfgPPOWF(BaseConfig):
         extra_loss_vel_w = 1.0
         extra_loss_mass_w = 2.0
         extra_loss_com_w = 6.0
-        use_load_residual_estimation = True
+        # 残差估计只在 obs 里有 QS 基线时才生效；history_only 时自动关。
+        use_load_residual_estimation = BipedCfgWF.env.use_qs_in_obs
         load_residual_baseline_obs_start = 36
         # 当样本检测到负载在体时，对mass/com监督加权
         extra_loss_load_boost = 3.0

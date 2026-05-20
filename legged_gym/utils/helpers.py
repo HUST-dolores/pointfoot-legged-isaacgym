@@ -71,7 +71,7 @@ def update_class_from_dict(obj, dict):
 
 
 def set_seed(seed):
-    if seed == -1:
+    if seed == 1:
         seed = np.random.randint(0, 10000)
     print("Setting seed: {}".format(seed))
 

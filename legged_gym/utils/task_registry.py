@@ -130,6 +130,10 @@ class TaskRegistry:
             env_cfg, _ = self.get_cfgs(name)
         # override cfg from args (if specified)
         env_cfg, _ = update_cfg_from_args(env_cfg, None, args)
+        # 直接把 --seed 应用到 env_cfg.seed；否则 play 时 args.seed 会被忽略
+        # （update_cfg_from_args 的 seed 处理只在 cfg_train 分支生效，而这里 cfg_train=None）
+        if args is not None and getattr(args, "seed", None) is not None:
+            env_cfg.seed = args.seed
         set_seed(env_cfg.seed)
         # parse sim params (convert to dict first)
         sim_params = {"sim": class_to_dict(env_cfg.sim)}

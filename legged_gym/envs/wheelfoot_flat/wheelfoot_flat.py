@@ -269,44 +269,47 @@ class BipedWF(BaseTask):
         dof_list = [0,1,2,4,5,6]
         dof_pos = (self.dof_pos - self.default_dof_pos)[:,dof_list]
         # dof_pos = torch.remainder(dof_pos + self.pi, 2 * self.pi) - self.pi
+        # 总是计算 load_estimates（play 时要 log 给 Model C RMSE 用；env 内部 base_com / base_mass
+        # 的真值也来自 sim，跟这个无关）。但是否把它喂进 obs 由 cfg.env.use_qs_in_obs 控制。
         load_estimates = self._compute_load_estimates()
-        load_estimation_obs = torch.stack(
-            (
-                load_estimates["payload_mass"] * self.obs_scales.load_mass,
-                load_estimates["load_x"] * self.obs_scales.load_pos,
-                load_estimates["load_y"] * self.obs_scales.load_pos,
-                load_estimates["payload_present"],
-                load_estimates["sin_lieangle_L_thigh"],
-                load_estimates["cos_lieangle_L_thigh"],
-                load_estimates["sin_lieangle_R_thigh"],
-                load_estimates["cos_lieangle_R_thigh"],
-            ),
-            dim=-1,
-        )
-        load_residual_baseline_obs = torch.cat(
-            (
-                load_estimates["qs_mass_delta"].unsqueeze(-1) * self.obs_scales.mass_scale,
-                load_estimates["qs_com_delta"] * self.obs_scales.com_scale,
-            ),
-            dim=-1,
-        )
+        use_qs_in_obs = bool(getattr(self.cfg.env, "use_qs_in_obs", True))
 
-        obs_buf = torch.cat(
-            (
-                self.base_ang_vel * self.obs_scales.ang_vel,
-                self.projected_gravity,
-                dof_pos * self.obs_scales.dof_pos,
-                self.dof_vel * self.obs_scales.dof_vel,
-                self.torques * self.obs_scales.torque,
-                load_estimation_obs,
-                load_residual_baseline_obs,
-                self.actions,
-                # self.clock_inputs_sin.view(self.num_envs, 1),
-                # self.clock_inputs_cos.view(self.num_envs, 1),
-                # self.gaits,
-            ),
-            dim=-1,
-        )
+        # 基础 obs：跟 use_qs_in_obs 无关的部分
+        obs_components = [
+            self.base_ang_vel * self.obs_scales.ang_vel,
+            self.projected_gravity,
+            dof_pos * self.obs_scales.dof_pos,
+            self.dof_vel * self.obs_scales.dof_vel,
+            self.torques * self.obs_scales.torque,
+        ]
+
+        # QS 部分（only when ablation flag on）
+        if use_qs_in_obs:
+            load_estimation_obs = torch.stack(
+                (
+                    load_estimates["payload_mass"] * self.obs_scales.load_mass,
+                    load_estimates["load_x"] * self.obs_scales.load_pos,
+                    load_estimates["load_y"] * self.obs_scales.load_pos,
+                    load_estimates["payload_present"],
+                    load_estimates["sin_lieangle_L_thigh"],
+                    load_estimates["cos_lieangle_L_thigh"],
+                    load_estimates["sin_lieangle_R_thigh"],
+                    load_estimates["cos_lieangle_R_thigh"],
+                ),
+                dim=-1,
+            )
+            load_residual_baseline_obs = torch.cat(
+                (
+                    load_estimates["qs_mass_delta"].unsqueeze(-1) * self.obs_scales.mass_scale,
+                    load_estimates["qs_com_delta"] * self.obs_scales.com_scale,
+                ),
+                dim=-1,
+            )
+            obs_components.append(load_estimation_obs)
+            obs_components.append(load_residual_baseline_obs)
+
+        obs_components.append(self.actions)
+        obs_buf = torch.cat(obs_components, dim=-1)
         critic_obs_buf = torch.cat((
             self.base_lin_vel * self.obs_scales.lin_vel,
             (self.base_mass - self.base_mass0).unsqueeze(-1) * self.obs_scales.mass_scale,     # Δmass
