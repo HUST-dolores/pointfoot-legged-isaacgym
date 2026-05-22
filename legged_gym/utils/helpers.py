@@ -261,7 +261,43 @@ def get_args():
             "name": "--exp_tag",
             "type": str,
             "default": "",
-            "help": "Tag for this play/experiment run; appended to output .mat filename to avoid overwrite",
+            "help": "Tag for this play/experiment run; appended to output .mat filename to avoid overwrite. If empty, auto-generated as lb{N}_qs{0|1}_resid{0|1}_{cmd}_seed{S}_ckpt{C}.",
+        },
+        {
+            "name": "--cmd_vx",
+            "type": float,
+            "default": 0.0,
+            "help": "Commanded forward velocity x (m/s). Default 0.0 (static).",
+        },
+        {
+            "name": "--cmd_vy",
+            "type": float,
+            "default": 0.0,
+            "help": "Commanded lateral velocity y (m/s). Default 0.0.",
+        },
+        {
+            "name": "--cmd_yaw",
+            "type": float,
+            "default": 0.0,
+            "help": "Commanded yaw rate (rad/s). Default 0.0.",
+        },
+        {
+            "name": "--load_mass_min",
+            "type": float,
+            "default": -1.0,
+            "help": "Override domain_rand.add_load_range[0] for play. Default <0: do not override (use saved cfg).",
+        },
+        {
+            "name": "--load_mass_max",
+            "type": float,
+            "default": -1.0,
+            "help": "Override domain_rand.add_load_range[1] for play. Default <0: do not override (use saved cfg).",
+        },
+        {
+            "name": "--exit_after_save",
+            "action": "store_true",
+            "default": False,
+            "help": "Exit immediately after .mat + plots are saved (auto-enabled under --headless). Use for batch runs to avoid the post-save infinite loop.",
         },
     ]
     # parse arguments

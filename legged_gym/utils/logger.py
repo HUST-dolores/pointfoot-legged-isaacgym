@@ -103,11 +103,26 @@ class Logger:
         sio.savemat(filepath, mat_dict)
         print(f"Saved play data to MATLAB format: {filepath}")
 
-    def plot_states(self):
-        self.plot_process = Process(target=self._plot)
-        self.plot_process.start()
+    def plot_states(self, save_dir=None, show=True):
+        """Plot logged states.
 
-    def _plot(self):
+        - save_dir: if given, save every figure as PNG into this dir (created if needed).
+        - show: if True, open matplotlib windows interactively (in a subprocess so it
+          doesn't block). If False, save only (synchronous) and close all figs.
+        """
+        if show:
+            self.plot_process = Process(target=self._plot, args=(save_dir, True))
+            self.plot_process.start()
+        else:
+            # Synchronous save-only path; matplotlib needs Agg backend when no display.
+            import matplotlib
+            try:
+                matplotlib.use("Agg", force=True)
+            except Exception:
+                pass
+            self._plot(save_dir=save_dir, show=False)
+
+    def _plot(self, save_dir=None, show=True):
         nb_rows = 4
         nb_cols = 4
         fig, axs = plt.subplots(nb_rows, nb_cols)
@@ -220,8 +235,6 @@ class Logger:
                 # 如果数据不够长，使用全部数据
                 for i in range(forces.shape[1]):
                     a.plot(time, forces[:, i], label=f"force {i}")
-            for i in range(forces.shape[1]):
-                a.plot(time, forces[:, i], label=f"force {i}")
         a.set(xlabel="time [s]", ylabel="Forces z [N]", title="Vertical Contact forces")
         a.legend()
         # plot torque/vel curves
@@ -250,7 +263,7 @@ class Logger:
         if log["mass"]:
             a.plot(time, log["mass"], label="Ground Truth", linestyle="--", color="k")
         if log["mass_est"]:
-            a.plot(time, log["mass_est"], label="RL Encoder (QS+residual)", linewidth=2)
+            a.plot(time, log["mass_est"], label="RL Encoder", linewidth=2)
         a.set(xlabel="time [s]", ylabel="mass [kg]", title="[RL] Robot Mass")
         a.legend()
 
@@ -258,7 +271,7 @@ class Logger:
         if log["CoM_x"]:
             a.plot(time, log["CoM_x"], label="Ground Truth", linestyle="--", color="k")
         if log["CoM_est_x"]:
-            a.plot(time, log["CoM_est_x"], label="RL Encoder (QS+residual)", linewidth=2)
+            a.plot(time, log["CoM_est_x"], label="RL Encoder", linewidth=2)
         a.set(xlabel="time [s]", ylabel="CoM_x [m]", title="[RL] Robot CoM X")
         a.legend()
 
@@ -266,7 +279,7 @@ class Logger:
         if log["CoM_y"]:
             a.plot(time, log["CoM_y"], label="Ground Truth", linestyle="--", color="k")
         if log["CoM_est_y"]:
-            a.plot(time, log["CoM_est_y"], label="RL Encoder (QS+residual)", linewidth=2)
+            a.plot(time, log["CoM_est_y"], label="RL Encoder", linewidth=2)
         a.set(xlabel="time [s]", ylabel="CoM_y [m]", title="[RL] Robot CoM Y")
         a.legend()
 
@@ -274,7 +287,7 @@ class Logger:
         if log["CoM_z"]:
             a.plot(time, log["CoM_z"], label="Ground Truth", linestyle="--", color="k")
         if log["CoM_est_z"]:
-            a.plot(time, log["CoM_est_z"], label="RL Encoder (QS+residual)", linewidth=2)
+            a.plot(time, log["CoM_est_z"], label="RL Encoder", linewidth=2)
         a.set(xlabel="time [s]", ylabel="CoM_z [m]", title="[RL] Robot CoM Z")
         a.legend()
 
@@ -422,7 +435,39 @@ class Logger:
         a.legend()
         
         plt.tight_layout()
-        plt.show()
+
+        # --- save all open figures (if requested) ---
+        if save_dir is not None:
+            import os, re
+            os.makedirs(save_dir, exist_ok=True)
+            used = set()
+            for num in plt.get_fignums():
+                fig = plt.figure(num)
+                # Try to use the window title as filename; fall back to fig{num}.
+                title = ""
+                try:
+                    title = fig.canvas.manager.get_window_title() or ""
+                except Exception:
+                    pass
+                if not title:
+                    title = f"fig{num}"
+                # sanitize: keep alnum/_-, collapse spaces
+                safe = re.sub(r"[^A-Za-z0-9_\-]+", "_", title).strip("_")
+                if not safe:
+                    safe = f"fig{num}"
+                # dedupe
+                base, i = safe, 2
+                while safe in used:
+                    safe = f"{base}_{i}"; i += 1
+                used.add(safe)
+                fpath = os.path.join(save_dir, f"{safe}.png")
+                fig.savefig(fpath, dpi=120, bbox_inches="tight")
+            print(f"[logger] saved {len(used)} figure(s) to: {save_dir}")
+
+        if show:
+            plt.show()
+        else:
+            plt.close("all")
 
     def print_rewards(self):
         print("Average rewards per second:")

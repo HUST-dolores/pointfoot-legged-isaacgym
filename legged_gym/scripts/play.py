@@ -30,6 +30,8 @@
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
 import os
+import json
+import subprocess
 
 import isaacgym
 from isaacgym.torch_utils import *
@@ -45,6 +47,300 @@ from legged_gym.utils import (
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+
+
+def _git_state():
+    """Return (short_hash, is_dirty) for the current repo. Best-effort, never raises."""
+    try:
+        sh = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=LEGGED_GYM_ROOT_DIR, stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        sh = "?"
+    try:
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=LEGGED_GYM_ROOT_DIR, stderr=subprocess.DEVNULL,
+        ).decode().strip())
+    except Exception:
+        dirty = False
+    return sh, dirty
+
+
+def _load_train_run_cfgs(run_dir):
+    """Read env_cfg.json / train_cfg.json saved at train time. Returns (env_cfg_d, train_cfg_d) or (None, None)."""
+    env_p = os.path.join(run_dir, "env_cfg.json")
+    tr_p = os.path.join(run_dir, "train_cfg.json")
+    env_d, tr_d = None, None
+    if os.path.isfile(env_p):
+        try:
+            with open(env_p) as f:
+                env_d = json.load(f)
+        except Exception:
+            pass
+    if os.path.isfile(tr_p):
+        try:
+            with open(tr_p) as f:
+                tr_d = json.load(f)
+        except Exception:
+            pass
+    return env_d, tr_d
+
+
+def _dig(d, *keys, default=None):
+    """Safe nested-dict get. _dig(d, 'env', 'use_qs_in_obs')."""
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
+def _apply_saved_env_cfg(env_cfg, train_cfg, args, log_root):
+    """Override env_cfg/train_cfg with saved-at-train-time values for the loaded run.
+
+    The checkpoint's actor/critic/encoder layers were sized for the env layout used
+    during training. If the in-tree config differs (e.g., flipped use_qs_in_obs,
+    changed encoder dim), `runner.load(resume_path)` fails with shape mismatch.
+    This auto-aligns the critical fields before make_env/make_alg_runner.
+    """
+    load_run = getattr(args, "load_run", None) or ""
+    if not load_run:
+        return
+    run_dir = os.path.join(log_root, load_run)
+    env_p = os.path.join(run_dir, "env_cfg.json")
+    tr_p = os.path.join(run_dir, "train_cfg.json")
+    if not os.path.isfile(env_p):
+        print(f"[PLAY] saved env_cfg.json not found in {run_dir}; skipping auto-override")
+        return
+    try:
+        saved_env = json.load(open(env_p))
+    except Exception as e:
+        print(f"[PLAY] failed to read saved env_cfg.json: {e}")
+        return
+    saved_tr = None
+    if os.path.isfile(tr_p):
+        try:
+            saved_tr = json.load(open(tr_p))
+        except Exception:
+            pass
+
+    applied = []
+
+    def _ovr(obj, attr, new):
+        old = getattr(obj, attr, None)
+        if old != new:
+            applied.append(f"{obj.__class__.__name__}.{attr}: {old} -> {new}")
+            setattr(obj, attr, new)
+
+    # --- env dimensions (drives actor/critic input width) ---
+    se = saved_env.get("env", {}) if isinstance(saved_env.get("env"), dict) else {}
+    for k in ("num_observations", "num_critic_observations"):
+        if se.get(k) is not None:
+            _ovr(env_cfg.env, k, int(se[k]))
+    # --- env flags affecting obs structure (None = field absent in older runs; skip) ---
+    for k in ("use_qs_in_obs", "use_residual_learning"):
+        if se.get(k) is not None:
+            _ovr(env_cfg.env, k, bool(se[k]))
+
+    # --- algorithm flag affecting encoder interpretation ---
+    if saved_tr is not None:
+        sa = saved_tr.get("algorithm", {}) if isinstance(saved_tr.get("algorithm"), dict) else {}
+        if sa.get("use_load_residual_estimation") is not None:
+            _ovr(train_cfg.algorithm, "use_load_residual_estimation",
+                 bool(sa["use_load_residual_estimation"]))
+        # --- encoder input dim (drives encoder's first layer) ---
+        sm = saved_tr.get("MLP_Encoder", {}) if isinstance(saved_tr.get("MLP_Encoder"), dict) else {}
+        if sm.get("num_input_dim") is not None:
+            _ovr(train_cfg.MLP_Encoder, "num_input_dim", int(sm["num_input_dim"]))
+        if sm.get("obs_history_length") is not None:
+            _ovr(train_cfg.MLP_Encoder, "obs_history_length", int(sm["obs_history_length"]))
+        if sa.get("extra_loss_load_boost") is not None:
+            _ovr(
+                train_cfg.algorithm,
+                "extra_loss_load_boost",
+                float(sa["extra_loss_load_boost"]),
+            )
+
+    if applied:
+        print(f"[PLAY] applied {len(applied)} cfg override(s) from saved cfg "
+              f"(to match ckpt arch):")
+        for s in applied:
+            print(f"       - {s}")
+    else:
+        print(f"[PLAY] in-tree cfg already matches saved cfg; no overrides needed")
+
+
+def _cmd_tag(vx, vy, yaw, eps=0.05):
+    """Build a short command descriptor: 'static' if all zeros, else 'walk_vx0.5' / 'yaw0.3' / combined."""
+    parts = []
+    if abs(vx) > eps:
+        parts.append(f"vx{vx:g}")
+    if abs(vy) > eps:
+        parts.append(f"vy{vy:g}")
+    if abs(yaw) > eps:
+        parts.append(f"yaw{yaw:g}")
+    if not parts:
+        return "static"
+    return "walk_" + "_".join(parts)
+
+
+def _build_auto_exp_tag(env, train_cfg, args, cmd_vx, cmd_vy, cmd_yaw):
+    """Build exp_tag of form lb{N}_qs{0|1}_resid{0|1}_{cmd}_seed{S}_ckpt{C}_[load{lo}-{hi}]."""
+    lb_val = getattr(train_cfg.algorithm, "extra_loss_load_boost", None)
+    lb_s = f"{lb_val:g}" if lb_val is not None else "x"
+    qs = int(bool(getattr(env.cfg.env, "use_qs_in_obs", True)))
+    resid = int(bool(getattr(train_cfg.algorithm, "use_load_residual_estimation", False)))
+    seed = getattr(env.cfg, "seed", "x")
+    ckpt = getattr(args, "checkpoint", "x")
+    tag = f"lb{lb_s}_qs{qs}_resid{resid}_{_cmd_tag(cmd_vx, cmd_vy, cmd_yaw)}_seed{seed}_ckpt{ckpt}"
+    # Append load range suffix only when user overrode it (OOD case).
+    lm_min = float(getattr(args, "load_mass_min", -1.0) or -1.0)
+    lm_max = float(getattr(args, "load_mass_max", -1.0) or -1.0)
+    if lm_min >= 0.0 and lm_max >= 0.0:
+        tag += f"_load{lm_min:g}-{lm_max:g}"
+    return tag
+
+
+def _sanitize_for_mat(obj):
+    """Recursively replace None with '' so scipy.io.savemat can serialize the dict."""
+    if obj is None:
+        return ""
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_mat(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_mat(v) for v in obj]
+    return obj
+
+
+def _collect_run_verify(env, train_cfg, args, log_root):
+    """Collect run-config verification info — saved-at-train-time vs current-play-time.
+
+    Returns a dict suitable for both embedding into the .mat file's `meta` and
+    feeding into `_print_run_verify_block` for human-readable output.
+    """
+    # --- locate the loaded run directory ---
+    load_run = getattr(args, "load_run", None) or ""
+    ckpt = getattr(args, "checkpoint", None)
+    ckpt_str = str(ckpt) if ckpt not in (None, "") else "?"
+    run_dir = os.path.join(log_root, load_run) if load_run else ""
+    ckpt_path = os.path.join(run_dir, f"model_{ckpt_str}.pt") if run_dir else ""
+    ckpt_exists = os.path.isfile(ckpt_path) if ckpt_path else False
+
+    # --- read saved train-time configs ---
+    saved_env, saved_tr = _load_train_run_cfgs(run_dir) if run_dir else (None, None)
+    saved_found = (saved_env is not None) or (saved_tr is not None)
+
+    # --- current (play-time) values ---
+    cur_env_cfg = env.cfg
+    cur = {
+        "use_qs_in_obs":              bool(getattr(cur_env_cfg.env, "use_qs_in_obs", True)),
+        "use_residual_learning":      bool(getattr(cur_env_cfg.env, "use_residual_learning", False)),
+        "use_load_residual_estimation": bool(getattr(train_cfg.algorithm, "use_load_residual_estimation", False)),
+        "num_observations":           int(getattr(cur_env_cfg.env, "num_observations", -1)),
+        "extra_loss_load_boost":      float(getattr(train_cfg.algorithm, "extra_loss_load_boost", float("nan"))),
+        "seed":                       int(getattr(cur_env_cfg, "seed", -1)),
+        "num_envs":                   int(getattr(cur_env_cfg.env, "num_envs", -1)),
+    }
+    # --- saved (train-time) values ---
+    if saved_found:
+        saved = {
+            "use_qs_in_obs":              _dig(saved_env, "env", "use_qs_in_obs"),
+            "use_residual_learning":      _dig(saved_env, "env", "use_residual_learning"),
+            "use_load_residual_estimation": _dig(saved_tr,  "algorithm", "use_load_residual_estimation"),
+            "num_observations":           _dig(saved_env, "env", "num_observations"),
+            "extra_loss_load_boost":      _dig(saved_tr,  "algorithm", "extra_loss_load_boost"),
+            "seed":                       _dig(saved_env, "seed"),
+            "num_envs":                   _dig(saved_env, "env", "num_envs"),
+        }
+    else:
+        saved = {k: None for k in cur}
+
+    # --- git state ---
+    commit, dirty = _git_state()
+
+    # --- detect critical mismatches ---
+    # These flags MUST match between train and play, otherwise the encoder
+    # output is interpreted differently and results are silently wrong.
+    critical = ["use_qs_in_obs", "use_residual_learning", "use_load_residual_estimation",
+                "num_observations"]
+    mismatches = []
+    for k in critical:
+        sv, cv = saved.get(k), cur.get(k)
+        if sv is not None and sv != cv:
+            mismatches.append({"key": k, "train": sv, "play": cv})
+
+    # --- single-line paste version ---
+    paste = (
+        f"run={load_run} ckpt={ckpt_str} "
+        f"qs={cur['use_qs_in_obs']} resid_learn={cur['use_residual_learning']} "
+        f"resid_est={cur['use_load_residual_estimation']} "
+        f"n_obs={cur['num_observations']} lb={cur['extra_loss_load_boost']:g} "
+        f"seed={cur['seed']} n_envs={cur['num_envs']} "
+        f"commit={commit}{'-dirty' if dirty else ''} "
+        f"tag={getattr(args, 'exp_tag', '') or '-'}"
+    )
+
+    return {
+        "exp_tag":      getattr(args, "exp_tag", "") or "",
+        "load_run":     load_run,
+        "checkpoint":   ckpt_str,
+        "ckpt_path":    ckpt_path,
+        "ckpt_exists":  bool(ckpt_exists),
+        "run_dir":      run_dir,
+        "saved_found":  bool(saved_found),
+        "commit":       commit,
+        "dirty":        bool(dirty),
+        "saved_cfg":    saved,
+        "play_cfg":     cur,
+        "mismatches":   mismatches,
+        "paste_line":   paste,
+    }
+
+
+def _print_run_verify_block(v):
+    """Print the verification block from a verify dict produced by _collect_run_verify."""
+    saved = v["saved_cfg"]
+    cur = v["play_cfg"]
+    print("[play] ============== run verification =============")
+    print(f"  exp_tag        : {v['exp_tag'] or '(none)'}")
+    print(f"  load_run       : {v['load_run'] or '(none)'}")
+    print(f"  checkpoint     : model_{v['checkpoint']}.pt  {'OK' if v['ckpt_exists'] else 'NOT FOUND'}")
+    print(f"  ckpt_path      : {v['ckpt_path']}")
+    print(f"  code commit    : {v['commit']}{'  [DIRTY working tree]' if v['dirty'] else ''}")
+    if not v["saved_found"]:
+        print(f"  saved cfg      : NOT FOUND in {v['run_dir']}  -> can't verify train/play match")
+    print(f"")
+    print(f"  {'key':<32} {'train(saved)':<16} {'play(current)':<16} {'match':<6}")
+    print(f"  {'-'*32} {'-'*16} {'-'*16} {'-'*6}")
+    for k in ["use_qs_in_obs", "use_residual_learning", "use_load_residual_estimation",
+              "num_observations", "extra_loss_load_boost", "seed", "num_envs"]:
+        sv, cv = saved.get(k), cur.get(k)
+        sv_s = "N/A" if sv is None else str(sv)
+        cv_s = str(cv)
+        if sv is None:
+            mark = "  ? "
+        elif sv == cv:
+            mark = "  ok"
+        else:
+            mark = " ** "  # critical mismatch
+        # num_envs / seed mismatches are informational, not critical
+        if k in ("num_envs", "seed") and sv is not None and sv != cv:
+            mark = " (i)"
+        print(f"  {k:<32} {sv_s:<16} {cv_s:<16} {mark}")
+    print(f"")
+    if v["mismatches"]:
+        print(f"  ** WARNING: {len(v['mismatches'])} CRITICAL flag(s) differ from train-time config:")
+        for m in v["mismatches"]:
+            print(f"     - {m['key']}: train={m['train']}  play={m['play']}")
+        print(f"     -> encoder outputs may be misinterpreted; results NOT trustworthy")
+    elif v["saved_found"]:
+        print(f"  all critical flags match train-time config")
+    print(f"")
+    print(f"  paste:  {v['paste_line']}")
+    print("[play] =============================================")
 
 
 def _print_metrics_pretty(m):
@@ -65,7 +361,7 @@ def _print_metrics_pretty(m):
 
     print("[play] ============= experiment metrics =============")
     print(f"  num_envs = {m.get('num_envs', '?')}")
-    print(f"  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络")
+    print(f"  [QS] = Model C 解析公式  |  [RL] = Encoder 最终输出")
     print(f"")
     print(f"  ====== LOAD MASS (kg) ======")
     print(f"    [QS]  RMSE={gpos('rmse','mass')}  bias={g('bias','mass')}  "
@@ -212,7 +508,9 @@ def _compute_experiment_metrics(logger, dt):
     else:
         # Fallback to 1D (robot 0 only). Same structure but stats are degenerate.
         n_envs = 1
-        bv = _arr_1d("base_lin_vel_x") or _arr_1d("base_vel_x")
+        bv = _arr_1d("base_lin_vel_x")
+        if bv is None:
+            bv = _arr_1d("base_vel_x")
         motion_mask = (np.abs(bv) > motion_thresh) if bv is not None else None
         for name, est_key, ref_key, thr in pairs:
             est, ref = _arr_1d(est_key), _arr_1d(ref_key)
@@ -266,6 +564,14 @@ def play(args):
     test_joint_offset = getattr(args, 'test_joint_offset', 0.0)  # rad
     
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    # Auto-align config with the loaded checkpoint's training-time cfg.
+    # Without this, e.g. playing a history_only ckpt while in-tree cfg has
+    # use_qs_in_obs=True will fail at runner.load() with shape mismatch.
+    _log_root_for_align = os.path.join(
+        LEGGED_GYM_ROOT_DIR, "logs", args.task,
+        train_cfg.runner.experiment_name,
+    )
+    _apply_saved_env_cfg(env_cfg, train_cfg, args, _log_root_for_align)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 60
     env_cfg.env.num_envs = min(env_cfg.env.num_envs,20)
@@ -309,6 +615,13 @@ def play(args):
     env_cfg.domain_rand.randomize_action_delay = False
     env_cfg.domain_rand.load_debug = True
 
+    # CLI override: load mass range (for OOD experiments). Negative means no override.
+    _lm_min = float(getattr(args, "load_mass_min", -1.0) or -1.0)
+    _lm_max = float(getattr(args, "load_mass_max", -1.0) or -1.0)
+    if _lm_min >= 0.0 and _lm_max >= 0.0:
+        env_cfg.domain_rand.add_load_range = [_lm_min, _lm_max]
+        print(f"[PLAY] override add_load_range = {env_cfg.domain_rand.add_load_range}")
+
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
 
@@ -331,8 +644,17 @@ def play(args):
 
     # get robot_type
     robot_type = os.getenv("ROBOT_TYPE")
-    commands_val = to_torch([0.5, 0.0, 0, 0], device=env.device) if robot_type.startswith("PF")\
-        else to_torch([0, 0.0, 0.0], device=env.device) if robot_type == "WF_TRON1A" else to_torch([0, 0.0, 0.0, 0.0, 0.0])
+    # CLI-driven command: --cmd_vx / --cmd_vy / --cmd_yaw (all default 0.0 -> static)
+    _cmd_vx = float(getattr(args, "cmd_vx", 0.0) or 0.0)
+    _cmd_vy = float(getattr(args, "cmd_vy", 0.0) or 0.0)
+    _cmd_yaw = float(getattr(args, "cmd_yaw", 0.0) or 0.0)
+    if robot_type.startswith("PF"):
+        commands_val = to_torch([_cmd_vx, _cmd_vy, _cmd_yaw, 0], device=env.device)
+    elif robot_type == "WF_TRON1A":
+        commands_val = to_torch([_cmd_vx, _cmd_vy, _cmd_yaw], device=env.device)
+    else:
+        commands_val = to_torch([_cmd_vx, _cmd_vy, _cmd_yaw, 0.0, 0.0], device=env.device)
+    print(f"[PLAY] command = vx={_cmd_vx} vy={_cmd_vy} yaw={_cmd_yaw}")
     action_scale = env.cfg.control.action_scale_pos if robot_type == "WF_TRON1A"\
         else env.cfg.control.action_scale
     obs, obs_history, commands, critic_obs = env.get_observations()
@@ -429,14 +751,23 @@ def play(args):
                 print(f"[TEST-MODE] step={i} time={time_s:.2f}s target_angle={target_angle:.4f} rad phase={phase:.2f}")
         else:
             # 正常策略推理模式
-            est = encoder(obs_history, obs)
-            actions = policy(torch.cat((est, obs, commands), dim=-1).detach())
+            with torch.no_grad():
+                est_for_action = encoder(obs_history, obs)
+                actions = policy(torch.cat((est_for_action, obs, commands), dim=-1).detach())
 
         env.commands[:, :] = commands_val
 
         obs, rews, dones, infos, obs_history, commands, critic_obs = env.step(
             actions.detach()
         )
+        if test_joint_mode and test_joint_idx is not None:
+            est = None
+        else:
+            # Recompute for logging after env.step(), so est / critic_obs / load_est
+            # all describe the same state. The policy action above still uses the
+            # pre-step estimate, as in training rollout collection.
+            with torch.no_grad():
+                est = encoder(obs_history, obs)
         if debug_hip_sign and (hip_l_idx is not None) and (hip_r_idx is not None):
             theta_l = env.dof_pos[robot_index, hip_l_idx].item()
             theta_r = env.dof_pos[robot_index, hip_r_idx].item()
@@ -641,15 +972,19 @@ def play(args):
                     "command_yaw": env.commands[:, 2],
                 }
 
-                # Encoder 输出（反归一化到物理单位，跟 logger.plot_states 的 `mass_est` / `CoM_est_*` 一致）
+                # Encoder 输出反归一化到物理单位。
+                # get_inference_encoder(obs_history, obs) already returns the
+                # policy-facing latent. In residual mode this means QS baseline
+                # has already been added back by PPO.encode_for_policy().
                 if est is not None and est.shape[-1] >= 4:
                     _mass_scale = float(env.cfg.normalization.obs_scales.mass_scale)
-                    full_dict["encoder_mass"] = est[:, 3] / _mass_scale  # encoder 预测 load mass (kg)
+                    _com_scale = float(env.cfg.normalization.obs_scales.com_scale)
+                    full_dict["encoder_mass"] = est[:, 3] / _mass_scale  # 最终质量估计 (kg)
                     if est.shape[-1] >= 7:
-                        _com_scale = float(env.cfg.normalization.obs_scales.com_scale)
-                        full_dict["encoder_com_delta_x"] = est[:, 4] / _com_scale  # encoder com_delta x (m)
-                        full_dict["encoder_com_delta_y"] = est[:, 5] / _com_scale
-                        full_dict["encoder_com_delta_z"] = est[:, 6] / _com_scale
+                        _enc_com_scaled = est[:, 4:7]
+                        full_dict["encoder_com_delta_x"] = _enc_com_scaled[:, 0] / _com_scale
+                        full_dict["encoder_com_delta_y"] = _enc_com_scaled[:, 1] / _com_scale
+                        full_dict["encoder_com_delta_z"] = _enc_com_scaled[:, 2] / _com_scale
 
                 # Model C 的 com_delta 预测（已存在 env.last_load_estimates["qs_com_delta"] 里）
                 if "qs_com_delta" in load_est:
@@ -720,7 +1055,7 @@ def play(args):
                     }
                 )
             # print(torch.sum(env.power[robot_index, :]).item())
-            if est != None:                # 计算并记录 extra_loss 分量（速度 / 质量 / 质心）
+            if est is not None:                # 计算并记录 extra_loss 分量（速度 / 质量 / 质心）
                 extra_loss_vel = (
                     (est[:, 0:3] - critic_obs[:, 0:3]).pow(2).mean().item()
                 )
@@ -755,15 +1090,23 @@ def play(args):
                         "est_lin_vel_y": est[robot_index, 1].item()
                         / env.cfg.normalization.obs_scales.lin_vel,
                         "est_lin_vel_z": est[robot_index, 2].item()
-                        / env.cfg.normalization.obs_scales.lin_vel,                        
-                        "mass_est": est[robot_index, 3].item()
-                        / env.cfg.normalization.obs_scales.mass_scale + float(env.base_mass0[robot_index].item()),
-                        "CoM_est_x": est[robot_index, 4].item()
-                        / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 0].item()),
-                        "CoM_est_y": est[robot_index, 5].item()
-                        / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 1].item()),
-                        "CoM_est_z": est[robot_index, 6].item()
-                        / env.cfg.normalization.obs_scales.com_scale + float(env.base_com0[robot_index, 2].item()),
+                        / env.cfg.normalization.obs_scales.lin_vel,
+                        "mass_est": (
+                            est[robot_index, 3].item() / env.cfg.normalization.obs_scales.mass_scale
+                            + float(env.base_mass0[robot_index].item())
+                        ),
+                        "CoM_est_x": (
+                            est[robot_index, 4].item() / env.cfg.normalization.obs_scales.com_scale
+                            + float(env.base_com0[robot_index, 0].item())
+                        ),
+                        "CoM_est_y": (
+                            est[robot_index, 5].item() / env.cfg.normalization.obs_scales.com_scale
+                            + float(env.base_com0[robot_index, 1].item())
+                        ),
+                        "CoM_est_z": (
+                            est[robot_index, 6].item() / env.cfg.normalization.obs_scales.com_scale
+                            + float(env.base_com0[robot_index, 2].item())
+                        ),
                     }
                 )
             elif test_joint_mode and test_joint_idx is not None:
@@ -785,6 +1128,9 @@ def play(args):
             from datetime import datetime as _dt
             ts = _dt.now().strftime("%Y%m%d-%H%M%S")
             tag = getattr(args, "exp_tag", "") or ""
+            if not tag:
+                tag = _build_auto_exp_tag(env, train_cfg, args, _cmd_vx, _cmd_vy, _cmd_yaw)
+                print(f"[play] auto exp_tag = {tag}")
             tag_suffix = f"_{tag}" if tag else ""
             mat_name = f"play_data_{ts}{tag_suffix}.mat"
             mat_dir = os.path.join(
@@ -793,19 +1139,42 @@ def play(args):
             )
             os.makedirs(mat_dir, exist_ok=True)
             mat_path = os.path.join(mat_dir, mat_name)
+            # Plot output dir mirrors the .mat name: same tag, same timestamp.
+            plot_dir = os.path.join(mat_dir, f"plots_{ts}_{tag}")
             # Inject experiment-level metadata + computed metrics before save.
             metrics = _compute_experiment_metrics(logger, env.dt)
+            _log_root_for_verify = os.path.join(
+                LEGGED_GYM_ROOT_DIR, "logs", args.task,
+                train_cfg.runner.experiment_name,
+            )
+            verify = _collect_run_verify(env, train_cfg, args, _log_root_for_verify)
             run_meta = {
                 "exp_tag": tag,
                 "timestamp": ts,
                 "load_run": str(getattr(args, "load_run", "") or ""),
                 "checkpoint": str(getattr(args, "checkpoint", "") or ""),
                 "dt": float(env.dt),
+                "cmd_vx": _cmd_vx, "cmd_vy": _cmd_vy, "cmd_yaw": _cmd_yaw,
+                "load_mass_range_used": list(getattr(env.cfg.domain_rand, "add_load_range", [-1, -1])),
+                "use_qs_in_obs": bool(getattr(env.cfg.env, "use_qs_in_obs", True)),
+                "use_residual_learning": bool(getattr(env.cfg.env, "use_residual_learning", False)),
+                "use_load_residual_estimation": bool(
+                    getattr(train_cfg.algorithm, "use_load_residual_estimation", False)
+                ),
+                "plot_dir": plot_dir,
+                "verify": _sanitize_for_mat(verify),
             }
             logger.save_to_mat(mat_path, extra={"metrics": metrics, "meta": run_meta})
             print(f"[play] saved: {mat_path}")
             _print_metrics_pretty(metrics)
-            logger.plot_states()
+            _print_run_verify_block(verify)
+            logger.plot_states(save_dir=plot_dir, show=not bool(getattr(args, "headless", False)))
+
+            # Exit immediately under headless / --exit_after_save so batch runs
+            # don't spin on the post-save loop until stop_rew_log.
+            if bool(getattr(args, "exit_after_save", False)) or bool(getattr(args, "headless", False)):
+                print(f"[play] exit_after_save=True (headless={bool(getattr(args,'headless',False))}); returning.")
+                return
 
         if 0 < i < stop_rew_log:
             if infos["episode"]:

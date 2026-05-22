@@ -175,6 +175,53 @@ def main():
     args = get_args()
 
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+
+    # Sync critical flags from saved cfg so we don't shape-mismatch on policies
+    # trained with different obs/encoder layouts (e.g., history_only n_obs=36).
+    import json as _json
+    _log_root = os.path.join(
+        LEGGED_GYM_ROOT_DIR, "logs", args.task,
+        train_cfg.runner.experiment_name,
+    )
+    _load_run = getattr(args, "load_run", None) or ""
+    if _load_run:
+        _run_dir = os.path.join(_log_root, _load_run)
+        _env_p = os.path.join(_run_dir, "env_cfg.json")
+        _tr_p = os.path.join(_run_dir, "train_cfg.json")
+        if os.path.isfile(_env_p):
+            try:
+                _se = _json.load(open(_env_p))
+                _str = _json.load(open(_tr_p)) if os.path.isfile(_tr_p) else None
+                _applied = []
+                for k in ("num_observations", "num_critic_observations"):
+                    sv = _se.get("env", {}).get(k)
+                    if sv is not None and getattr(env_cfg.env, k, None) != sv:
+                        _applied.append(f"env.{k}: {getattr(env_cfg.env,k)}->{sv}")
+                        setattr(env_cfg.env, k, int(sv))
+                for k in ("use_qs_in_obs", "use_residual_learning"):
+                    sv = _se.get("env", {}).get(k)
+                    if sv is not None and getattr(env_cfg.env, k, None) != bool(sv):
+                        _applied.append(f"env.{k}: {getattr(env_cfg.env,k)}->{sv}")
+                        setattr(env_cfg.env, k, bool(sv))
+                if _str is not None:
+                    sa = _str.get("algorithm", {})
+                    sm = _str.get("MLP_Encoder", {})
+                    if sa.get("use_load_residual_estimation") is not None:
+                        new = bool(sa["use_load_residual_estimation"])
+                        if getattr(train_cfg.algorithm, "use_load_residual_estimation", None) != new:
+                            _applied.append(f"alg.use_load_residual_estimation: {train_cfg.algorithm.use_load_residual_estimation}->{new}")
+                            train_cfg.algorithm.use_load_residual_estimation = new
+                    if sm.get("num_input_dim") is not None:
+                        new = int(sm["num_input_dim"])
+                        if getattr(train_cfg.MLP_Encoder, "num_input_dim", None) != new:
+                            _applied.append(f"MLP_Encoder.num_input_dim: {train_cfg.MLP_Encoder.num_input_dim}->{new}")
+                            train_cfg.MLP_Encoder.num_input_dim = new
+                if _applied:
+                    print(f"[calib] applied {len(_applied)} cfg override(s) from saved cfg to match ckpt arch:")
+                    for s in _applied: print(f"        - {s}")
+            except Exception as e:
+                print(f"[calib] warn: could not read saved cfg: {e}")
+
     configure_env(env_cfg, mass)
 
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)

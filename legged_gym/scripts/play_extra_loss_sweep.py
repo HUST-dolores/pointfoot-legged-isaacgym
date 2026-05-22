@@ -267,12 +267,12 @@ def evaluate_loaded_runner(env, ppo_runner, args):
     with torch.no_grad():
         for _ in range(num_steps):
             est = encoder(obs_history, obs)
+            step_metrics = compute_step_metrics(est, critic_obs)
             actions = policy(torch.cat((est, obs, commands), dim=-1).detach())
 
             env.commands[:, :] = commands_val
 
             obs, _, _, _, obs_history, commands, critic_obs = env.step(actions.detach())
-            step_metrics = compute_step_metrics(est, critic_obs)
             for key, value in step_metrics.items():
                 metric_history[key].append(value)
 
