@@ -181,8 +181,17 @@ def build_observation_groups(num_obs, num_actions):
         extra_dim = max(0, filtered_size - extra_start)
         if extra_dim >= 8:
             add(branch, "qs_load_features", offset + 28, offset + 36)
+            # Per-dim breakdown of qs_load_features (8 dims)
+            _qs_load_names = ["payload_mass", "load_x", "load_y", "payload_present",
+                              "sin_lieangle_L_thigh", "cos_lieangle_L_thigh",
+                              "sin_lieangle_R_thigh", "cos_lieangle_R_thigh"]
+            for _i, _n in enumerate(_qs_load_names):
+                add(branch, f"qs_dim_{_n}", offset + 28 + _i, offset + 29 + _i)
             if extra_dim >= 12:
                 add(branch, "qs_residual_baseline", offset + 36, offset + 40)
+                _qs_resid_names = ["mass_delta", "com_delta_x", "com_delta_y", "com_delta_z"]
+                for _i, _n in enumerate(_qs_resid_names):
+                    add(branch, f"qs_dim_{_n}", offset + 36 + _i, offset + 37 + _i)
                 add(branch, "extra_pre_action", offset + 40, offset + filtered_size)
             else:
                 add(branch, "extra_pre_action", offset + 36, offset + filtered_size)

@@ -202,7 +202,7 @@ Avoid hard-coded constants. Use config classes to control:
 ### Changing Domain Randomization
 1. Edit `domain_rand.*_range` and enable flags in config
 2. Implement randomization logic in `_randomize_*()` methods in task class
-3. Consider load statistics impact (e.g., `load_enable_iter` controls when load spawning starts)
+<!-- 3. Consider load statistics impact (e.g., `load_enable_iter` controls when load spawning starts) -->
 
 ### Tuning Load Estimation
 - Adjust `extra_loss_*_w` for loss weighting (mass, COM, velocity branches)

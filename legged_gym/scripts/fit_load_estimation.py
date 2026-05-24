@@ -44,12 +44,20 @@ def load_all(paths):
     # Concatenate. Assume scalar fields (delta etc.) are identical across files.
     keys_scalar = {"delta", "thigh_len", "gravity", "robot_width",
                    "leg_eff_length", "abad_R_sign", "zero_thigh_angle"}
+    # String provenance fields added by recent collect_calibration_data.py.
+    keys_string = {"load_run", "checkpoint", "task"}
     out = {}
     for k in arrays[0].keys():
         if k in keys_scalar:
             out[k] = float(arrays[0][k])
+        elif k in keys_string:
+            out[k] = str(arrays[0][k])
         else:
-            out[k] = np.concatenate([a[k] for a in arrays], axis=0)
+            try:
+                out[k] = np.concatenate([a[k] for a in arrays], axis=0)
+            except Exception:
+                # Skip any other 0-dim / non-concatable field
+                out[k] = arrays[0][k]
     return out
 
 

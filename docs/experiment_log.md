@@ -1,10 +1,29 @@
 # 实验记录（简易索引版）
 
-> **完整原始数据 + 对比表 + 结论请看 [experiment_notebook.md](experiment_notebook.md)**。本文件仅作快速索引。
+> **完整数据 + 结论请看 [experiment_notebook.md](experiment_notebook.md)**。本文件是 ckpt/play 的快速索引表，不再放任何结论。
+>
+> **2026-05-24 重组**：删除了 1.2-1.4 的 bug-era 数字和已撤回的旧 narrative；1.5 raw data 表更新为当前 E1/E2/E3 主轴。
+> Quick conclusions 不在本文件维护——任何"哪个 policy 准/不准"的结论请直接查 notebook §5。
 
-每个实验跑完后**立即**在这里填一条。一个 entry 一行（小调参用同一行更新；重大变化新开一行）。`exp_tag` 和 .mat 文件名一致，便于事后追溯。
+每个实验跑完后**立即**在 [§1.5 raw data log](#15-raw-data-log) 加一行。一个 entry 一行（小调参用同一行更新；重大变化新开一行）。`exp_tag` 和 .mat 文件名一致，便于事后追溯。
 
-## 记录字段说明
+---
+
+## ★ Current canonical ckpts (paper 主轴)
+
+| 简称 | run_name | 配置 |
+|---|---|---|
+| **E1 main** | `exper_qs_resi_load_boost_3_seed_45_pemass` | QS-in-obs + residual + pemass + seed=45 |
+| **E2 direct** | `exper_qs_noresi_load_boost_3_seed_45_pemass` | QS-in-obs + 无 residual + pemass + seed=45 |
+| **E3 histonly** | `exper_history_only_load_boost_3_seed_45_pemass` | history only + pemass + seed=45 |
+
+所有当前 paper 数据都来自 E1/E2/E3 (ckpt 11000)。其余 ckpt（no-pemass baselines、co-cal 试错版本）仅作历史参照——见 notebook 附录 A/B。
+
+→ 数字、结论、IG 表全在 [experiment_notebook.md §2–§5](experiment_notebook.md#tldr-paper-最核心-findings)。
+
+---
+
+## 记录字段说明（仅 §1.5 raw data 表用）
 
 | 字段 | 说明 |
 |---|---|
@@ -15,87 +34,68 @@
 | condition | 实验条件简述（速度、载荷、扰动等） |
 | key_params | 跟之前不同的关键参数 |
 | mat_path | 实际输出的 .mat 路径 |
-| notes | 简要观察 / 备注 |
+| notes | 简要观察 / 备注（避免写结论，结论统一放 notebook） |
 
 ---
 
 ## 实验 1：负载估计准确性
 
-### 1.1 三组训练 + Play 结果汇总（ckpt 11000，static & walk@0.5，trimesh L0, 1024 train envs / 20 play envs）
+### 1.1 当前 paper 主轴 (E1 / E2 / E3, pemass on, ckpt 11000)
 
-| 训练配置 | use_qs_in_obs | load_boost | run_name | 备注 |
+3 架构 in-dist + OOD-low + OOD-high 完整 RMSE / IG 数据见
+[notebook §2.3 三架构完整 RMSE 对比](experiment_notebook.md#23-三架构完整-rmse-对比确认-pemass-改善跨架构成立) 和
+[§4 actor IG 分析](experiment_notebook.md#4-actor-integrated-gradients-分析)。
+
+| 训练配置 | use_qs_in_obs | use_residual | per-env mass | run_name |
 |---|---|---|---|---|
-| **main lb=6** | True | 6 | exper_qs_resi_load_boost_6 | 早期 pilot |
-| **main lb=3** | True | 3 | exper_qs_resi_load_boost_3 | pilot 选 final |
-| **history_only** | False | 3 | history_only_lb3 | 残差网络对照 |
+| **E1 main** | True | True | True | exper_qs_resi_load_boost_3_seed_45_pemass |
+| **E2 direct** | True | False | True | exper_qs_noresi_load_boost_3_seed_45_pemass |
+| **E3 histonly** | False | N/A | True | exper_history_only_load_boost_3_seed_45_pemass |
 
-### 1.2 关键指标对比表（ckpt 11000，单 seed）
+→ 主结论 [结论 I-N](experiment_notebook.md#5-当前可信结论-按重要性排序)。本文件不重复贴。
 
-**LOAD MASS RMSE (kg)** — 越小越好
+### 1.2 No-pemass baseline ckpts（仅对照用）
 
-| Policy | static [QS] | static [RL] | walk [QS] | walk [RL] |
-|---|---|---|---|---|
-| main lb=6 | 3.73 | 0.97 | 7.07 | 1.07 |
-| **main lb=3** | 5.64 | 0.86 / 1.40 / 0.86 (3 seed) | 5.88 | 0.94 |
-| **history_only** | **26.71** ↑ | **0.98** ≈ | **49.03** ↑ | **0.91** ≈ |
-
-**CoM DELTA Y RMSE (m)** — 越小越好
-
-| Policy | static [QS] | static [RL] | walk [QS] | walk [RL] |
-|---|---|---|---|---|
-| main lb=6 | 0.027 | 0.0114 | 0.039 | 0.0128 |
-| **main lb=3** | 0.027 | **0.0103** | 0.039 | 0.0116 |
-| **history_only** | 0.027 | 0.0120 | 0.031 | 0.0123 |
-
-**收敛时间 conv_time (s) + reach %** — RL 都达到 100%
-
-| Policy | static [RL] | walk [RL] |
+| 配置 | run_name | 用途 |
 |---|---|---|
-| main lb=6 | 0.12s | 0.09s |
-| main lb=3 | 0.08–0.43s (3 seed) | 0.19s |
-| history_only | 0.06s | 0.03s |
+| Old main_s42 | exper_qs_resi_load_boost_3 | pemass 改善对照的主参照（[notebook §2.2](experiment_notebook.md#22-e1-vs-old-main_s42per-env-mass-单独贡献)） |
+| Old main_s43 | exper_qs_resi_load_boost_3_seed_43 | multi train-seed |
+| Old direct | exper_qs_noresi_load_boost_3 | no-pemass direct |
+| Old history_only | history_only_lb3 / exper_history_only_load_boost_3 | no-pemass history |
+| Old lb=6 | exper_qs_resi_load_boost_6 | 早期 pilot；universal coef outlier |
 
-### 1.3 关键发现（重要！可能改变 paper narrative）
+完整 baseline 数字见 [notebook 附录 A](experiment_notebook.md#附录-ano-pemass-baseline-数据)。
 
-**发现 A：RL encoder 在 main 和 history_only 几乎打平**
-- 三种 policy 的 RL mass RMSE 都在 0.86–1.07 kg 范围
-- 三种 policy 的 RL dcom_y 都在 0.010–0.012 m 范围
-- **结论：把 QS 显式注入 obs 没有显著提高 encoder 估计精度**——encoder 自己能从原始 obs history 学到一样好
+### 1.3 失败的 co-cal ckpts（不再使用）
 
-**发现 B：QS analytical 在 history_only policy 下崩溃**
-- main lb=3 下 QS mass RMSE = 5.6 kg
-- history_only 下 QS mass RMSE = **26.7 kg (static) / 49.0 kg (walk)**，5-8 倍恶化
-- per-env std 比 mean 还大（部分 env QS 估计上百 kg）
-- **解读**：main method 的 policy **隐式学会维持 QS 友好姿态**（cos_thigh 不接近 0），让 Model C 工作；history_only policy 没有这个约束，cos_thigh 偶尔趋零导致公式分母爆炸
+- `exper_qs_resi_load_boost_3_seed_43_cocal_buggy` — v1，per-spawn API 用错
+- `exper_qs_resi_load_boost_3_seed_43_cocal_v2` — v2，per-env density 但 α≈0
 
-**发现 C：play-to-play 方差对 mass 很大（同 policy）**
-- 同 lb=3 ckpt 11000 static 三个 seed: mass RMSE = 0.86, 1.40, 0.86 → std=0.31 kg (~30%)
-- CoM 指标方差极小（dcom_x/y std < 0.001）
-- **paper 必须 mass 报 3-seed 均值±std；CoM 单 seed 可信**
-- **原因**：20 envs 不是"同实验 20 次"，而是 20 个不同 (load mass / push timing / 摩擦 / 推力等) 组合，换 seed = 重新抽 20 个组合
+→ 失败原因见 [notebook 结论 N](experiment_notebook.md#结论-nco-calibration-在当前架构下不可行paper-12-句提及)，paper 最多 1-2 句提及。
 
-### 1.4 对 paper 的影响（核心 narrative 调整）
+### 1.4 当前 deployed QS 公式
 
-| 维度 | 原 paper 假设 | 数据支持的结论 |
-|---|---|---|
-| Encoder 准确性 | QS 先验显著改善 | ❌ **不显著（差异在噪声内）** |
-| Policy 行为 | 不区分 | ✅ **main method 维持 QS 友好姿态** |
-| Hybrid 系统鲁棒性 | 不重点 | ✅ **main method 下 QS 公式仍能用作 sanity check** |
+Model G (7 params)，universal coefs 在 [`wheelfoot_flat.py:368-382`](../legged_gym/envs/wheelfoot_flat/wheelfoot_flat.py#L368-L382)。
+完整对比 / 系数表见 [notebook §3](experiment_notebook.md#3-model-g-qs-公式部署--universal-系数)。
 
-**建议 paper 重构**：
-- §4.1 (原 main result) 改为 "Estimation accuracy is comparable across architectures"（honest negative finding）
-- §4.2 升级为核心：**"Including QS as obs feature shapes policy behavior, keeping the analytical formula in its valid regime"**
-- 加 §4.3 OOD 实验和 policy 姿态分布对比，强化"prior 影响 policy 而非 encoder"故事
+### 1.5 raw data log
 
-类似 negative-ish 结果的 robotics paper 不少（Lee et al. 2020 Science Robotics, Margolis et al. CoRL 2022, Pinto et al. asymmetric actor critic, 整个 auxiliary loss 文献），**完全可发**。
-
-### 1.5 详细原始数据 log
+新加 play 时直接在表末追加一行。**不在 notes 写结论**——结论统一放 notebook §5。
 
 | date | exp_tag | commit | policy | condition | key_params | mat_path | notes |
 |---|---|---|---|---|---|---|---|
-| 2026-05-19 | lb6 static / walk_0.5 | (前版) | exper_qs_resi_load_boost_6/model_11000.pt | static, walk@0.5; trimesh L0 | load_boost=6, use_qs_in_obs=True | logs/.../play_data_*_lb6_*.mat | static [QS] mass=3.73 [RL]=0.97; walk [QS]=7.07 [RL]=1.07 |
-| 2026-05-19 | lb3 static (3 seeds) / walk_0.5 | (前版) | exper_qs_resi_load_boost_3/model_11000.pt | static (3 seed) + walk@0.5 | load_boost=3, use_qs_in_obs=True | logs/.../play_data_*_lb3_*.mat | static [RL] mass=0.86 / 1.40 / 0.86 (seed=42/43/another)；walk [RL]=0.94；**Pilot 选 lb=3 final** |
-| 2026-05-20 | lb3_static_compare_historyonly | 08d4c40 | history_only_lb3/model_11000.pt | static + walk@0.5; trimesh L0 | use_qs_in_obs=False, load_boost=3, seed=42 | logs/.../play_data_20260520-08*_*.mat | **关键对照**：[RL] mass=0.98 (跟 main 持平), [QS] mass=26.71 (崩溃)；揭示 QS 价值在 shape policy 而非 encoder |
+| 2026-05-24 | E1 in-dist/OOD ×6 | 961fcd4 | E1/model_11000.pt | static + walk × in-dist/[1,2]/[4,6] | pemass=True, G_all deployed | logs/.../play_data_*_seed_45_pemass_ckpt11000_*.mat | RMSE 范围 0.83-4.95（walk OOD-high outlier）见 notebook §2.3 |
+| 2026-05-24 | E1 IG × 7 ckpts | 961fcd4 | E1/model_{3-16}000.pt | in-dist + 2 OOD | analyze_actor_ig.py | logs/.../actor_ig_summary_*.csv | 跨 ckpt qs_combined 5.15-7.23%，est_mass < 0.10%。见 notebook §4.3-4.4 |
+| 2026-05-24 | E3 in-dist/OOD ×6 | 961fcd4 | E3/model_11000.pt | static + walk × in-dist/[1,2]/[4,6] | history_only + pemass | logs/.../play_data_*_seed_45_pemass_*.mat | 三架构 range < 0.15 kg；见 notebook §2.3 |
+| 2026-05-24 | E3 IG × 7 ckpts | 961fcd4 | E3/model_{3-16}000.pt | in-dist + 2 OOD | analyze_actor_ig.py | logs/.../actor_ig_summary_*.csv | est_lin_vel OOD-low +5.75pp；est_mass < 0.20%。见 notebook §4.4 |
+| 2026-05-24 | E2 in-dist/OOD ×6 | 3610996 | E2/model_11000.pt | static + walk × in-dist/[1,2]/[4,6] | direct + pemass | logs/.../play_data_*_seed_45_pemass_*.mat | 跟 E1/E3 同档，无 walk OOD-high outlier。见 notebook §2.3 |
+| 2026-05-24 | E2 IG ckpt 11000 | 3610996 | E2/model_11000.pt | in-dist | analyze_actor_ig.py | logs/.../actor_ig_summary_*.csv | qs_combined 5.47% ≈ E1 5.58%；residual 不影响 actor 对 QS 依赖。见 notebook §4.2 |
+| 2026-05-24 | E1 offline cal | 961fcd4 | E1/model_11000.pt | QS grid 4 mass × 16 com | collect_calibration_data.py | logs/.../cal_data_E1_*.npz | offline cal RMSE = 0.689 kg；policy 仍 QS-fittable。见 notebook §A.3 |
+| 2026-05-23 | per-env mass discovery | 016902d | v2/model_11000.pt | OOD-low static | accidental finding | logs/.../v2_cocal_*.mat | 触发 pemass narrative 的偶然实验；详见 notebook 时间线 |
+
+> **早期 §1.5 行（lb=6 / lb=3 / history_only 各 1 行）已删除**——它们的数字是 bug-era（[notebook §2.1](experiment_notebook.md#21-hidden-distribution-shift修复前的训练-bug) 的 hidden distribution shift bug 修复前采集），不应作为当前参照。原始 .mat 仍在 `exported/` 目录下，需要时直接读。
+
+---
 
 ## 实验 2：控制增益
 
@@ -125,12 +125,12 @@
 # 1. 看下输出文件
 ls -lh logs/wheelfoot_flat/<exp>/exported/play_data_*.mat
 
-# 2. 提交（推荐把 .mat 加 .gitignore，只 commit log）
+# 2. 提交（推荐 .mat 加 .gitignore，只 commit log）
 git add docs/experiment_log.md
-git commit -m "exp1 静态 5kg(0.1,0): RMSE m=X.XX kg, com_x=X.XX m, com_y=X.XX m"
+git commit -m "exp1 <exp_tag>: <短描述>"
 
 # 3. 如果换了 policy/config 也一起 commit
-git add legged_gym/envs/...  
+git add legged_gym/envs/...
 git commit -m "..."
 ```
 
@@ -141,3 +141,11 @@ git commit -m "..."
 ```
 
 但更推荐 .mat 不入库，只在 log 表里记 mat_path，避免仓库膨胀。
+
+---
+
+## 维护原则
+
+- 本文件只放 ckpt / .mat / commit / exp_tag 索引；**不放结论、不放对比解读**。
+- 任何结论性表述统一放 [experiment_notebook.md](experiment_notebook.md)，避免两份文件出现矛盾。
+- raw data 表 (§1.5) 的 notes 字段允许写**一句关键现象**或 **指向 notebook section 的链接**，但不允许写"哪个 policy 好"之类的判断语。

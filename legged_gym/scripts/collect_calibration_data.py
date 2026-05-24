@@ -419,6 +419,10 @@ def main():
         leg_eff_length=np.float32(leg_eff_length),
         abad_R_sign=np.float32(abad_R_sign),
         zero_thigh_angle=np.float32(zero_thigh_angle),
+        # Provenance: which policy was calibrated (lets fit reports trace back).
+        load_run=str(getattr(args, "load_run", "") or ""),
+        checkpoint=str(getattr(args, "checkpoint", "") or ""),
+        task=str(getattr(args, "task", "") or ""),
         **{k: v.astype(np.float32) for k, v in means.items()},
     )
     print(f"[calib] saved -> {output_path}")

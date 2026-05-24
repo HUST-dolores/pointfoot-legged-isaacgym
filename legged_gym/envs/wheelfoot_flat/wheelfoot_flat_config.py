@@ -191,7 +191,7 @@ class BipedCfgWF(BaseConfig):
         load_estimation_body_mass = 9.58
         load_estimation_body_com0 = [0.04576, 0.00014, -0.16398]
         load_estimation_load_z = 0.10
-        load_estimation_filter_cutoff_normalized = 1.0 /20  # butter(1, 1/10, "low")  截止频率  1/100几乎直线
+        load_estimation_filter_cutoff_normalized = 1.0 /40  # butter(1, 1/10, "low")  截止频率  1/100几乎直线
         load_estimation_robot_width = 0.251
         load_estimation_position_limit = 0.5
         load_estimation_position_zero_mass_threshold = 0.3
@@ -239,9 +239,18 @@ class BipedCfgWF(BaseConfig):
         randomize_base_mass = False
         added_mass_range = [-0.1, 0.1]         #
         add_random_load = True
-        add_load_range = [2, 4]  # [kg]这个mass是负载的mass，定义后不会改变。  000 
+        add_load_range = [2, 4]  # [kg] load mass range. With per_env_load_mass=True
+                                 # each env independently samples one mass from this
+                                 # range at actor creation (encoder sees 1024 distinct
+                                 # masses → better OOD generalization than legacy
+                                 # single-scalar mode).
+        # When True, each env's load actor is created with its own density
+        # (mass sampled from add_load_range). When False, all envs share one
+        # globally sampled mass (legacy pre-2026-05-23 behavior; only useful
+        # for reproducing old baselines).
+        per_env_load_mass = True
         randomize_base_com = True
-        load_enable_iter = 1000    #000 
+        # load_enable_iter = 1000    #000 
         rand_com_vec = [0.03, 0.02, 0.03]
         # load_offset_range_xy = [0.13, 0.12]   #000
         randomize_inertia = True
@@ -389,7 +398,6 @@ class BipedCfgWF(BaseConfig):
             contact_collection = (
                 2  # 0: never, 1: last sub-step, 2: all sub-steps (default=2)
             )
-
 
 class BipedCfgPPOWF(BaseConfig):
     seed = 1

@@ -108,7 +108,7 @@ class BaseTask:
         )
         # 训练迭代计数由 runner 注入；负载默认在指定迭代后才启用
         self.learning_iteration = 0
-        self.load_enable_iter = int(getattr(self.cfg.domain_rand, "load_enable_iter", 1000))
+        # self.load_enable_iter = int(getattr(self.cfg.domain_rand, "load_enable_iter", 1000))
         # 负载生成后的接触宽限时间（秒）：避免刚生成时瞬时冲击被误判为跌倒终止
         self.load_contact_grace_s = float(
             getattr(self.cfg.domain_rand, "load_contact_grace_s", 0.0)
@@ -336,7 +336,15 @@ class BaseTask:
             total_spawned = int(self.loads_spawned_count.sum().item())
         except Exception:
             total_spawned = 0
-        return {"active_loads_sum": active, "total_loads_spawned": total_spawned}
+        return {
+            "active_loads_sum": active,
+            "total_loads_spawned": total_spawned,
+            "load_has_ratio": float(getattr(self, "load_has_load_ratio_last", torch.tensor(0.0)).item()),
+            "load_on_body_ratio": float(getattr(self, "load_on_body_ratio_last", torch.tensor(0.0)).item()),
+            "load_pos_inside_ratio": float(getattr(self, "load_pos_inside_ratio_last", torch.tensor(0.0)).item()),
+            "load_force_match_ratio": float(getattr(self, "load_force_match_ratio_last", torch.tensor(0.0)).item()),
+            "load_raw_on_body_ratio": float(getattr(self, "load_raw_on_body_ratio_last", torch.tensor(0.0)).item()),
+        }
 
     def get_observations(self):
         return (
@@ -558,6 +566,8 @@ class BaseTask:
         
         self.actor_indices = []
         self.load_indices = []
+        self.load_mass_per_env_init = []
+        self.load_assets_per_env = []
         
         # # Create load asset
         load_asset_options = gymapi.AssetOptions()
@@ -571,10 +581,22 @@ class BaseTask:
             chosen_load_mass = torch.empty(1).uniform_(load_mass_min, load_mass_max).item()
         load_asset_options.density = chosen_load_mass / load_volume
         self.load_mass = chosen_load_mass  # sampled once from cfg.domain_rand.add_load_range
-        self.load_asset = self.gym.create_box(self.sim, 0.1, 0.1, 0.1, load_asset_options)
-        load_rigid_shape_props = self.gym.get_asset_rigid_shape_properties(self.load_asset)
-        load_rigid_shape_props[0].friction = 0.5
-        self.gym.set_asset_rigid_shape_properties(self.load_asset, load_rigid_shape_props)
+        randomize_load_mass_per_env = bool(getattr(
+            self.cfg.domain_rand, "per_env_load_mass", False
+        ))
+        # When NOT randomizing, build one shared asset. When randomizing, each env
+        # gets its own asset with per-env density (post-creation
+        # set_actor_rigid_body_properties does NOT actually change the physical
+        # mass Isaac Gym uses for force computation — confirmed by α→0 + γ_sum≈mean
+        # signature in lstsq fit).
+        if not randomize_load_mass_per_env:
+            self.load_asset = self.gym.create_box(self.sim, 0.1, 0.1, 0.1, load_asset_options)
+            load_rigid_shape_props = self.gym.get_asset_rigid_shape_properties(self.load_asset)
+            load_rigid_shape_props[0].friction = 0.5
+            self.gym.set_asset_rigid_shape_properties(self.load_asset, load_rigid_shape_props)
+        else:
+            self.load_asset = None  # per-env assets built inside the loop below
+            print(f"[env] building {self.num_envs} per-env load assets with density randomized in [{load_mass_min}, {load_mass_max}] kg")
         
         
         self.friction_coef = torch.zeros(
@@ -631,11 +653,30 @@ class BaseTask:
         #    Create load actor (hidden initially)
             load_pose = gymapi.Transform()
             load_pose.p = gymapi.Vec3(0.0, 0.0, -100.0) # Far away
+            if randomize_load_mass_per_env:
+                # Sample per-env mass and build a dedicated load asset for this env.
+                # Setting AssetOptions.density before create_box makes Isaac Gym use
+                # that mass + auto-computed inertia at sim time. This is the only
+                # reliable way to make per-env load masses actually take effect.
+                load_mass_i = float(torch.empty(1).uniform_(load_mass_min, load_mass_max).item())
+                _opts = gymapi.AssetOptions()
+                _opts.fix_base_link = False
+                _opts.density = load_mass_i / load_volume
+                _asset_i = self.gym.create_box(self.sim, 0.1, 0.1, 0.1, _opts)
+                _shape_props = self.gym.get_asset_rigid_shape_properties(_asset_i)
+                _shape_props[0].friction = 0.5
+                self.gym.set_asset_rigid_shape_properties(_asset_i, _shape_props)
+                _asset_for_this = _asset_i
+            else:
+                load_mass_i = float(self.load_mass)
+                _asset_for_this = self.load_asset
+            self.load_assets_per_env.append(_asset_for_this)
             load_handle = self.gym.create_actor(
-                env_handle, self.load_asset, load_pose, f"load_{i}", i, 0, 0
+                env_handle, _asset_for_this, load_pose, f"load_{i}", i, 0, 0
             )
             # print(f"Created load actor in env {i}, handle {load_handle}")
             self.load_handles.append(load_handle)
+            self.load_mass_per_env_init.append(load_mass_i)
             load_idx = self.gym.get_actor_index(env_handle, load_handle, gymapi.DOMAIN_SIM)
             self.load_indices.append(load_idx)
             self.load_init_state.append([load_start_pose.p.x, load_start_pose.p.y, load_start_pose.p.z,
@@ -1344,10 +1385,18 @@ class BaseTask:
         """Update effective base mass/COM when a load is present on the robot."""
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
+        else:
+            env_ids = self._to_env_ids_tensor(env_ids)
 
         # 如果未传入掩码，现算一次
         if load_on_body_mask is None:
             load_on_body_mask = self.is_load_on_body(env_ids)
+        else:
+            load_on_body_mask = torch.as_tensor(
+                load_on_body_mask, device=self.device, dtype=torch.bool
+            ).view(-1)
+            if load_on_body_mask.numel() == self.num_envs and env_ids.numel() != self.num_envs:
+                load_on_body_mask = load_on_body_mask[env_ids]
 
         base_pos = self.root_states[self.actor_indices[env_ids], 0:3]
         base_quat = self.root_states[self.actor_indices[env_ids], 3:7]
@@ -1359,7 +1408,12 @@ class BaseTask:
         m0 = self.base_mass0[env_ids]
         com0 = self.base_com0[env_ids]
 
-        load_mass = torch.full_like(m0, float(self.load_mass)) * load_on_body_mask.float()
+        # Use per-env load mass (populated at actor creation when
+        # domain_rand.per_env_load_mass=True; else uniform global value).
+        if hasattr(self, "load_mass_per_env"):
+            load_mass = self.load_mass_per_env[env_ids] * load_on_body_mask.float()
+        else:
+            load_mass = torch.full_like(m0, float(self.load_mass)) * load_on_body_mask.float()
         m_eff = m0 + load_mass
         denom = m_eff.clamp_min(1e-6).unsqueeze(-1)
         com_eff = (m0.unsqueeze(-1) * com0 + load_mass.unsqueeze(-1) * rel_body) / denom
@@ -1425,8 +1479,11 @@ class BaseTask:
         1) 负载投影在 base 坐标系的盒内（带 margin）。
         2) 负载的接触力与机体某一刚体的接触力大小相近（相对差<=force_rel_tol，且力大于 force_min）。
         """
+        full_env_query = env_ids is None
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
+        else:
+            env_ids = self._to_env_ids_tensor(env_ids)
 
         base_pos = self.root_states[self.actor_indices[env_ids], 0:3]
         base_quat = self.root_states[self.actor_indices[env_ids], 3:7]
@@ -1466,6 +1523,10 @@ class BaseTask:
             & (load_norm >= force_min)
             & (rel_err <= force_rel_tol)
         )
+        if full_env_query or env_ids.numel() == self.num_envs:
+            self.load_pos_inside_ratio_last = pos_inside.float().mean()
+            self.load_force_match_ratio_last = force_match.float().mean()
+            self.load_raw_on_body_ratio_last = (pos_inside & force_match).float().mean()
 
         inside_raw = pos_inside & force_match
 
@@ -1686,18 +1747,10 @@ class BaseTask:
             self.num_envs, dtype=torch.bool, device=self.device
         )
         load_on_body_mask = torch.zeros_like(load_on_body_mask_raw)
-        # 生成/移除负载
-        # if self.learning_iteration >= self.load_enable_iter:
-        #     self._maybe_spawn_loads()
-        #     load_on_body_mask_raw = self.is_load_on_body(apply_hysteresis=False)
-        #     load_on_body_mask = self.is_load_on_body(apply_hysteresis=True)        #train
-        # 始终更新一次质量/质心：未启用时回到无负载状态，启用时使用平滑掩码
-       
         self._maybe_spawn_loads()
         load_on_body_mask_raw = self.is_load_on_body(apply_hysteresis=False)
-        load_on_body_mask = self.is_load_on_body(apply_hysteresis=True)           #play
-        
-        
+        load_on_body_mask = self.is_load_on_body(apply_hysteresis=True)
+
         self._compute_mass_com(load_on_body_mask=load_on_body_mask)     
             
             
@@ -1871,6 +1924,9 @@ class BaseTask:
         self.load_on_body_ratio_last = torch.tensor(0.0, device=self.device)
         self.load_on_body_given_has_load_last = torch.tensor(0.0, device=self.device)
         self.load_hysteresis_agree_last = torch.tensor(1.0, device=self.device)
+        self.load_pos_inside_ratio_last = torch.tensor(0.0, device=self.device)
+        self.load_force_match_ratio_last = torch.tensor(0.0, device=self.device)
+        self.load_raw_on_body_ratio_last = torch.tensor(0.0, device=self.device)
         self.load_contact_grace_steps = int(np.ceil(self.load_contact_grace_s / self.dt))
         self.load_contact_grace_counter = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device
@@ -1880,6 +1936,26 @@ class BaseTask:
         self.loads_spawned_count = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device
         )
+        # Per-env load mass labels.  In legacy mode every env shares the same
+        # scalar load_mass; with domain_rand.per_env_load_mass=True each env
+        # gets the mass sampled for its dedicated load asset at actor creation.
+        # This tensor is the ground-truth load mass used by _compute_mass_com
+        # and play/export logging.
+        if (
+            hasattr(self, "load_mass_per_env_init")
+            and len(self.load_mass_per_env_init) == self.num_envs
+        ):
+            self.load_mass_per_env = torch.as_tensor(
+                self.load_mass_per_env_init, dtype=torch.float, device=self.device
+            )
+        else:
+            self.load_mass_per_env = torch.full(
+                (self.num_envs,), float(getattr(self, "load_mass", 0.0)),
+                dtype=torch.float, device=self.device,
+            )
+        if bool(getattr(self.cfg.domain_rand, "per_env_load_mass", False)):
+            print(f"[env] per-env load mass randomization ENABLED "
+                  f"(range {getattr(self.cfg.domain_rand, 'add_load_range', '?')})")
         
         # Initialize next spawn time
         if hasattr(self.cfg.domain_rand, "load_start_time_s"):

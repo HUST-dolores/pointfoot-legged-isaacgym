@@ -370,6 +370,9 @@ class PPO:
         mean_eval_mass_mse = 0.0
         mean_eval_com_mse = 0.0
         mean_eval_vel_mse = 0.0
+        mean_eval_load_present_frac = 0.0
+        mean_eval_mass_target_abs = 0.0
+        mean_eval_com_target_norm = 0.0
         
         if self.extra_optimizer is not None:
             generator = self.storage.encoder_mini_batch_generator(
@@ -443,6 +446,9 @@ class PPO:
                         
                         # load_present 形状类似 (batch_size, 1)
                         is_load_on = load_present.squeeze()
+                        mean_eval_load_present_frac += load_present.float().mean().item()
+                        mean_eval_mass_target_abs += mass_target.abs().mean().item()
+                        mean_eval_com_target_norm += com_target.norm(dim=1).mean().item()
                         
                         if is_load_on.any():
                             # 只统计真正带负载时刻的 mass 和 com 纯误差
@@ -499,6 +505,9 @@ class PPO:
             mean_eval_vel_mse /= max(1, num_updates_extra)
             mean_eval_mass_mse /= max(1, num_updates_extra)
             mean_eval_com_mse /= max(1, num_updates_extra)
+            mean_eval_load_present_frac /= max(1, num_updates_extra)
+            mean_eval_mass_target_abs /= max(1, num_updates_extra)
+            mean_eval_com_target_norm /= max(1, num_updates_extra)
         mean_surrogate_loss /= num_updates
         mean_kl /= num_updates
         self.storage.clear()
@@ -507,6 +516,9 @@ class PPO:
             "vel_mse": mean_eval_vel_mse,
             "mass_mse": mean_eval_mass_mse,
             "com_mse": mean_eval_com_mse,
+            "load_present_frac": mean_eval_load_present_frac,
+            "mass_target_abs": mean_eval_mass_target_abs,
+            "com_target_norm": mean_eval_com_target_norm,
         }
 
         return (mean_value_loss, mean_extra_loss, mean_surrogate_loss, mean_kl, extra_metrics)

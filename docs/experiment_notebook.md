@@ -1,10 +1,27 @@
 # 实验记录本 (Experiment Notebook)
 
-> **本文档的用法**：
-> - 第一部分按时间顺序记录所有 play 的**原始 metrics 输出**（直接粘贴自终端）
-> - 第二部分是基于原始数据的**对比表格 + 解读**
-> - 第三部分是**累计的关键结论**（每有新数据就更新）
-> - 用户后续直接在第一部分末尾追加新结果即可；要让助手分析，告诉它 "看一下 `docs/experiment_notebook.md`" 即可
+> **项目主题**：WF_TRON1A 双轮足双足机器人的 hybrid load mass estimation (QS analytical + RL encoder).
+>
+> **本笔记本的当前定位**：2026-05-24 重组版。删除了 2026-05-22 之前的 bug-era raw data；
+> 整理掉了与现状矛盾的旧结论；按"重要性排序"重新组织。
+> 所有 paper-grade conclusions 集中在 [§5 当前可信结论]，按 ★ 标记重要性。
+
+---
+
+## ★ TL;DR (paper 最核心 findings)
+
+按重要性排序：
+
+1. **★★★ [结论 I](#-结论-iper-env-mass-diversity-是-ood-改善的核心机制)** — per-env mass diversity 是 OOD 改善的核心机制；OOD-low RMSE 1.44 → 0.98 kg（**−32%**）
+2. **★★★ [结论 J](#-结论-j架构qs-in-obs--residual-learning影响-marginal)** — 架构（QS-in-obs / residual learning）影响 marginal；三架构 RMSE per condition < 0.15 kg
+3. **★★ [结论 K](#-结论-kencoder-mass-output-几乎不被-actor-使用)** — encoder mass output 几乎不被 actor 使用（IG attribution < 0.20% across all conditions）
+4. **★ [结论 L](#-结论-lqs-in-obs-是-stabilizing-prior小但实在)** — QS-in-obs 是 stabilizing prior（actor IG ~6%）
+5. **★ [结论 M](#-结论-mencoder-在-mass-branch-上做了-noise-aware-feature-selection)** — encoder 在 mass branch 做了 noise-aware feature selection
+6. [结论 N](#结论-nco-calibration-在当前架构下不可行paper-12-句提及) — Co-cal 在当前架构下不可行（paper 1-2 句提及即可）
+
+→ **paper main contribution**：per-env mass diversity（一行 hidden bug 修复）；
+→ paper honest negative findings：架构影响 marginal、encoder mass 不被 actor 用、co-cal 不可行；
+→ paper supporting findings：QS-in-obs stabilizing prior、encoder noise-aware feature selection。
 
 ---
 
@@ -13,1479 +30,433 @@
 | 项 | 值 |
 |---|---|
 | 平台 | WF_TRON1A (双轮足双足) |
-| 训练 | trimesh L0（单一最易级），num_envs=1024，episode_length=40s |
+| 训练 | trimesh L0（最易级），num_envs=1024，episode_length=40s，**per_env_load_mass=ON** |
 | Play | num_envs=20，stop_state_log=2000 step (40s)，trimesh L0 patch 60×180 m |
-| 载荷 | mass ∈ [2, 4] kg 随机，start=0.5s，duration ∈ [30,40] s，interval ∈ [50,60] s |
-| Random | friction / restitution / base_com / inertia / Kp / Kd / motor_torque / dof_pos / action_delay / imu_offset 全开；base_mass=False（Model C 标定需求） |
+| 载荷 | mass ∈ [2, 4] kg 随机，start=0.5s，duration ∈ [30, 40] s，interval ∈ [50, 60] s |
+| Domain rand | friction / restitution / base_com / inertia / Kp / Kd / motor_torque / dof_pos / action_delay / imu_offset 全开；base_mass=False（Model G 标定需求） |
 | Push | push_robots=True, push_interval=5s, max_push_vel=2 m/s |
-
-**Model C 标定基线**（QS 工况，4×16 网格拟合）：mass RMSE = 0.77 kg，x RMSE = 21 mm，y RMSE = 66 mm。
-
----
-
-# 第一部分：原始 Play 数据
-
-> **⚠️ 重要：第一部分（§1–§5）所有 RL mass / RL CoM 数字都是 BUG 时代数据**
->
-> 2026-05-21 之前的 play.py 在 residual 模式下把 QS baseline **加了两次**到 encoder 输出：
-> 一次在 `PPO.encode_for_policy()` 内（正确），又一次在 play.py 的 logging 分支
-> （错误，`_baseline[:, 0] + est[:, 3]`）。
->
-> **影响范围**：所有 main residual policy 的 plays（main lb=3 / lb=6 / OOD）的 RL mass 数字
-> 系统性偏高一个 baseline 量级（约 +3 kg）。direct 和 history_only **没有受影响**（不走 residual 分支）。
->
-> **结论**：§1–§5 仅作历史追溯保留；**所有 main residual 行的 RL mass 数字应视为废弃**。
-> 真实数据见第二部分 §6（已 bug 修复 + auto exp_tag + multi-seed 干净复测）。
->
-> 同时也修复了：(a) task_registry 的 seed 应用 bug；(b) history_only ckpt shape mismatch；
-> (c) auto exp_tag 没从 saved cfg 读 lb（lb=6 ckpt 标错成 lb=3）。
-
-## §1 早期 pilot：lb=6 ckpt 9000/11000/13000（旧 play.py，无 encoder logging）
-
-> 说明：这一组只记录了 Model C 的 RMSE（当时还以为是 encoder 的），后来发现是 QS。无 [RL] encoder 数字。
-
-**ckpt 9000 (lb=6, static)**：
-```
-mass:  bias=+4.6186 kg  rmse=5.2153 kg
-x   :  bias=-0.0120 m   rmse=0.0518 m
-y   :  bias=-0.0299 m   rmse=0.0958 m
-mass conv reached: 0%
-x conv reached: 100% @ 2.15s
-y conv reached: 100% @ 7.64s
-dyn_phase RMSE: mass=6.24, com_x=0.076, com_y=0.097
-```
-
-**ckpt 11000 (lb=6, static)**：
-```
-mass:  bias=+5.0794 kg  rmse=5.6387 kg
-x   :  bias=-0.0116 m   rmse=0.0536 m
-y   :  bias=-0.0091 m   rmse=0.0884 m
-mass conv reached: 0%
-dyn_phase RMSE: mass=6.93, com_x=0.084, com_y=0.095
-```
-
-**ckpt 13000 (lb=6, static)**：
-```
-mass:  bias=+1.6725 kg  rmse=2.7720 kg
-x   :  bias=-0.0105 m   rmse=0.0364 m
-y   :  bias=-0.0189 m   rmse=0.0999 m
-mass conv reached: 40% @ 14.09s
-dyn_phase RMSE: mass=5.78, com_x=0.066, com_y=0.095
-```
+| QS deployed | Model G（7 params），universal coefs avg over main_s42 + main_s43 + direct，见 [§3.2](#32-universal-g_all-系数) |
 
 ---
 
-## §2 lb=3 vs lb=6 ckpt 11000 全套对比（新 play.py 含 encoder logging）
+## §1 实验设计
 
-### 2.1 lb=3 static (ckpt 11000, seed=42, run #1)
+### 1.1 三架构 ablation matrix（E1 / E2 / E3）
 
-```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=5.6387  bias=+5.0794  per_env=5.6158±0.5074
-  [RL]  RMSE=0.8624  bias=+0.0516  per_env=0.8619±0.0280
+所有 E1/E2/E3 同 `seed=45` + `per_env_load_mass=ON` + ckpt 11000，仅架构 flag 不同。
 
-====== LOAD POSITION (m) ======
-  [QS]  com_x RMSE=0.0536  bias=-0.0116
-  [QS]  com_y RMSE=0.0884  bias=-0.0091
+| Ckpt | 含义 | `use_qs_in_obs` | `use_residual_learning` |
+|---|---|---|---|
+| **E1 main** = `exper_qs_resi_load_boost_3_seed_45_pemass` | QS in obs + residual learning | ✓ | ✓ |
+| **E2 direct** = `exper_qs_noresi_load_boost_3_seed_45_pemass` | QS in obs + direct mass head | ✓ | ✗ |
+| **E3 histonly** = `exper_history_only_load_boost_3_seed_45_pemass` | history only（无 QS） | ✗ | N/A |
 
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0160  bias=-0.0135  |  y: RMSE=0.0273  bias=-0.0021
-  [RL]  x: RMSE=0.0135  bias=-0.0031  |  y: RMSE=0.0103  bias=+0.0006
+### 1.2 No-pemass 对照 baseline
 
-====== convergence ======
-  [QS]  reached=0%
-  [RL]  reached=100% @ 0.0810s
+仅用作 per-env mass 改善幅度对比的参照，不再作为独立分析对象：
 
-====== dynamic-phase RMSE ======
-  [QS]  mass=6.9313 kg  dcom_x=0.0226 m  dcom_y=0.0317 m
-  [RL]  mass=0.8080 kg  dcom_x=0.0161 m  dcom_y=0.0106 m
-```
+- `exper_qs_resi_load_boost_3` (Old main_s42) — main 配置 + seed=42 + **no pemass**
+- 其他 no-pemass ckpts（s43、lb=6、direct、history_only）见 [附录 A](#附录-ano-pemass-baseline-数据)
 
-### 2.2 lb=3 static (ckpt 11000, seed=43, run #2 — outlier!)
+---
 
-```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=5.1945  bias=+4.5645  per_env=5.0959±1.0073
-  [RL]  RMSE=1.3959  bias=+0.0976  per_env=1.3922±0.1018      ← outlier (RL mass +62%)
+## §2 主结果：Per-env mass diversity 是 OOD 改善的核心
 
-====== LOAD POSITION (m) ======
-  [QS]  com_x RMSE=0.0653  bias=-0.0195
-  [QS]  com_y RMSE=0.0907  bias=+0.0033
+### 2.1 Hidden distribution shift（修复前的训练 bug）
 
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0163  bias=-0.0150  |  y: RMSE=0.0250  bias=+0.0006
-  [RL]  x: RMSE=0.0134  bias=-0.0014  |  y: RMSE=0.0109  bias=+0.0017
+修复前 `base_task.py:571` 训练时：
 
-====== convergence ======
-  [QS]  reached=0%
-  [RL]  reached=100% @ 0.4320s
-
-====== dynamic-phase RMSE ======
-  [QS]  mass=8.3066 kg  dcom_x=0.0220 m  dcom_y=0.0285 m
-  [RL]  mass=1.3242 kg  dcom_x=0.0142 m  dcom_y=0.0099 m
+```python
+chosen_load_mass = torch.empty(1).uniform_(load_mass_min, load_mass_max).item()  # ★ 全局一个 scalar
+load_asset_options.density = chosen_load_mass / load_volume
+# 所有 1024 envs 用同一个 load_asset → 同一个 mass per training run
 ```
 
-### 2.3 lb=3 static (ckpt 11000, seed unknown, run #3)
+→ 训练时 encoder 见到的 mass label 是 **per-run constant**（每次训练只见一个固定 mass）。
+encoder 没有学到 mass-varying representation，自然 OOD 退化严重。
+
+修复：`per_env_load_mass = True` → 每个 env 在 actor 创建时单独 `create_box` + 独立 density →
+1024 envs 同时存在 1024 个不同 mass → encoder 见到 [2, 4] kg 完整分布。
+
+### 2.2 E1 vs Old main_s42（per-env mass 单独贡献）
+
+play_seed=42，ckpt 11000，trimesh L0，num_envs=20。
+
+| Condition | **E1** (pemass) | Old s42 (no pemass) | 改善 |
+|---|---|---|---|
+| in-dist static [2,4] | 0.83 | 1.07 | **−22%** |
+| OOD-low static [1,2] | **0.98** | **1.44** | **−32%** ★ |
+| OOD-low walk [1,2] | 0.98 | 1.46 | **−33%** ★ |
+| OOD-high static [4,6] | 1.49 | 1.89 | **−21%** |
+
+### 2.3 三架构完整 RMSE 对比（确认 pemass 改善跨架构成立）
+
+| Condition | **E1 main** | **E2 direct** | **E3 histonly** | range (E1-3) |
+|---|---|---|---|---|
+| in-dist static [2,4] | 0.83 | **0.78** | 0.82 | 0.05 |
+| in-dist walk [2,4] | 0.86 | 0.79 | **0.74** | 0.12 |
+| OOD-low static [1,2] | **0.98** | 1.01 | 1.05 | 0.07 |
+| OOD-low walk [1,2] | 0.98 | **0.93** | 1.00 | 0.07 |
+| OOD-high static [4,6] | 1.49 | 1.48 | **1.39** | 0.10 |
+| OOD-high walk [4,6] | **4.95** ⚠ | 1.50 | 1.42 | 0.08 (excl E1) |
+
+**关键观察**：
+
+- 三架构 RMSE per condition 差异 < 0.15 kg；每条件三者轮流最好，**无系统性赢家**
+- 跨架构在 OOD-low / OOD-high 同样保持 pemass 改善效果（vs no-pemass baseline ~1.4-1.9 kg）
+- **E1 walk OOD-high = 4.95 是已知 outlier**：deployed universal G_all 系数在 E1 policy walk OOD-high 上 QS feature 数值爆炸（QS RMSE = 141 kg） → 污染 actor obs → encoder 跟着退化。E2 (deploy 系数同样问题但 actor 不依赖 residual 兜底) 和 E3 (无 QS in obs) 均免疫。
+  - 该 outlier 是 **deploy 系数工程问题，非 policy 缺陷**：E1 离线 cal (Model G fit on QS grid) mass RMSE = **0.689 kg**，policy 姿态本身仍 QS-fittable。
+
+→ **pemass 是改善 OOD 的实际机制；架构选择对 RMSE 无显著影响**（同时支撑 [结论 I](#-结论-iper-env-mass-diversity-是-ood-改善的核心机制) 和 [结论 J](#-结论-j架构qs-in-obs--residual-learning影响-marginal)）。
+
+---
+
+## §3 Model G QS 公式部署 + universal 系数
+
+### 3.1 多 ansatz 对比（5 个 canonical policy × 8 模型）
+
+avg RMSE 在 4 个 qs-using policies (main_s42 / main_s43 / lb=6 / direct) 上：
+
+| Model | params | avg RMSE | 备注 |
+|---|---|---|---|
+| A basic | 4 | 1.327 | |
+| B +pitch | 5 | 1.204 | |
+| **C +hip_diff**（旧 deployed） | 5 | **0.827** | |
+| E +abad_diff | 5 | 1.276 | |
+| F hip+abad | 6 | 0.805 | |
+| **G all 3 extras** | 7 | **0.711** | 比 C **−14%** |
+| C_sym (L=R) | 3 | 0.864 | |
+| G_sym (L=R) | 5 | 0.757 | 比 C −9% |
+
+**G > G_sym > C**。选 **G_all (7 params)** 部署。
+
+公式（[`wheelfoot_flat.py:368-382`](../legged_gym/envs/wheelfoot_flat/wheelfoot_flat.py#L368-L382)）：
 
 ```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=5.7497  bias=+4.7974  per_env=5.6148±1.2381
-  [RL]  RMSE=0.8645  bias=+0.2777  per_env=0.8618±0.0689
-
-====== LOAD POSITION (m) ======
-  [QS]  com_x RMSE=0.0533  bias=-0.0136
-  [QS]  com_y RMSE=0.0888  bias=+0.0057
-
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0154  bias=-0.0135  |  y: RMSE=0.0244  bias=+0.0030
-  [RL]  x: RMSE=0.0136  bias=-0.0034  |  y: RMSE=0.0108  bias=+0.0021
-
-====== convergence ======
-  [QS]  reached=0%
-  [RL]  reached=100% @ 0.0350s
-
-====== dynamic-phase RMSE ======
-  [QS]  mass=7.8243 kg  dcom_x=0.0198 m  dcom_y=0.0289 m
-  [RL]  mass=0.8416 kg  dcom_x=0.0159 m  dcom_y=0.0099 m
+mass_est = (α_L · R_L + α_R · R_R + γ_L + γ_R
+            + β_pitch · sin(pitch) + β_hip · hip_diff + β_abad · abad_diff
+            + T_body_x · sin(pitch)) / ...
+com_x_est = com_x_bias · sin(pitch) + x_offset
 ```
 
-### 2.4 lb=6 static (ckpt 11000, seed=42)
+### 3.2 Universal G_all 系数
+
+avg over main_s42 + main_s43 + direct（lb=6 排除，见 §3.3）：
+
+| 参数 | 旧 Model C 默认 | 新 Model G universal |
+|---|---|---|
+| alpha_L | 0.367 | **0.4154** |
+| alpha_R | 0.429 | **0.4235** |
+| gamma_L | +0.158 | **−0.7638** |
+| gamma_R | −0.499 | **−0.8474** |
+| **beta_pitch** | (新增) | **−2.1976** |
+| beta_hip | −8.507 | **−9.1708** |
+| **beta_abad** | (新增) | **+3.5004** |
+| T_body_x | 6.17 | **6.3447** |
+| com_x_bias (k_pitch) | 0.649 | **0.0784** |
+| x_offset | −0.037 | **−0.0487** |
+
+### 3.3 已知 deploy 限制
+
+- **cal range = [2, 6]**（4 mass: 2.0/3.33/4.67/6.0），OOD-low [1, 2] 在 cal 范围外，QS 公式外推
+- **lb=6 是 universal coef 的 outlier**（own RMSE 0.71 vs universal coef 上 2.40），未进 universal 平均；单独标注
+- **E1 walk OOD-high 出现 QS feature 数值爆炸**（见 [§2.3 outlier 说明](#23-三架构完整-rmse-对比确认-pemass-改善跨架构成立)）—— 该 outlier 反过来证明 [结论 L](#-结论-lqs-in-obs-是-stabilizing-prior小但实在) 提到的"deploy 系数不优时 QS-in-obs 反而有害"
+
+### 3.4 collect_calibration_data.py 已加 provenance
+
+[`collect_calibration_data.py`](../legged_gym/scripts/collect_calibration_data.py) 的 `np.savez` 加 `load_run / checkpoint / task` string field，
+**以后 cal 数据自带 policy 标签**，不再需要猜哪个 cal 对应哪个 policy。
+
+---
+
+## §4 Actor Integrated Gradients 分析
+
+### 4.1 方法
+
+新脚本 [`analyze_actor_ig.py`](../legged_gym/scripts/analyze_actor_ig.py)（独立于 [`analyze_encoder_ig.py`](../legged_gym/scripts/analyze_encoder_ig.py)）：
+
+- Target: actor 输出 (action L2 norm) 对每个输入 dim 的 attribution
+- Input: cat(encoder_out=7, obs=48 or 36, commands=3) = 58 or 46 dims
+- Baseline: rollout samples 均值
+- 输出: coarse group view + fine per-dim view (QS / encoder 内部拆开)
+- 自动从 saved cfg 对齐 `use_qs_in_obs` / `use_residual_learning` / `num_obs` / encoder dim
+
+### 4.2 三架构 actor IG 对比 (ckpt 11000, 'all' target, coarse)
+
+| Group | dim | **E1 main** (qs+resid) | **E2 direct** (qs+no-resid) | **E3 histonly** (no-qs) |
+|---|---|---|---|---|
+| previous_actions | 8 | 52.75% | **63.78%** | **65.82%** |
+| dof_pos | 6 | 13.79% | 7.54% | 15.36% |
+| encoder/est_lin_vel | 3 | 8.96% | 6.93% | 5.61% |
+| projected_gravity | 3 | 7.24% | 6.09% | 3.41% |
+| torques | 8 | 5.28% | 3.87% | 3.89% |
+| **qs_load_features** | 8 | **4.69%** | **5.07%** | (absent) |
+| dof_vel | 8 | 4.22% | 4.91% | 4.49% |
+| **qs_residual_baseline** | 4 | **0.89%** | **0.40%** | (absent) |
+| encoder/est_com_delta | 3 | 0.81% | 0.42% | 0.69% |
+| **encoder/est_mass** | 1 | **0.08%** | **0.10%** | **0.09%** |
+| base_ang_vel | 3 | 1.27% | 0.90% | 0.63% |
+| commands | 3 | 0% (IG artifact, 命令固定) | 0% | 0% |
+| **QS combined** | 12 | **5.58%** | **5.47%** | **0%** |
+
+**四个 paper-grade 发现（与 §5 结论 K/L/M 对齐）**：
+
+**(A) `est_mass` attribution = 0.08-0.10% across all 3 architectures** → actor 完全不用 encoder mass 估计做决策（[结论 K](#-结论-kencoder-mass-output-几乎不被-actor-使用)）。
+
+**(B) QS combined: E1 (5.58%) ≈ E2 (5.47%)** → residual learning 不影响 actor 对 QS feature 的依赖（[结论 J](#-结论-j架构qs-in-obs--residual-learning影响-marginal) 支撑数据）。
+
+**(C) E2/E3 比 E1 更依赖 previous_actions**（64-66% vs 53%）→ 移除 residual 或 QS 时 actor 转向 self-referential 策略，但 RMSE 不变（[§2.3](#23-三架构完整-rmse-对比确认-pemass-改善跨架构成立)）。attribution redistribution 是 architecture-specific adaptation，不影响最终性能。
+
+**(D) E2 encoder/est_com_delta (0.42%) 比 E1 (0.81%) 显著低** → direct 架构下 actor 对 encoder com 输出依赖也下降。但 com 本身基本被忽略（< 1%）。
+
+### 4.3 跨 ckpt 训练轨迹（E1 QS attribution）
+
+| ckpt | qs_combined | est_mass |
+|---|---|---|
+| 3000 | 5.58% | 0.08% |
+| 5000 | 7.01% | 0.03% |
+| 7000 | 5.87% | 0.05% |
+| 9000 | 5.15% | 0.05% |
+| 11000 | 6.41% | 0.09% |
+| 13000 | 7.23% | 0.04% |
+| 16000 | 5.21% | 0.07% |
+
+QS combined 全程 [5.15, 7.23]%，**稳定但低**；est_mass 全程 < 0.10%，**始终被忽略**。无 monotonic 上升/下降。
+
+### 4.4 OOD 条件下 IG（验证 "QS 在 OOD 下是否更重要"）
+
+| Group | E1 in-dist | E1 OOD-low [1,2] | E1 OOD-high [4,6] |
+|---|---|---|---|
+| **qs combined** | 5.58% | **6.89%** (+1.31pp) | 5.29% (−0.29pp) |
+| previous_actions | 52.75% | 55.90% | 54.38% |
+| projected_gravity | 7.24% | 5.72% | 7.08% |
+
+| Group | E3 in-dist | E3 OOD-low | E3 OOD-high |
+|---|---|---|---|
+| **encoder/est_lin_vel** | 5.61% | **11.36%** (+5.75pp ⭐) | 6.87% |
+| projected_gravity | 3.41% | **6.01%** (+2.60pp) | 4.87% |
+| previous_actions | 65.82% | 60.35% (−5.5pp) | 62.64% |
+
+**OOD 自适应模式**：
+- E1（有 QS）OOD 下变化幅度 ±3pp，QS attribution 只升 1.31pp
+- E3（无 QS）OOD 下大幅重排（encoder_vel +5.75pp）
+- → **"QS in obs 提供 stabilizing prior"**（[结论 L](#-结论-lqs-in-obs-是-stabilizing-prior小但实在)）：移除后 actor 必须更剧烈重排其他 feature
+
+### 4.5 12 维 QS feature 内部 per-dim attribution（mass branch encoder, E1 ckpt 11000）
+
+| QS dim | E1 attribution % | per-dim density | × baseline (1.14%) |
+|---|---|---|---|
+| **com_delta_z** | 7.47 | 3.74 | 3.3× ★★★ |
+| cos_lieangle_R_thigh | 4.99 | 2.49 | 2.2× ★★ |
+| cos_lieangle_L_thigh | 4.61 | 2.31 | 2.0× ★★ |
+| mass_delta | 2.43 | 1.22 | 1.1× ★ |
+| load_x | 1.87 | 0.93 | 0.8× |
+| payload_mass | 1.71 | 0.86 | 0.8× |
+| com_delta_x | 0.93 | 0.46 | 0.4× ▼ |
+| payload_present | 0.64 | 0.32 | 0.3× ▼ |
+| load_y | 0.55 | 0.28 | 0.2× ▼ |
+| sin_lieangle_R_thigh | 0.51 | 0.26 | 0.2× ▼ |
+| sin_lieangle_L_thigh | 0.50 | 0.25 | 0.2× ▼ |
+| com_delta_y | 0.37 | 0.19 | 0.2× ▼ |
+
+`com_delta_z` 是整个 encoder mass branch 输入里 per-dim attribution 最高的维度。
+物理直觉：z 方向 com 偏移 = 载荷质量 × 载荷高度 / total_mass，**直接编码 mass 信息**。
+
+**per-dim 重组对比** (Old s42 vs E1 pemass)：
+
+| QS dim | Old s42 | E1 pemass | change |
+|---|---|---|---|
+| payload_mass | 2.48% | **0.86%** | **−65%** （抛弃直接 mass dim） |
+| cos_lieangle_L_thigh | 1.47% | **2.31%** | **+57%** （转向几何） |
+| cos_lieangle_R_thigh | 1.70% | **2.49%** | **+47%** （转向几何） |
+| com_delta_z | 3.10% | **3.74%** | **+21%** （物理可解释 dim 强化） |
+
+→ **encoder 在 noisy deployed G_all 系数下做了 noise-aware feature selection**：抛弃噪声大的 direct mass dim，转向几何稳定 dim + 物理可解释 dim（[结论 M](#-结论-mencoder-在-mass-branch-上做了-noise-aware-feature-selection)）。
+
+---
+
+## §5 当前可信结论 (按重要性排序)
+
+### ★★★ 结论 I：Per-env mass diversity 是 OOD 改善的核心机制
+
+**Paper main contribution**。
+
+证据：E1 (pemass) vs Old main_s42 (no pemass)，play_seed=42，ckpt 11000：
+
+| Condition | E1 | Old s42 | 改善 |
+|---|---|---|---|
+| in-dist static | 0.83 | 1.07 | −22% |
+| OOD-low static | 0.98 | 1.44 | **−32%** ★ |
+| OOD-low walk | 0.98 | 1.46 | **−33%** ★ |
+| OOD-high static | 1.49 | 1.89 | −21% |
+
+机制：原训练 hidden bug（[§2.1](#21-hidden-distribution-shift修复前的训练-bug)）—— 1024 envs 共享同一个全局 load mass scalar，encoder 训练时见到 constant mass label。修复后 1024 envs 独立 mass → encoder 见到 [2, 4] 完整分布 → 泛化提升。
+
+### ★★★ 结论 J：架构（QS-in-obs / residual learning）影响 marginal
+
+完整 architecture ablation matrix（all per-env mass on, seed_45, ckpt 11000，[§2.3](#23-三架构完整-rmse-对比确认-pemass-改善跨架构成立)）：
+
+| Architecture | use_qs_in_obs | use_residual_learning | RMSE 范围 (6 conditions) |
+|---|---|---|---|
+| **E1 main** | ✓ | ✓ | 0.83-1.49（excl walk OOD-high outlier） |
+| **E2 direct** | ✓ | ✗ | 0.78-1.50 |
+| **E3 histonly** | ✗ | (N/A) | 0.74-1.42 |
+
+三架构每 condition RMSE 差 < 0.15 kg；每条件三者轮流最好；**无系统性赢家**。
+
+→ "QS shapes policy"、"residual learning matters for encoder"、"hybrid 系统更鲁棒" 等 narrative **均不被数据支持**。
+
+### ★★ 结论 K：Encoder mass output 几乎不被 actor 使用
+
+证据：actor IG 对 encoder est_mass 的 attribution（[§4.2-4.4](#42-三架构-actor-ig-对比-ckpt-11000-all-target-coarse)）：
+- E1 全部 7 个 ckpts × in-dist + 2 OOD：全部 **< 0.15%**
+- E2 ckpt 11000：**0.10%**
+- E3 全部 7 个 ckpts × in-dist + 2 OOD：全部 **< 0.20%**
+
+baseline = 1.72%（如果 attention 均匀分布）。
+
+→ encoder mass head 是 architecture-invariant **auxiliary supervised regularizer**，不直接影响 policy 行为。这是 paper 一个 honest negative finding。
+
+### ★ 结论 L：QS-in-obs 是 stabilizing prior（小但实在）
+
+证据：
+- E1 actor IG: QS combined 全程 5-7%（小但稳定，[§4.3](#43-跨-ckpt-训练轨迹e1-qs-attribution)）
+- E1 OOD 下变化幅度小（max ±3pp），E3 必须剧烈重排（est_lin_vel +5.75pp on OOD-low，[§4.4](#44-ood-条件下-igvalidate-qs-在-ood-下是否更重要)）
+- E1 walk OOD-high RMSE = 4.95 ⚠ 是 deploy 系数失配 + QS feature 数值爆炸的污染（[§2.3 outlier](#23-三架构完整-rmse-对比确认-pemass-改善跨架构成立)），**反过来证明 QS-in-obs 在 deploy 系数不优时反而有害**
+
+→ paper 表述：
+> QS-in-obs contributes ~6% to action decisions; removing it forces aggressive feature substitution under OOD but does not measurably hurt performance when per-env mass diversity is in place.
+
+### ★ 结论 M：Encoder 在 mass branch 上做了 noise-aware feature selection
+
+证据（per-dim IG, E1 vs Old s42，[§4.5](#45-12-维-qs-feature-内部-per-dim-attributionmass-branch-encoder-e1-ckpt-11000)）：
+- payload_mass dim: **−65%** （抛弃噪声大的直接 mass）
+- cos_lieangle_L/R_thigh dims: **+47%~+57%** （转向几何稳定）
+- com_delta_z dim: **+21%** （转向物理可解释）
+
+→ paper 可写 mechanism：per-env mass training + G_all formula 让 encoder 学到信号 robust 选择。
+
+### 结论 N：Co-calibration 在当前架构下不可行（paper 1-2 句提及）
+
+简述：尝试过三版 in-loop co-calibration（per-spawn API → per-env density → calibration phase + deterministic actor），
+deployed α 全部 < 0.05（vs offline cal 的 0.33）。失败根因是 rollout 数据天然带 dom-rand + control noise，
+跟 Model G quasi-static 假设不兼容。**全部 co-cal 代码已删除**；保留 per-env mass diversity 作为副产物（成为 [结论 I](#-结论-iper-env-mass-diversity-是-ood-改善的核心机制) 的来源）。
+
+详细探索史见 [附录 B 时间线](#附录-b时间线压缩版)。
+
+---
+
+## §6 当前 paper narrative
 
 ```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=3.7301  bias=+3.2674  per_env=3.5934±1.0004
-  [RL]  RMSE=0.9685  bias=+0.1451  per_env=0.9676±0.0415
+Paper 主线: Per-env load mass randomization closes a hidden distribution shift 
+in legged-robot load estimation, reducing OOD load mass RMSE by 32%. 
+Architecture choice (QS-in-obs, residual learning) has minimal impact.
 
-====== LOAD POSITION (m) ======
-  [QS]  com_x RMSE=0.0454  bias=-0.0109
-  [QS]  com_y RMSE=0.1144  bias=+0.0400
+Supporting findings:
+- IG analysis shows encoder mass output is essentially unused by actor (<0.2% 
+  attribution), suggesting load estimation acts as auxiliary supervised 
+  regularization rather than direct policy input.
+- QS-in-obs contributes a small but stable ~6% to actions; under OOD, it 
+  serves as a stabilizing prior that reduces actor's need to reweight other 
+  features.
+- Within encoder mass branch, per-env mass training induces dim-level 
+  feature reattribution (away from direct mass dim, toward geometric and 
+  physically-interpretable dims).
 
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0135  bias=-0.0110  |  y: RMSE=0.0271  bias=+0.0106
-  [RL]  x: RMSE=0.0156  bias=+0.0006  |  y: RMSE=0.0114  bias=+0.0013
-
-====== convergence ======
-  [QS]  reached=5% @ 2.28s
-  [RL]  reached=100% @ 0.12s
-
-====== dynamic-phase RMSE ======
-  [QS]  mass=4.9083 kg  dcom_x=0.0197 m  dcom_y=0.0291 m
-  [RL]  mass=0.9584 kg  dcom_x=0.0193 m  dcom_y=0.0111 m
-```
-
-### 2.5 lb=6 walk x=0.5 (ckpt 11000, seed=42)
-
-```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=7.0744  bias=+1.8640  per_env=4.4318±5.5143
-  [RL]  RMSE=1.0670  bias=+0.1288  per_env=1.0560±0.1528
-
-====== LOAD POSITION (m) ======
-  [QS]  com_x RMSE=0.0462  bias=-0.0120
-  [QS]  com_y RMSE=0.1647  bias=+0.0224
-
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0128  bias=-0.0091  |  y: RMSE=0.0387  bias=+0.0054
-  [RL]  x: RMSE=0.0162  bias=-0.0017  |  y: RMSE=0.0128  bias=+0.0020
-
-====== convergence ======
-  [QS]  reached=45% @ 18.25s
-  [RL]  reached=100% @ 0.086s
-
-====== dynamic-phase RMSE ======
-  [QS]  mass=4.0222 kg  dcom_x=0.0123 m  dcom_y=0.0369 m
-  [RL]  mass=1.0640 kg  dcom_x=0.0161 m  dcom_y=0.0127 m
-```
-
-### 2.6 lb=3 walk x=0.5 (ckpt 11000, seed=42)
-
-```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=5.8774  bias=+5.0254  per_env=5.8395±0.6658
-  [RL]  RMSE=0.9410  bias=+0.0104  per_env=0.9188±0.2031
-
-====== LOAD POSITION (m) ======
-  [QS]  com_x RMSE=0.0567  bias=-0.0028
-  [QS]  com_y RMSE=0.1293  bias=+0.0204
-
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0164  bias=-0.0123  |  y: RMSE=0.0392  bias=+0.0077
-  [RL]  x: RMSE=0.0150  bias=-0.0006  |  y: RMSE=0.0116  bias=+0.0007
-
-====== convergence ======
-  [QS]  reached=15% @ 26.85s
-  [RL]  reached=100% @ 0.192s
-
-====== dynamic-phase RMSE ======
-  [QS]  mass=5.9119 kg  dcom_x=0.0164 m  dcom_y=0.0376 m
-  [RL]  mass=0.9194 kg  dcom_x=0.0148 m  dcom_y=0.0111 m
+Negative findings:
+- In-loop QS coefficient co-calibration fails due to rollout data being 
+  contaminated by exploration noise and dynamic torques (Model G assumes 
+  quasi-static).
+- "QS-in-obs as implicit policy regularizer" hypothesis is not supported 
+  by data when per-env mass is controlled.
 ```
 
 ---
 
-## §3 lb=3 全 ckpt 扫描（ckpt 9000/11000/13000, static, seed=42）
+## §7 旧 narrative 撤回清单（不要再使用）
 
-> 说明：跟 §2.1 是同 lb=3 同 seed 同 static，只是 ckpt 不同。ckpt 11000 数据跟 §2.1 完全相同。
+以下表述均已撤回，paper 写作中**不要再使用**：
 
-### 3.1 lb=3 ckpt 9000 static
-
-```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=5.2153  bias=+4.6186  per_env=5.1281±0.9497
-  [RL]  RMSE=0.9303  bias=+0.2078  per_env=0.9296±0.0360
-
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0153  bias=-0.0127  |  y: RMSE=0.0287  bias=-0.0127
-  [RL]  x: RMSE=0.0155  bias=+0.0010  |  y: RMSE=0.0084  bias=-0.0005
-
-====== convergence ======
-  [QS]  reached=0%
-  [RL]  reached=100% @ 0.009s
-
-====== dynamic-phase RMSE ======
-  [QS]  mass=6.2366 kg  dcom_x=0.0193 m  dcom_y=0.0296 m
-  [RL]  mass=0.6210 kg  dcom_x=0.0165 m  dcom_y=0.0078 m
-```
-
-### 3.2 lb=3 ckpt 11000 static  → 见 §2.1
-
-### 3.3 lb=3 ckpt 13000 static
-
-```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=2.7720  bias=+1.6725  per_env=2.6137±0.9235
-  [RL]  RMSE=0.9063  bias=+0.1132  per_env=0.9055±0.0377
-
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0098  bias=-0.0069  |  y: RMSE=0.0227  bias=-0.0048
-  [RL]  x: RMSE=0.0144  bias=+0.0017  |  y: RMSE=0.0109  bias=-0.0002
-
-====== convergence ======
-  [QS]  reached=40% @ 14.09s
-  [RL]  reached=100% @ 0.009s
-
-====== dynamic-phase RMSE ======
-  [QS]  mass=5.7755 kg  dcom_x=0.0173 m  dcom_y=0.0273 m
-  [RL]  mass=0.9494 kg  dcom_x=0.0165 m  dcom_y=0.0093 m
-```
+- "QS-friendly policy" / "implicit policy regularizer"
+- "main policy 维持 QS-friendly poses"
+- "history_only policy 让 QS 崩溃，所以 policy 本身更差"
+- "QS in obs 的真正作用是 implicit policy regularization"
+- "固定 QS 公式天然 OOD-robust"
+- "|RL−QS| > 1.5 kg 可直接作为 OOD detector"
+- "lb=3 优于 lb=6 是因为 policy shaping 更强"
+- "Online co-calibration as new paper main line"
+- "Hybrid estimator complementarity"
+- "RL encoder 在 OOD 必然退化" (实际上 pemass 后 OOD 显著改善)
 
 ---
 
-## §4 history_only baseline（ckpt 11000, seed=42）
+## 附录 A：No-pemass baseline 数据
 
-> 关键对照：use_qs_in_obs=False，encoder 不输入 QS 公式结果
+仅用于体现 per-env mass 改善幅度，不再单独分析。
 
-### 4.1 history_only static
-
-```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=26.7112  bias=+0.2431  per_env=12.1941±23.7653   ← QS 崩溃
-  [RL]  RMSE=0.9783   bias=+0.0635  per_env=0.9450±0.2535     ← RL 仍正常
-
-====== LOAD POSITION (m) ======
-  [QS]  com_x RMSE=0.0375  bias=-0.0044
-  [QS]  com_y RMSE=0.1259  bias=-0.0100
-
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0085  bias=-0.0042  |  y: RMSE=0.0273  bias=-0.0019
-  [RL]  x: RMSE=0.0129  bias=-0.0036  |  y: RMSE=0.0120  bias=+0.0004
-
-====== convergence ======
-  [QS]  reached=95% @ 8.23s
-  [RL]  reached=100% @ 0.060s
-
-====== dynamic-phase RMSE ======
-  [QS]  mass=46.6065 kg  dcom_x=0.0146 m  dcom_y=0.0259 m    ← QS 飞了
-  [RL]  mass=0.8357 kg   dcom_x=0.0149 m  dcom_y=0.0122 m
-```
-
-### 4.2 history_only walk x=0.5
-
-```
-====== LOAD MASS (kg) ======
-  [QS]  RMSE=49.0273  bias=+1.7455  per_env=19.2461±45.0913   ← QS 更崩
-  [RL]  RMSE=0.9097   bias=+0.1198  per_env=0.9037±0.1047
-
-====== LOAD POSITION (m) ======
-  [QS]  com_x RMSE=0.0406  bias=-0.0079
-  [QS]  com_y RMSE=0.1438  bias=-0.0274
-
-====== CoM DELTA (m) ======
-  [QS]  x: RMSE=0.0106  bias=-0.0050  |  y: RMSE=0.0310  bias=-0.0053
-  [RL]  x: RMSE=0.0118  bias=-0.0015  |  y: RMSE=0.0123  bias=+0.0008
-
-====== convergence ======
-  [QS]  reached=90% @ 4.91s
-  [RL]  reached=100% @ 0.027s
-
-====== dynamic-phase RMSE ======
-  [QS]  mass=19.1257 kg  dcom_x=0.0100 m  dcom_y=0.0298 m
-  [RL]  mass=0.9015 kg   dcom_x=0.0117 m  dcom_y=0.0122 m
-```
-
----
-
-## §5 待补充实验（占位，未来追加在此节末尾）
-
-- [ ] history_only ckpt 11000 static 第 2/3 seed（验证 RL mass 是否稳定在 0.98）
-- [ ] main lb=3 ckpt 11000 第 4 seed（继续降低 mass RMSE 估计的 std）
-- [ ] OOD：load_range 临时放宽到 [0, 8] kg，main vs history_only 对比
-- [ ] 实验 2 控制增益：tracking error / fall rate / dof_torque_rms 对比
-- [ ] 实验 3 抗扰：突发载荷质量变化、push 强度扫描
-- [ ] 实验 4 消融：no_load_boost、no_hip_diff 等变体
-
----
-
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_history_only_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=43",
-          "--exp_tag=lb3_static_compare_historyonly"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-[play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-092703_lb3_static_compare_historyonly_seed43.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=15.6358  bias=+0.7914  per_env=9.5616±12.3715
-    [RL]  RMSE=1.0205  bias=+0.4085  per_env=1.0012±0.1975
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0393  bias=-0.0056
-    [QS]  com_y RMSE=0.1247  bias=+0.0072
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0102  bias=-0.0048  |  y: RMSE=0.0243  bias=+0.0010
-    [RL]  x: RMSE=0.0122   bias=-0.0037   |  y: RMSE=0.0113   bias=+0.0012
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.9500  @ avg 7.1168 s
-    [RL]  reached=1.0000  @ avg 0.0330 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=36.8876 kg  dcom_x=0.0242 m  dcom_y=0.0287 m
-    [RL]  mass=0.8120 kg  dcom_x=0.0109 m  dcom_y=0.0085 m
-[play] =============================================
-
-
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_history_only_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=44",
-          "--exp_tag=lb3_static_compare_historyonly"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-[play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-091627_lb3_static_compare_historyonly.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=26.7112  bias=+0.2431  per_env=12.1941±23.7653
-    [RL]  RMSE=0.9783  bias=+0.0635  per_env=0.9450±0.2535
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0375  bias=-0.0044
-    [QS]  com_y RMSE=0.1259  bias=-0.0100
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0085  bias=-0.0042  |  y: RMSE=0.0273  bias=-0.0019
-    [RL]  x: RMSE=0.0129   bias=-0.0036   |  y: RMSE=0.0120   bias=+0.0004
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.9500  @ avg 8.2337 s
-    [RL]  reached=1.0000  @ avg 0.0600 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=46.6065 kg  dcom_x=0.0146 m  dcom_y=0.0259 m
-    [RL]  mass=0.8357 kg  dcom_x=0.0149 m  dcom_y=0.0122 m
-[play] =============================================
-
-
-
-
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_resi_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=43",
-          "--exp_tag=lb3_static_seed43"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-Saved play data to MATLAB format: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-112609_lb3_static_seed43.mat
-[play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-112609_lb3_static_seed43.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=5.3487  bias=+4.7591  per_env=5.3319±0.4237
-    [RL]  RMSE=0.9496  bias=+0.3980  per_env=0.9462±0.0802
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0514  bias=-0.0118
-    [QS]  com_y RMSE=0.0860  bias=-0.0005
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0153  bias=-0.0132  |  y: RMSE=0.0238  bias=+0.0012
-    [RL]  x: RMSE=0.0126   bias=-0.0024   |  y: RMSE=0.0101   bias=+0.0005
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.0000  @ avg   N/A  s
-    [RL]  reached=1.0000  @ avg 0.3600 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=8.6055 kg  dcom_x=0.0239 m  dcom_y=0.0318 m
-    [RL]  mass=1.0371 kg  dcom_x=0.0160 m  dcom_y=0.0098 m
-[play] =============================================
-
-      {
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_resi_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=44",
-          "--exp_tag=lb3_static_seed44"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-
-
-[play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-112829_lb3_static_seed44.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=5.6218  bias=+4.9772  per_env=5.5925±0.5733
-    [RL]  RMSE=0.8357  bias=+0.0981  per_env=0.8351±0.0317
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0516  bias=-0.0114
-    [QS]  com_y RMSE=0.0876  bias=+0.0166
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0161  bias=-0.0137  |  y: RMSE=0.0246  bias=+0.0063
-    [RL]  x: RMSE=0.0137   bias=-0.0038   |  y: RMSE=0.0106   bias=+0.0020
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.0000  @ avg   N/A  s
-    [RL]  reached=1.0000  @ avg 0.0060 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=7.8989 kg  dcom_x=0.0253 m  dcom_y=0.0287 m
-    [RL]  mass=0.8371 kg  dcom_x=0.0182 m  dcom_y=0.0120 m
-[play] =============================================
-
-
-
-
-ood实验负载生成范围变为4到6（训练的时候是2-4）
-
-
-      {
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_resi_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=42",
-          "--exp_tag=lb3_static_seed42_ood4_6"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-        [play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-113228_lb3_static_seed42_ood4_6.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=6.6578  bias=+5.2707  per_env=6.6140±0.7622
-    [RL]  RMSE=2.0902  bias=-1.2996  per_env=2.0899±0.0360
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0417  bias=-0.0084
-    [QS]  com_y RMSE=0.0923  bias=-0.0083
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0164  bias=-0.0122  |  y: RMSE=0.0298  bias=-0.0010
-    [RL]  x: RMSE=0.0150   bias=-0.0027   |  y: RMSE=0.0130   bias=-0.0009
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.0000  @ avg   N/A  s
-    [RL]  reached=1.0000  @ avg 0.0080 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=7.3386 kg  dcom_x=0.0184 m  dcom_y=0.0288 m
-    [RL]  mass=2.2576 kg  dcom_x=0.0181 m  dcom_y=0.0126 m
-[play] =============================================
-
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_resi_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=43",
-          "--exp_tag=lb3_static_seed43_ood4_6"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-[play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-113433_lb3_static_seed43_ood4_6.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=6.2263  bias=+5.1218  per_env=6.1826±0.7366
-    [RL]  RMSE=1.5040  bias=-0.7895  per_env=1.5037±0.0300
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0443  bias=-0.0089
-    [QS]  com_y RMSE=0.0886  bias=+0.0006
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0157  bias=-0.0120  |  y: RMSE=0.0290  bias=+0.0019
-    [RL]  x: RMSE=0.0141   bias=-0.0034   |  y: RMSE=0.0117   bias=-0.0008
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.0500  @ avg 33.6600 s
-    [RL]  reached=1.0000  @ avg 0.6670 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=8.1210 kg  dcom_x=0.0237 m  dcom_y=0.0351 m
-    [RL]  mass=1.6177 kg  dcom_x=0.0195 m  dcom_y=0.0127 m
-[play] =============================================
-
-
-
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_history_only_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=42",
-          "--exp_tag=lb3_history_static_seed42_ood4_6"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-
-[play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-113809_lb3_history_static_seed42_ood4_6.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=20.4247  bias=+1.2215  per_env=9.5436±18.0578
-    [RL]  RMSE=2.0111  bias=-1.2206  per_env=2.0108±0.0352
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0379  bias=-0.0007
-    [QS]  com_y RMSE=0.1232  bias=-0.0020
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0105  bias=-0.0038  |  y: RMSE=0.0299  bias=+0.0003
-    [RL]  x: RMSE=0.0139   bias=-0.0008   |  y: RMSE=0.0133   bias=+0.0006
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.7500  @ avg 13.3080 s
-    [RL]  reached=1.0000  @ avg 0.3800 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=22.5073 kg  dcom_x=0.0135 m  dcom_y=0.0282 m
-    [RL]  mass=2.1482 kg  dcom_x=0.0181 m  dcom_y=0.0136 m
-[play] =============================================
-
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_history_only_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=43",
-          "--exp_tag=lb3_history_static_seed43_ood4_6"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-        [play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-114045_lb3_history_static_seed43_ood4_6.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=23.5177  bias=+0.2110  per_env=13.9751±18.9150
-    [RL]  RMSE=1.4529  bias=-0.7078  per_env=1.4524±0.0373
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0391  bias=-0.0008
-    [QS]  com_y RMSE=0.1113  bias=+0.0038
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0117  bias=-0.0036  |  y: RMSE=0.0265  bias=+0.0018
-    [RL]  x: RMSE=0.0133   bias=-0.0031   |  y: RMSE=0.0130   bias=+0.0005
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.7500  @ avg 10.9760 s
-    [RL]  reached=1.0000  @ avg 0.0340 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=29.0155 kg  dcom_x=0.0150 m  dcom_y=0.0268 m
-    [RL]  mass=1.4003 kg  dcom_x=0.0164 m  dcom_y=0.0130 m
-[play] =============================================
-
-
-      {
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_history_only_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=42",
-          "--exp_tag=lb3_history_static_seed42_ood0_2"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-        [play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-115852_lb3_history_static_seed42_ood1_2.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=20.3627  bias=+1.6228  per_env=9.1147±18.2088
-    [RL]  RMSE=1.4466  bias=+0.0688  per_env=1.4461±0.0344
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0426  bias=-0.0061
-    [QS]  com_y RMSE=0.1360  bias=-0.0033
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0081  bias=-0.0052  |  y: RMSE=0.0228  bias=-0.0003
-    [RL]  x: RMSE=0.0110   bias=+0.0003   |  y: RMSE=0.0121   bias=-0.0003
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.6000  @ avg 8.3533 s
-    [RL]  reached=1.0000  @ avg 0.3540 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=41.9249 kg  dcom_x=0.0180 m  dcom_y=0.0315 m
-    [RL]  mass=1.3353 kg  dcom_x=0.0128 m  dcom_y=0.0101 m
-[play] =============================================
-
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_history_only_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=43",
-          "--exp_tag=lb3_history_static_seed43_ood1_2"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-        [play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=15.6554  bias=+0.8983  per_env=9.6429±12.3331
-    [RL]  RMSE=1.1858  bias=-0.6599  per_env=1.1794±0.1234
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0483  bias=-0.0047
-    [QS]  com_y RMSE=0.1330  bias=+0.0276
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0097  bias=-0.0046  |  y: RMSE=0.0188  bias=+0.0034
-    [RL]  x: RMSE=0.0108   bias=+0.0011   |  y: RMSE=0.0111   bias=-0.0000
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.9000  @ avg 5.2633 s
-    [RL]  reached=1.0000  @ avg 0.0330 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=40.5064 kg  dcom_x=0.0249 m  dcom_y=0.0268 m
-    [RL]  mass=0.9491 kg  dcom_x=0.0079 m  dcom_y=0.0073 m
-[play] =============================================
-
-      {
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_resi_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=42",
-          "--exp_tag=lb3_qs_resi_seed42_ood1_2"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-        [play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-120657_lb3_qs_resi_seed42_ood1_2.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=4.6406  bias=+4.1289  per_env=4.5994±0.6171
-    [RL]  RMSE=1.4135  bias=-0.4359  per_env=1.4132±0.0294
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0594  bias=-0.0169
-    [QS]  com_y RMSE=0.0978  bias=-0.0156
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0160  bias=-0.0149  |  y: RMSE=0.0238  bias=-0.0043
-    [RL]  x: RMSE=0.0120   bias=+0.0007   |  y: RMSE=0.0124   bias=-0.0003
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.0000  @ avg   N/A  s
-    [RL]  reached=1.0000  @ avg 0.0080 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=7.6083 kg  dcom_x=0.0214 m  dcom_y=0.0301 m
-    [RL]  mass=1.3412 kg  dcom_x=0.0130 m  dcom_y=0.0103 m
-[play] =============================================
-
-
-      },
-      {
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_resi_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=43",
-          "--exp_tag=lb3_qs_resi_seed43_ood1_2"
-          // "--exp_tag=lb3_static_compare_historyonly_seed43"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-        Saved play data to MATLAB format: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-120830_lb3_qs_resi_seed43_ood1_2.mat
-[play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260520-120830_lb3_qs_resi_seed43_ood1_2.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=4.4202  bias=+4.0025  per_env=4.3897±0.5180
-    [RL]  RMSE=1.1289  bias=-0.7969  per_env=1.1280±0.0462
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0669  bias=-0.0203
-    [QS]  com_y RMSE=0.0905  bias=-0.0008
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0161  bias=-0.0151  |  y: RMSE=0.0225  bias=-0.0002
-    [RL]  x: RMSE=0.0113   bias=+0.0006   |  y: RMSE=0.0113   bias=-0.0007
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.0000  @ avg   N/A  s
-    [RL]  reached=1.0000  @ avg 0.4130 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=8.2656 kg  dcom_x=0.0231 m  dcom_y=0.0322 m
-    [RL]  mass=1.1721 kg  dcom_x=0.0116 m  dcom_y=0.0104 m
-[play] =============================================
-
-
-      {
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_noresi_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=42",
-          "--exp_tag=lb3_qs_noresi_seed42_walk"
-          // "--exp_tag=lb3_static_compare_historyonly_seed42"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-alk.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=3.1428  bias=+0.8852  per_env=2.5466±1.8417
-    [RL]  RMSE=0.9911  bias=+0.1061  per_env=0.9809±0.1420
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0380  bias=-0.0113
-    [QS]  com_y RMSE=0.1365  bias=-0.0063
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0097  bias=-0.0060  |  y: RMSE=0.0281  bias=-0.0020
-    [RL]  x: RMSE=0.0144   bias=-0.0015   |  y: RMSE=0.0111   bias=+0.0000
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.9500  @ avg 11.6168 s
-    [RL]  reached=1.0000  @ avg 0.0000 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=2.3183 kg  dcom_x=0.0095 m  dcom_y=0.0262 m
-    [RL]  mass=0.9777 kg  dcom_x=0.0144 m  dcom_y=0.0107 m
-[play] =============================================
-
-
-      {
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_noresi_load_boost_3",
-          "--checkpoint",
-          "11000",
-          "--seed=42",
-          "--exp_tag=lb3_qs_noresi_seed42_static"
-          // "--exp_tag=lb3_static_compare_historyonly_seed42"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-
-[play] saved: /home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/exported/play_data_20260521-093018_lb3_qs_noresi_seed42_static.mat
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=2.0518  bias=+0.5989  per_env=1.7845±1.0126
-    [RL]  RMSE=0.9944  bias=+0.0947  per_env=0.9840±0.1430
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0396  bias=-0.0034
-    [QS]  com_y RMSE=0.1110  bias=+0.0227
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0076  bias=-0.0027  |  y: RMSE=0.0218  bias=+0.0040
-    [RL]  x: RMSE=0.0135   bias=-0.0032   |  y: RMSE=0.0094   bias=-0.0017
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.9000  @ avg 11.3178 s
-    [RL]  reached=1.0000  @ avg 0.0000 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=2.3821 kg  dcom_x=0.0101 m  dcom_y=0.0226 m
-    [RL]  mass=1.0537 kg  dcom_x=0.0128 m  dcom_y=0.0091 m
-[play] =============================================
-
-
-
-      {
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_resi_load_boost_3_seed_42",
-          "--checkpoint",
-          "11000",
-          "--seed=42",
-          "--exp_tag=lb3_qs_resi_seed42_static"
-          // "--exp_tag=lb3_static_compare_historyonly_seed42"
-          // 可加 "--headless" 以无渲染运行
-        ],
-
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=1.6110  bias=+0.9428  per_env=1.5899±0.2598
-    [RL]  RMSE=3.8144  bias=+3.2820  per_env=3.7943±0.3913
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0308  bias=-0.0041
-    [QS]  com_y RMSE=0.1053  bias=-0.0182
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0081  bias=-0.0047  |  y: RMSE=0.0197  bias=-0.0051
-    [RL]  x: RMSE=0.0186   bias=-0.0107   |  y: RMSE=0.0201   bias=-0.0030
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=0.9000  @ avg 9.4478 s
-    [RL]  reached=0.0500  @ avg 15.0800 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=3.2744 kg  dcom_x=0.0159 m  dcom_y=0.0264 m
-    [RL]  mass=4.5663 kg  dcom_x=0.0249 m  dcom_y=0.0282 m
-[play] =============================================
-
-      {
-        "name": "Python 调试程序: Play",
-        "type": "python",
-        "request": "launch",
-        "program": "${workspaceFolder}/legged_gym/scripts/play.py",
-        "args": [
-          "--task=wheelfoot_flat",
-          "--load_run",
-          "exper_qs_resi_load_boost_3_seed_42",
-          "--checkpoint",
-          "11000",
-          "--seed=42",
-          "--exp_tag=lb3_qs_resi_seed42_walk"
-          // "--exp_tag=lb3_static_compare_historyonly_seed42"
-          // 可加 "--headless" 以无渲染运行
-        ],
-[play] ============= experiment metrics =============
-  num_envs = 20
-  [QS] = Model C 解析公式  |  [RL] = Encoder 残差网络
-
-  ====== LOAD MASS (kg) ======
-    [QS]  RMSE=1.5120  bias=+0.6897  per_env=1.4920±0.2449
-    [RL]  RMSE=3.6098  bias=+3.0750  per_env=3.5924±0.3538
-
-  ====== LOAD POSITION in body frame (m) — [QS] only task ======
-    [QS]  com_x RMSE=0.0373  bias=-0.0062
-    [QS]  com_y RMSE=0.1229  bias=-0.0421
-
-  ====== CoM DELTA = 载荷引起的 CoM 偏移 (m) ======
-    [QS]  x: RMSE=0.0089  bias=-0.0046  |  y: RMSE=0.0240  bias=-0.0096
-    [RL]  x: RMSE=0.0220   bias=-0.0147   |  y: RMSE=0.0229   bias=-0.0086
-
-  ====== convergence (mass < 0.5 kg, hold ≥ 0.5 s) ======
-    [QS]  reached=1.0000  @ avg 10.5350 s
-    [RL]  reached=0.5000  @ avg 17.0140 s
-
-  ====== dynamic-phase RMSE (|vx| > 0.15 m/s) ======
-    [QS]  mass=1.4629 kg  dcom_x=0.0086 m  dcom_y=0.0227 m
-    [RL]  mass=3.6103 kg  dcom_x=0.0216 m  dcom_y=0.0214 m
-[play] =============================================
-是不是绘图参数还是哪里学错了
-
-
-
-
-# 第二部分：对比表格（**bug 修复后干净数据，2026-05-21~22**）
-
-> **数据来源说明**：本部分全部来自 [exported/](../logs/wheelfoot_flat/WF_TRON1A/exported/) 下的
-> `play_data_*_lb*_qs[01]_resid[01]_*_ckpt11000_load*-*.mat`（共 18 个干净 .mat）。
-> 这些文件全部 ≥ 2026-05-21 22:21 收集，过了以下修复：
-> 1. play.py residual-mode 双加 baseline bug 修复
-> 2. play.py 自动从 saved cfg 同步 `use_qs_in_obs` / `use_load_residual_estimation` / encoder dim
-> 3. play.py 自动 exp_tag（含 lb / qs / resid / cmd / seed / ckpt / load 范围）
-> 4. auto exp_tag 从 saved train_cfg.json 同步 `extra_loss_load_boost`（lb=6 不再被误标 lb=3）
-> 5. seed_43 新训 ckpt（`exper_qs_resi_load_boost_3_seed_43`）加入 multi-train-seed 对比
->
-> **原 §6.1–§6.11 已废弃**（main residual 行的 RL mass 数字偏高一个 baseline 量级）。
-
-## §6 架构对比（ckpt 11000，play_seed=42，trimesh L0，num_envs=20）
-
-5 种 policy（main 两个训练 seed + main lb=6 + direct + history_only）在
-**in-distribution load=[2,4] kg** 下的完整对比。
-
-### 6.1 LOAD MASS RMSE [RL encoder] (kg) — encoder 实际估计精度
+### A.1 5 policy in-distribution RL mass RMSE（ckpt 11000, play_seed=42, load=[2,4]）
 
 | Policy | static | walk vx=0.5 |
 |---|---|---|
-| main lb=3 (seed_42 ckpt) | **0.9004** | **0.8611** |
+| main lb=3 (seed_42 ckpt) | 0.9004 | 0.8611 |
 | main lb=3 (seed_43 ckpt) | 1.0229 | 1.0214 |
 | main lb=6 | 0.9548 | 0.9840 |
 | direct (qs=1, resid=0) | 0.9407 | 0.9389 |
 | history_only (qs=0) | 0.8665 | 0.8823 |
 
-**观察**：5 种 policy 的 RL mass RMSE 全部落在 **0.86–1.02 kg** 区间，差异 < 18%。
-**残差架构 (main) 跟 baseline (history_only / direct) 几乎打平**——QS 先验对
-encoder 精度的边际改善不显著。这是 paper 必须 honest 报告的 negative finding。
+5 个 no-pemass policy 全部落在 **0.86–1.02 kg** 区间。
+与 E1/E2/E3 的 0.74–0.86 kg（[§2.3](#23-三架构完整-rmse-对比确认-pemass-改善跨架构成立)）对比 → in-distribution 上 pemass 也带来 ~10-20% 改善。
 
-### 6.2 LOAD MASS RMSE [QS Model C] (kg) — analytical formula 在不同 policy 下的表现
+### A.2 No-pemass OOD baseline (main lb=3 seed_42 + seed_43, static)
 
-| Policy | static | walk vx=0.5 |
-|---|---|---|
-| main lb=3 (seed_42) | **1.6110** | **1.5120** |
-| main lb=3 (seed_43) | 1.9046 | 2.6028 |
-| direct (qs=1, resid=0) | 2.0518 | 3.1428 |
-| main lb=6 | 3.9850 | 4.1478 |
-| history_only (qs=0) | **20.3701** ⚠ | **14.1398** ⚠ |
-
-**核心发现**：QS analytical formula 的精度**强烈依赖 policy 训练时是否见过 QS**：
-
-- **qs in obs（main + direct）**：QS RMSE 1.5–4.1 kg（合理量级）
-- **qs not in obs（history_only）**：QS RMSE **14–20 kg**（崩盘 5–13×）
-
-机制：main / direct 训练时 actor 直接读 QS 12 维特征，**隐式学会维持"QS 友好"姿态**
-（cos_thigh 不近零，分母不爆炸）。history_only 没有这个约束，policy 偶发让
-cos_thigh→0，Model C 分母数值爆破，给出几十 kg 的伪估计。
-
-**关键 sub-finding**：lb=3 (1.6 kg) < direct (2.0 kg) < lb=6 (4.0 kg) — **residual
-结构 + lb=3 给最强的 QS 友好姿态约束**。lb=6 反而 over-weight encoder loss，policy 受到
-的 implicit shaping 减弱，QS 退化到 4 kg。
-
-### 6.3 CoM DELTA RMSE [RL] (m) — encoder 在 com 估计上的精度
-
-| Policy | static dcom_x | static dcom_y | walk dcom_x | walk dcom_y |
-|---|---|---|---|---|
-| main lb=3 (seed_42) | 0.0103 | **0.0197** | 0.0111 | 0.0240 |
-| main lb=3 (seed_43) | 0.0112 | 0.0240 | 0.0114 | 0.0272 |
-| main lb=6 | 0.0128 | 0.0240 | 0.0129 | 0.0310 |
-| direct | **0.0092** | 0.0218 | **0.0109** | 0.0281 |
-| history_only | 0.0117 | 0.0275 | 0.0120 | 0.0293 |
-
-**观察**：
-- **dcom_x 上 direct 最优**（0.0092），**dcom_y 上 main lb=3 seed_42 最优**（0.0197）
-- 跟 mass 类似，差异在 ~30% 以内（0.0092 ~ 0.0128），**架构差异在 com 上也不显著**
-- history_only 在 dcom_y 上略差（0.0275–0.0293），其余指标基本打平
-
-### 6.4 lb=3 多 train-seed 复测（in-dist load=[2,4]，play_seed=42）
-
-| Train seed | static RL | static QS | walk RL | walk QS |
-|---|---|---|---|---|
-| seed_42 ckpt | 0.9004 | 1.6110 | 0.8611 | 1.5120 |
-| seed_43 ckpt | 1.0229 | 1.9046 | 1.0214 | 2.6028 |
-| **mean ± std** | **0.96 ± 0.06** | **1.76 ± 0.15** | **0.94 ± 0.08** | **2.06 ± 0.55** |
-
-**train-seed 方差**：RL mass ~6–8%，QS mass ~9–27%。Train seed 影响 **encoder 学到的
-representation**（→ RL 数字差异 ~12%）和 **policy 学到的姿态分布**（→ QS 数字差异
-大得多，walk 时 ±0.55 kg）。
-
-**paper 报告建议**：`main lb=3: RL mass = 0.96 ± 0.06 kg, QS mass = 1.76 ± 0.15 kg
-(2 train seeds, 1 play seed each)`. 想要更稳的 std 报告，需要 train ≥3 seeds（seed_44
-未跑）。
-
-### 6.5 lb=3 (seed_42 ckpt) 多 play-seed 复测（in-dist load=[2,4] static）
-
-| Play seed | RL mass | RL bias | QS mass | QS bias |
-|---|---|---|---|---|
-| 42 | 0.9004 | +0.011 | 1.6110 | +0.943 |
-| 43 | 1.1517 | +0.323 | 2.1470 | +0.993 |
-| 44 | 0.8768 | +0.203 | 1.6039 | +1.044 |
-| **mean ± std** | **0.98 ± 0.12** | +0.18 | **1.79 ± 0.25** | +0.99 |
-
-**play-seed 方差**：RL mass ±12%，QS mass ±14%。20 envs 不是"同一实验 20 次"，是
-20 个不同的 (load mass, push timing, friction 等) 组合的样本——换 seed 等于重新抽
-20 个组合。
-
-**train-seed 方差 (§6.4) vs play-seed 方差 (§6.5) 量级相当**（6–8% vs 12%）。Paper
-报数字时两个方差源都要 disclose。
-
-**对比旧 §6.5b（bug 时代）**：旧 3 个 seed = 0.86/1.40/0.86，std 31%，含一个 1.40
-outlier。**bug 修复后没复现**，新 3 seed 在 0.87–1.15 区间，std 12%，没有
-outlier——**老 1.40 是 bug + 抽样耦合产物**。
-
-### 6.6 OOD 实验：load 分布外（main lb=3 seed_42 + seed_43）
-
-训练分布 load ∈ [2, 4] kg，测试：
-- **OOD-low** [1, 2] kg（避开 `position_zero_mass_threshold=1.0` 截断）
-- **OOD-high** [4, 6] kg
-
-| Train seed | Cond | [RL] mass RMSE | [RL] bias | [QS] mass RMSE | [QS] bias |
-|---|---|---|---|---|---|
-| seed_42 | in-dist [2,4] stat | 0.9004 | +0.011 | 1.6110 | +0.943 |
-| seed_42 | in-dist [2,4] walk | 0.8611 | +0.051 | 1.5120 | +0.690 |
-| seed_42 | OOD-low [1,2] stat | **1.4406** | **−0.895** | 1.5200 | +1.099 |
-| seed_42 | OOD-low [1,2] walk | 1.4562 | −0.841 | 1.3110 | +0.761 |
-| seed_42 | OOD-high [4,6] stat | **1.8903** | **−1.124** | 1.8637 | +0.664 |
-| seed_42 | OOD-high [4,6] walk | 1.8819 | −1.125 | 1.9304 | +0.289 |
-| seed_43 | in-dist [2,4] stat | 1.0229 | −0.541 | 1.9046 | +0.595 |
-| seed_43 | in-dist [2,4] walk | 1.0214 | −0.524 | 2.6028 | +0.599 |
-| seed_43 | OOD-low [1,2] stat | 1.2913 | −0.440 | 1.8975 | +0.795 |
-| seed_43 | OOD-low [1,2] walk | 1.1897 | −0.174 | 1.5242 | +0.888 |
-| seed_43 | OOD-high [4,6] stat | **2.4240** | **−1.717** | 2.4460 | +0.383 |
-| seed_43 | OOD-high [4,6] walk | 2.4193 | −1.703 | 2.8558 | +0.481 |
-
-**核心观察**：
-
-**(O1) RL encoder 在 OOD 两端都退化 + 强负 bias**
-- OOD-high：RL 从 in-dist 0.9 → OOD 1.9–2.4，bias −1.12/−1.72（饱和到训练上界 ~4 kg）
-- OOD-low：RL 从 in-dist 0.9 → OOD 1.3–1.5，bias −0.4/−0.9（**部分误识别为"无载荷"**）
-
-**(O2) OOD-low 的"双峰失败"机制**
-- 训练数据 bimodal：load 在体时 truth ∈ [2, 4]，不在体时 truth = 0
-- OOD 真值 1.2 kg 落在两峰之间，encoder 倾向 snap 到 "0 桶"
-- ≠ 简单"clamp 到 [2, 4]"
-
-**(O3) QS analytical 在 OOD 两端都稳定（**核心 paper-worthy 发现**）**
-- 两个 train seed × 两个 OOD 方向 × 两个 cmd：QS RMSE 全部 1.3–2.9 kg
-- **跟 in-dist QS (1.5–2.6) 持平**——物理公式天然没有"训练分布"概念
-- 这是 RL encoder 学不来的属性
-
-**(O4) train-seed 影响 OOD-high 比 OOD-low 更大**
-- OOD-high：seed_42=1.89, seed_43=2.42（差 28%）
-- OOD-low：seed_42=1.44, seed_43=1.29（差 11%）
-- seed_43 ckpt OOD-high 失败更严重，但 OOD-low 略好——**没有 universal best seed**
-
-### 6.7 Hybrid estimator 互检价值
-
-**Main lb=3 policy 下，RL+QS 两个估计的差异随载荷分布的关系**：
-
-| 工况 | RL est ≈ | QS est ≈ | |RL−QS| ≈ | 真值 ≈ | RL 错误模式 | QS 是否可信 |
-|---|---|---|---|---|---|---|
-| in-dist [2,4] | 3 | 3.5 | 0.5 | 3 | 无 | ✓ |
-| OOD-low [1,2] | 0.5 | 2.5 | **2.0** | 1.5 | 误判无载荷 | ✓ |
-| OOD-high [4,6] | 3.8 | 5.5 | **1.7** | 5 | 上限饱和 | ✓ |
-
-**互检逻辑**：当 |RL−QS| > 1.5 kg → 触发 OOD 警报 → 启动保守策略 / 降速 / 人介入。
-
-**对比 history_only**：QS 数字本身就是 14–20 kg（in-dist 和 OOD 都崩），
-**|RL−QS| 永远 > 13 kg**，警报始终响——**discriminative power = 0**，
-只能告诉你"出问题了"但区分不出"问题在 in-dist 还是 OOD"。
-
-**这是 main method 相对 baseline 的真正、可量化的优势**——不是 single-estimator
-精度，是 **hybrid 系统的诊断能力**。
-
-### 6.8 动态相位 vs 收敛速度
-
-| Policy | RL conv_time (s) static | QS conv_time (s) static | RL dyn-phase mass (kg) walk |
+| Train seed | Cond | RL mass RMSE | RL bias |
 |---|---|---|---|
-| main lb=3 (seed_42) | **0.001** | 9.45 | 0.86 |
-| main lb=3 (seed_43) | 0.219 | 14.40 | 1.12 |
-| main lb=6 | 0.000 | 18.80 | 1.07 |
-| direct | 0.000 | 11.32 | 1.05 |
-| history_only | 0.122 | 9.05 | 0.91 |
+| seed_42 | in-dist [2,4] | 0.9004 | +0.011 |
+| seed_42 | OOD-low [1,2] | **1.4406** | **−0.895** |
+| seed_42 | OOD-high [4,6] | **1.8903** | **−1.124** |
+| seed_43 | in-dist [2,4] | 1.0229 | −0.541 |
+| seed_43 | OOD-low [1,2] | 1.2913 | −0.440 |
+| seed_43 | OOD-high [4,6] | **2.4240** | **−1.717** |
 
-**观察**：
-- RL encoder 收敛极快（多数 < 0.5s），跨架构差异不大
-- QS analytical formula 慢得多（9–19s），因为 1/(joint_geometry) 项数值噪声大需要长时间平均
-- dynamic phase（walk 时）跟 static phase 同量级，**encoder 在运动中也保持稳定**
+- No-pemass 时 OOD-high 出现 train-seed dependent failure (seed_42=1.89 vs seed_43=2.42)
+- 修复 pemass 后 OOD-high 稳定到 1.49（E1）；不再出现 seed-dependent failure
 
----
+### A.3 离线 cal 对各 policy 仍然 work（Model G fit on QS grid）
 
-# 第三部分：累计关键结论
+| Policy | offline cal mass RMSE |
+|---|---|
+| E1 (main+pemass+seed_45) | 0.689 kg |
+| 其他 no-pemass 4 policies | 0.49-1.36 kg |
 
-> 本部分全部基于 2026-05-21~22 干净数据（§6 表）。旧版结论 A–H 已经用新数据
-> **完整重写**——bug 修复后部分结论数字改善，但 **qualitative direction 全部保留**：
-> RL encoder 跨架构打平 / QS 强依赖 policy / lb=3 优于 lb=6 / OOD 双向饱和 / hybrid 可诊断性。
-
-## 结论 A：残差架构（QS in obs）**没有显著改善 encoder 估计精度**
-
-**证据**：§6.1 — 5 种 policy 的 RL mass RMSE 全部在 0.86–1.02 kg 区间（差 < 18%）；
-§6.3 dcom_y 也在 0.0197–0.0275 m（差 < 40%）。`history_only` 反而在某些指标上略胜
-（mass=0.87，最低）。
-
-**意义**：原 paper 假设"QS 先验帮助 encoder 学更准"**被 5 种架构 × 2 cmd 的 10 行
-数据明确否定**。Encoder 自己能从 obs history 学到一样好。这是 paper 的 honest negative
-finding。
-
-## 结论 B：QS analytical formula 强烈依赖 policy 是否见过 QS（核心 paper finding）
-
-**证据**：§6.2 — 在 in-dist [2,4]：
-- qs in obs (main + direct)：QS RMSE 1.5–4.1 kg（合理）
-- qs not in obs (history_only)：QS RMSE **14–20 kg**（崩盘 5–13×）
-
-**机制**：main / direct 的 actor 直接读 QS 12 维特征 → 隐式学会维持"QS 友好"姿态
-（cos_thigh 不近零）→ Model C 分母不爆炸。history_only 没有这个约束，policy 偶发让
-cos_thigh→0，QS 数值爆破。
-
-**意义**：QS 注入 obs 的**真正价值不在改善 encoder，而在塑造 policy**——让 analytical
-formula 在部署时仍可作为可靠的 sanity check / safety fallback。**这是这篇 paper 的
-new contribution**。
-
-## 结论 C：play-to-play 方差比之前认为的小得多
-
-**新数据**（§6.5，bug 修复后）：3 个 play seed RL mass = 0.90 / 1.15 / 0.88，
-**mean = 0.98 ± 0.12 kg（rel std ≈ 12%）**。
-
-**对比旧 §6.5b 数据**：旧 3 seed = 0.86 / 1.40 / 0.86（含 1.40 outlier），rel std 31%。
-**bug 修复 + auto-tag 后 outlier 没复现**。
-
-**意义**：mass 数字 paper 报 ±std 仍必要，但量级 ~12%（不是 30%）。CoM 极稳（rel std < 3%），
-单 seed 可信。Train-seed 方差 (§6.4: 6–8%) 跟 play-seed 方差量级相当，两者都要 disclose。
-
-## 结论 D：lb=3 显著优于 lb=6（QS 上差距 ~2.5×）
-
-**新证据**（§6.1 + §6.2，bug 修复后）：
-| 指标 | lb=3 | lb=6 |
-|---|---|---|
-| RL mass (static) | 0.90 | 0.95 |
-| **QS mass (static)** | **1.61** | **3.99** |
-| QS mass (walk) | 1.51 | 4.15 |
-| dcom_y (static) | 0.0197 | 0.0240 |
-
-**lb=3 在所有指标上都赢，QS 上赢了 2.5×**。机制：lb=6 over-weight encoder aux loss
-→ policy 受到的 implicit shaping 减弱（更多优化能量花在 encoder 训练而非 actor 行为）
-→ "QS 友好姿态"约束变弱 → Model C 数字退化。
-
-**意义**：load_boost = 3 是 final 超参数。lb=6 作为 ablation 写进 appendix。
-
-## 结论 E：paper narrative
-
-**原方向**（被否定）：QS+RL hybrid 比 baseline 更准。
-
-**新方向**（数据支持）：
-> "QS 注入 obs 的真正作用是 **implicit policy regularization**：在塑造 policy 维持 QS
-> 友好姿态的同时，让 analytical formula 在部署时仍可用作 sanity check。Encoder 精度
-> 几乎不变，但 hybrid 系统的诊断能力质变。"
-
-**Paper 章节安排建议**：
-- §1 Intro：load estimation 的难点 + hybrid 思路 motivation
-- §3 Method：主架构 (main lb=3) + ablations (lb=6, direct, history_only)
-- **§4.1 Main result（重写）**：5 architectures × {static, walk} × {in-dist, OOD-low, OOD-high}
-  的完整 mass/CoM 表 — honest 报告 RL 几乎打平
-- **§4.2 核心 finding**：QS analytical formula 依赖 policy structure（结论 B）—
-  这是 paper 的 main contribution
-- **§4.3 OOD 章节**：QS 跨分布稳定 vs RL 两端饱和 → hybrid 互检价值
-- §5 Discussion：implicit regularization 的更广 implications
-
-参考类似 nuanced result paper：
-- Lee et al. "Learning quadrupedal locomotion over challenging terrain" (Science Robotics 2020)
-- Margolis et al. "Walk these ways" (CoRL 2022)
-- Pinto et al. "Asymmetric Actor Critic for Image-Based Robot Learning"
-
-## 结论 F：OOD 下 RL encoder 两端饱和，QS 公式跨分布稳定
-
-**新证据**（§6.6，干净 multi-seed）：
-
-| Cond | RL mass | RL bias | QS mass | QS bias |
-|---|---|---|---|---|
-| in-dist [2,4] | 0.91 ± 0.07 | +0.03 | 1.81 ± 0.55 | +0.79 |
-| OOD-low [1,2] | 1.37 ± 0.13 | −0.46 | 1.62 ± 0.27 | +0.89 |
-| OOD-high [4,6] | 2.16 ± 0.30 | −1.42 | 2.27 ± 0.40 | +0.45 |
-
-**(1) RL 双向欠估**：
-- OOD-high (load 5)：RL ≈ 3.6（饱和到训练上限 4）→ bias −1.4
-- OOD-low (load 1.5)：RL ≈ 1.0（**部分误识别为"无载荷"**）→ bias −0.5
-- 后者机制是训练数据 **bimodal**（在体[2,4] vs 不在体 0）让 1.5 kg 落到 "0 桶"
-
-**(2) QS 跨分布稳定**：
-- QS mass RMSE in-dist 1.8 → OOD 1.6, 2.3（基本持平）
-- 物理公式天然没有"训练分布"概念，**naturally OOD-robust**
-
-**(3) 架构差异 collapse**：OOD 下 main 和 history_only 的 RL 数字几乎打平
-（§6.6 旧表）—— failure mode 不区分架构。
-
-**意义**：之前希望 main method 在 OOD 上显著优于 baseline，**被双向数据否定**。但
-RL+QS 在 OOD 上的 divergence 给了 hybrid 系统**可诊断性**（见结论 G）。
-
-## 结论 G：Hybrid estimator 可诊断性 — main 真正的差异化优势
-
-**新证据**（§6.7 表）：
-
-| 工况 | RL est | QS est | \|RL−QS\| | 是 OOD 吗 |
-|---|---|---|---|---|
-| in-dist [2,4] | 3 | 3.5 | 0.5 | no |
-| OOD-low [1,2] | 0.5 | 2.5 | **2.0** | yes |
-| OOD-high [4,6] | 3.8 | 5.5 | **1.7** | yes |
-
-**判别规则**：|RL−QS| > 1.5 kg → OOD detected → 触发保守策略。
-
-**对比 history_only**：QS 永远是 14–20 kg，|RL−QS| 永远 > 13 kg → 警报始终响 →
-**discriminative power = 0**。
-
-**意义**：这是 main method 相对 baseline 唯一、**可量化**的优势。Paper 的"main result"
-应该强调这个，而不是 single-estimator 精度。
-
-## 结论 H：encoder 不受 policy reward 直接驱动（机制澄清，沿用）
-
-证据：[wheelfoot_flat_config.py:401](legged_gym/envs/wheelfoot_flat/wheelfoot_flat_config.py#L401)
-`output_detach = True`，encoder 输出在喂 actor 前 `.detach()`，policy 梯度不流回 encoder。
-
-那 main 和 history_only 的 policy 为什么差异这么大？通过两个 **间接** 机制：
-1. **obs 直接耦合**：QS 12 维直接进 actor obs → actor 被 reward 推着用 QS → 学会
-   "维持 QS 友好姿态"是 actor 自己学的，跟 encoder 无关
-2. **训练数据耦合**：policy 决定 rollout 轨迹 → 决定 encoder 看到的 obs 分布 / aux loss
-   target 分布 → encoder representation 不同
-
-**澄清易混淆点**：encoder 训练目标是纯 supervised（aux loss against truth），不被
-reward 影响；但 actor 和 encoder 都隐式被 policy-induced state distribution 耦合。
-
-## 结论 I：train-seed 方差 ≈ play-seed 方差（新发现）
-
-**证据**（§6.4 vs §6.5）：
-- Train-seed 方差（seed_42 ckpt vs seed_43 ckpt）：RL mass ±6–8%
-- Play-seed 方差（同 ckpt，3 个 play seed）：RL mass ±12%
-
-意外发现：OOD-high 上 **seed_43 比 seed_42 差 28%**（2.42 vs 1.89 kg），
-OOD-low 上反过来 seed_43 更好。**没有 universal best seed**，paper 的 OOD 数字必须
-至少 2 train seed 的 mean±std。
-
-**实操**：seed_44 训练未跑（GPU 时间限制）。若 paper 需要 3 train seed，再开一次
-~6h 训练即可。
+→ E1 policy 姿态本身仍 QS-fittable；§2.3 walk OOD-high outlier 是 universal coef deploy 问题，不是 policy 缺陷。
 
 ---
 
-# 第三部分 B：Paper 主表（直接用于 §4.1 main result）
+## 附录 B：时间线（压缩版）
 
-下面三张表是 paper "main result" section 直接可贴的内容。数字来自 §6.1–§6.6，
-默认 ckpt 11000、play_seed=42、20 play envs、trimesh L0、load 持续 [30,40]s 间隔 [50,60]s。
-
-### 表 1：5 architectures × 2 commands × 2 metrics（in-distribution）
-
-| Architecture | use_qs | use_resid | lb | RL mass RMSE (kg) | QS mass RMSE (kg) |
-|---|---|---|---|---|---|
-|  |  |  |  | static / walk | static / walk |
-| **main lb=3 (2 seeds)** ★ | ✓ | ✓ | 3 | **0.96 ± 0.06 / 0.94 ± 0.08** | **1.76 ± 0.15 / 2.06 ± 0.55** |
-| main lb=6 | ✓ | ✓ | 6 | 0.95 / 0.98 | 3.99 / 4.15 |
-| direct (no residual) | ✓ | ✗ | 3 | 0.94 / 0.94 | 2.05 / 3.14 |
-| history_only | ✗ | – | 3 | 0.87 / 0.88 | **20.37 / 14.14** ⚠ |
-
-★ = recommended main method (paper §4.1)
-⚠ = QS formula 崩盘（cos_thigh→0 时分母爆炸）
-
-**Caption**：In-distribution load mass estimation accuracy.
-RL encoder accuracy is comparable across all five architectures (RMSE within 0.86–1.02 kg),
-but the QS analytical formula's accuracy **strongly depends on whether the policy was
-trained with QS in its observation**: with QS in obs (main + direct), the QS RMSE stays
-at 1.5–4.1 kg; without (history_only), it explodes to 14–20 kg. This demonstrates that
-QS-in-obs acts as an **implicit policy regularizer**, maintaining QS-friendly poses that
-keep the analytical formula in its valid regime, rather than directly improving encoder accuracy.
-
-### 表 2：OOD generalization (main lb=3, 2 train seeds, mean ± std)
-
-| Load distribution | Cmd | RL mass RMSE (kg) | RL bias (kg) | QS mass RMSE (kg) |
-|---|---|---|---|---|
-| in-dist [2, 4] | static | 0.96 ± 0.06 | +0.01 ± 0.28 | 1.76 ± 0.15 |
-| in-dist [2, 4] | walk | 0.94 ± 0.08 | −0.24 ± 0.29 | 2.06 ± 0.55 |
-| **OOD-low [1, 2]** | static | **1.37 ± 0.07** | **−0.67 ± 0.23** | 1.71 ± 0.20 |
-| **OOD-low [1, 2]** | walk | **1.32 ± 0.13** | **−0.51 ± 0.34** | 1.42 ± 0.11 |
-| **OOD-high [4, 6]** | static | **2.16 ± 0.27** | **−1.42 ± 0.30** | 2.15 ± 0.29 |
-| **OOD-high [4, 6]** | walk | **2.15 ± 0.27** | **−1.41 ± 0.29** | 2.39 ± 0.46 |
-
-**Caption**：Out-of-distribution generalization. RL encoder accuracy degrades 2–3×
-out of the training load range, with strong negative bias in both directions
-(saturation at upper bound for OOD-high; misclassification as "no-load" for OOD-low).
-In contrast, the **QS analytical formula remains stable** (RMSE 1.4–2.4 kg) across
-the entire 1–6 kg range, because the physical model has no learned distribution.
-This complementarity motivates the hybrid estimator.
-
-### 表 3：Hybrid estimator diagnostic value
-
-| Architecture | in-dist \|RL−QS\| | OOD-low \|RL−QS\| | OOD-high \|RL−QS\| | OOD detection |
-|---|---|---|---|---|
-| **main lb=3** | < 1 kg | **~2 kg** | **~1.7 kg** | ✓ discriminative |
-| history_only | > 13 kg | > 13 kg | > 13 kg | ✗ always-on |
-
-**Caption**：Diagnostic value of the hybrid estimator. For the proposed main method
-(QS in obs + residual learning), the |RL−QS| disagreement provides a discriminative
-OOD signal (< 1 kg in distribution, ≥ 1.7 kg out of distribution). For the
-history_only baseline, the QS formula's intrinsic failure mode renders the
-disagreement signal non-informative.
-
-### 文字版 takeaway（paper §4 结尾）
-
-> Our experiments yield three findings:
-> (a) The RL encoder's accuracy is largely insensitive to architecture choice;
->     residual learning over a QS prior does not significantly improve encoder accuracy
->     (Table 1, all RMSE within 0.86–1.02 kg).
-> (b) The QS analytical formula's accuracy depends critically on whether the policy
->     was trained with QS in observation. With QS-in-obs (our method), the QS RMSE
->     stays within 1.5–4.1 kg; without, it explodes to 14–20 kg. This indicates
->     QS-in-obs acts as an implicit policy regularizer rather than an information
->     channel to the encoder.
-> (c) Outside the training load range, the RL encoder saturates while the QS formula
->     remains stable. This complementarity enables the hybrid estimator to **detect
->     its own OOD failure** via the |RL−QS| disagreement signal, a property the
->     baseline lacks.
+| 日期 | 事件 |
+|---|---|
+| 2026-05-19 | lb=6 / lb=3 main method 训练完成；play.py 加 encoder logging |
+| 2026-05-20 | 加 use_qs_in_obs flag；history_only 训练完成；OOD [4,6] 实验完成 |
+| 2026-05-21 | direct (no residual) 训练完成；play.py residual baseline 双加 bug 修复；7 项 play.py 改进（auto exp_tag, run verification, save_dir 等） |
+| 2026-05-22 | seed_43 训练完成；§6 干净数据采集完成；notebook 校正旧 narrative |
+| 2026-05-22 | 实现 v1 in-process co-cal（per-spawn API），证伪：α≈0 退化 |
+| 2026-05-23 | v2 per-env asset density（修物理对齐），α 仍 ≈ 0；v3 calibration phase + deterministic actor，α 仅 0.04 |
+| 2026-05-23 | **删除全部 co-cal 代码**；**保留 per-env mass diversity**（`domain_rand.per_env_load_mass=True` default ON）|
+| 2026-05-23 | 部署 **Model G QS 公式**（替代 Model C），更新 universal coefs |
+| 2026-05-23 | `collect_calibration_data.py` 加 load_run/checkpoint/task provenance |
+| 2026-05-23 | E1 = `..._seed_45_pemass` 训练启动 |
+| 2026-05-24 | E1 训练完成，play+IG+cal 完成 |
+| 2026-05-24 | E3 训练完成，play+actor IG 完成 |
+| 2026-05-24 | 新增 `analyze_actor_ig.py` 独立脚本（含 per-dim QS breakdown + OOD load 覆盖） |
+| 2026-05-24 | Actor IG 跨 7 ckpts × 2 policies + OOD load × 2 policies 全部完成 |
+| 2026-05-24 | E2 = `..._seed_45_pemass` 训练完成，三架构 matrix 闭环 |
+| 2026-05-24 | **notebook 重组**（本次）：删除 §1-§5 bug-era raw data，撤回 stale 结论，按重要性重排 |
 
 ---
 
-# 第四部分：版本和 commit 关联
-
-| 日期 | git commit | 关键变更 |
-|---|---|---|
-| 2026-05-19（前） | (前版) | 初始 main method, lb=6 训练完成 |
-| 2026-05-19 | (前版) | lb=3 main method 训练完成；play.py 加 encoder logging |
-| 2026-05-20 | 08d4c40 | 加 use_qs_in_obs flag；history_only 训练完成 |
-| 2026-05-20 | (待 commit) | 修 task_registry seed bug；OOD [4,6] kg 实验完成（**bug 时代数据**） |
-| 2026-05-21 | f32018d | direct (no residual) 训练完成；add use_residual_learning flag |
-| 2026-05-21 | (work tree) | **play.py 修复 residual-mode 双加 baseline bug**（§6 起所有数据干净） |
-| 2026-05-21 | (work tree) | play.py 自动从 saved cfg 同步 use_qs_in_obs / encoder dim（修 ckpt shape mismatch）|
-| 2026-05-21 | (work tree) | play.py 加 auto exp_tag (lb / qs / resid / cmd / seed / ckpt / load) |
-| 2026-05-21 | (work tree) | play.py 加 run verification block + save 进 .mat meta |
-| 2026-05-21 | (work tree) | logger.py 加 save_dir 支持 PNG 自动落盘 |
-| 2026-05-21 | (work tree) | helpers.py 加 --cmd_vx/vy/yaw --load_mass_min/max --exit_after_save |
-| 2026-05-21 22:41 | — | seed_43 训练启动（exper_qs_resi_load_boost_3_seed_43）|
-| 2026-05-21 22:21 | — | 14-batch play 完成（**§6 全部干净数据**）|
-| 2026-05-22 03:58 | — | seed_43 训练完成（ckpt 16000）|
-| 2026-05-22 | (待 commit) | play.py 加 extra_loss_load_boost 从 saved cfg 同步（lb=6 auto-tag 修复）|
-| 2026-05-22 11:43 | — | seed_43 ckpt × 6 conditions play 完成（**§6.4 + §6.6 seed_43 行**）|
-| 2026-05-22 | (待 commit) | **notebook 全面重写 §6 + 结论 + Paper 主表**（本次）|
-
----
-
-# 第五部分：未来记录格式建议
+## §五 未来记录格式建议
 
 新加 play 数据时建议格式：
 
@@ -1500,6 +471,7 @@ disagreement signal non-informative.
 > - 异常观察
 ```
 
-新加结论 / 假说时：直接在第三部分追加 "结论 X" 段落。
+新加结论：直接在 [§5](#5-当前可信结论-按重要性排序) 追加 "结论 X" 段落，并按重要性插入 [TL;DR](#-tldr-paper-最核心-findings) 列表中。
+新加 commit 关联：在 [附录 B 时间线](#附录-b时间线压缩版) 追加一行。
 
-新加 commit 关联时：在第四部分追加一行。
+新结论与旧结论冲突时：**直接修改/删除旧结论**，而不是堆叠新版本。本笔记本的目标是保持任一时刻零矛盾。

@@ -669,6 +669,8 @@ def play(args):
     )
     policy = ppo_runner.get_inference_policy(device=env.device)
     encoder = ppo_runner.get_inference_encoder(device=env.device)
+    env.commands[:, :] = commands_val
+    obs, obs_history, commands, critic_obs = env.get_observations()
 
     # export policy as a jit module (used to run it from C++)
     if EXPORT_POLICY:
@@ -822,7 +824,11 @@ def play(args):
                     load_on_body = load_on_body and bool(env.has_load[robot_index].item())
 
             if hasattr(env, "base_mass0") and hasattr(env, "load_mass"):
-                current_true_load_mass = float(env.load_mass) if load_on_body else 0.0
+                if hasattr(env, "load_mass_per_env"):
+                    _lm_robot = float(env.load_mass_per_env[robot_index].item())
+                else:
+                    _lm_robot = float(env.load_mass)
+                current_true_load_mass = _lm_robot if load_on_body else 0.0
                 current_true_mass = float(env.base_mass0[robot_index].item()) + current_true_load_mass
             elif hasattr(env, "base_mass") and hasattr(env, "base_mass0"):
                 current_true_mass = float(env.base_mass[robot_index].item())
@@ -941,8 +947,12 @@ def play(args):
                 else:
                     _on_body = torch.zeros(_N, dtype=torch.bool, device=_dev)
 
-                # True load mass per env (env.load_mass is a scalar in this codebase)
-                _true_mass = torch.full((_N,), float(env.load_mass), device=_dev)
+                # True load mass per env.  With per_env_load_mass=True each
+                # env's load actor is created from its own density/mass asset.
+                if hasattr(env, "load_mass_per_env"):
+                    _true_mass = env.load_mass_per_env.to(device=_dev).float()
+                else:
+                    _true_mass = torch.full((_N,), float(env.load_mass), device=_dev)
                 _true_mass = torch.where(_on_body, _true_mass, torch.zeros_like(_true_mass))
 
                 # Actual (x, y) of load in each env's body frame; 0 if not on body

@@ -364,14 +364,21 @@ class BipedWF(BaseTask):
                 gravity = float(abs(gravity_z))
         mass_offset = float(getattr(self.cfg.asset, "load_estimation_mass_offset", 9.585))  # 旧公式用
         robot_width = float(getattr(self.cfg.asset, "load_estimation_robot_width", 0.251))
-        com_x_bias = float(getattr(self.cfg.asset, "load_estimation_com_x_bias", 0.2632))
-        # Model C 标定参数：alpha_L, alpha_R, gamma_L, gamma_R, beta_hip, t_body_x, x_offset
-        alpha_L = float(getattr(self.cfg.asset, "load_estimation_alpha_L", 0.367))
-        alpha_R = float(getattr(self.cfg.asset, "load_estimation_alpha_R", 0.429))
-        gamma_L = float(getattr(self.cfg.asset, "load_estimation_gamma_L", 0.158))
-        gamma_R = float(getattr(self.cfg.asset, "load_estimation_gamma_R", -0.499))
-        beta_hip = float(getattr(self.cfg.asset, "load_estimation_beta_hip", -8.507))
-        x_offset = float(getattr(self.cfg.asset, "load_estimation_x_offset", -0.037))
+        com_x_bias = float(getattr(self.cfg.asset, "load_estimation_com_x_bias", 0.0784))
+        # Model G 标定参数（universal G_all, avg over main_lb3_s42 + s43 + direct）
+        # m_leg = alpha * R + gamma + beta_hip*(theta_lhip-theta_rhip)
+        #                          + beta_pitch*sin(pitch)
+        #                          + beta_abad*(theta_labad-theta_rabad)
+        # 比 Model C (5 params) avg RMSE 改善 14%; universal 系数对 main_lb3 + direct cluster 通用
+        # main_lb6 是 outlier，那种 ablation 需要单独 cal
+        alpha_L  = float(getattr(self.cfg.asset, "load_estimation_alpha_L",  0.4154))
+        alpha_R  = float(getattr(self.cfg.asset, "load_estimation_alpha_R",  0.4235))
+        gamma_L  = float(getattr(self.cfg.asset, "load_estimation_gamma_L", -0.7638))
+        gamma_R  = float(getattr(self.cfg.asset, "load_estimation_gamma_R", -0.8474))
+        beta_pitch = float(getattr(self.cfg.asset, "load_estimation_beta_pitch", -2.1976))
+        beta_hip   = float(getattr(self.cfg.asset, "load_estimation_beta_hip",   -9.1708))
+        beta_abad  = float(getattr(self.cfg.asset, "load_estimation_beta_abad",  +3.5004))
+        x_offset = float(getattr(self.cfg.asset, "load_estimation_x_offset", -0.0487))
         position_limit = float(getattr(self.cfg.asset, "load_estimation_position_limit", 0.5))
         position_zero_mass_threshold = float(
             getattr(self.cfg.asset, "load_estimation_position_zero_mass_threshold", 1.0)
@@ -439,13 +446,20 @@ class BipedWF(BaseTask):
         # payload_mass_right = 0.75*(load_torque_right / ((thigh_len * cos_r + 0.05144) * gravity * cos_abad_R_safe) - mass_offset) + 0.65
         # ============================================================
 
-        # Model C：左右独立 alpha / gamma + 对称 hip_diff 修正项。
-        # 4 个 mass × 16 (x,y) 工况拟合得到，mass RMSE 0.77 kg、x RMSE 0.021 m、y RMSE 0.066 m。
+        # Model G: 在 Model C 基础上加 sin(pitch) 和 abad_diff 两个对称物理修正项。
+        # universal G_all RMSE avg 0.71 kg（main_lb3 + direct cluster, lb=6 outlier 单独处理）。
         hip_diff = theta_lhip - theta_rhip
+        abad_diff = theta_labad - theta_rabad
         R_L = load_torque_left  / ((thigh_len * cos_l + 0.05144) * gravity * cos_abad_L_safe)
         R_R = load_torque_right / ((thigh_len * cos_r + 0.05144) * gravity * cos_abad_R_safe)
-        payload_mass_left  = alpha_L * R_L + gamma_L + beta_hip * hip_diff
-        payload_mass_right = alpha_R * R_R + gamma_R + beta_hip * hip_diff
+        payload_mass_left  = (alpha_L * R_L + gamma_L
+                              + beta_hip * hip_diff
+                              + beta_pitch * sin_pitch
+                              + beta_abad * abad_diff)
+        payload_mass_right = (alpha_R * R_R + gamma_R
+                              + beta_hip * hip_diff
+                              + beta_pitch * sin_pitch
+                              + beta_abad * abad_diff)
 
         payload_mass = payload_mass_left + payload_mass_right
         # payload_mass_safe = torch.clamp(payload_mass, min=1e-6)
@@ -474,7 +488,7 @@ class BipedWF(BaseTask):
         # =========================================================
 
         # Model C：T_body_x=6.17, com_x_bias=0.649, x_offset=-0.037
-        T_body_x = float(getattr(self.cfg.asset, "load_estimation_t_body_x", 6.17))
+        T_body_x = float(getattr(self.cfg.asset, "load_estimation_t_body_x", 6.3447))
         load_x = ((-power_rhip + power_lhip - T_body_x) / payload_mass_safe / gravity / cos_pitch) - com_x_bias * tan_pitch + x_offset
         low_payload_mass = payload_mass_safe < position_zero_mass_threshold
         load_x = torch.where(low_payload_mass, torch.zeros_like(load_x), load_x)

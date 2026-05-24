@@ -263,11 +263,12 @@ class OnPolicyRunner:
        # 统计负载：当前激活数量 & 累计生成数量
         active_loads_sum = 0
         total_loads_spawned = 0
+        load_stats = {}
         try:
             if hasattr(self.env, "get_load_stats"):
-                st = self.env.get_load_stats()
-                active_loads_sum = int(st.get("active_loads_sum", 0))
-                total_loads_spawned = int(st.get("total_loads_spawned", 0))
+                load_stats = self.env.get_load_stats()
+                active_loads_sum = int(load_stats.get("active_loads_sum", 0))
+                total_loads_spawned = int(load_stats.get("total_loads_spawned", 0))
             elif hasattr(self.env, "has_load"):
                 # 回退：仅有当前激活数
                 hl = self.env.has_load
@@ -286,6 +287,9 @@ class OnPolicyRunner:
             self.writer.add_scalar("Metric/vel_mse", locs["extra_metrics"]["vel_mse"], locs["it"])
             self.writer.add_scalar("Metric/mass_mse", locs["extra_metrics"]["mass_mse"], locs["it"])
             self.writer.add_scalar("Metric/com_mse", locs["extra_metrics"]["com_mse"], locs["it"])
+            self.writer.add_scalar("Metric/load_present_frac", locs["extra_metrics"].get("load_present_frac", 0.0), locs["it"])
+            self.writer.add_scalar("Metric/mass_target_abs", locs["extra_metrics"].get("mass_target_abs", 0.0), locs["it"])
+            self.writer.add_scalar("Metric/com_target_norm", locs["extra_metrics"].get("com_target_norm", 0.0), locs["it"])
         self.writer.add_scalar(
             "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
         )
@@ -300,6 +304,15 @@ class OnPolicyRunner:
         #         # 新增指标：负载统计
         self.writer.add_scalar("Env/active_loads_sum", active_loads_sum, locs["it"])   #修改
         self.writer.add_scalar("Env/total_loads_spawned", total_loads_spawned, locs["it"])
+        for key in (
+            "load_has_ratio",
+            "load_on_body_ratio",
+            "load_pos_inside_ratio",
+            "load_force_match_ratio",
+            "load_raw_on_body_ratio",
+        ):
+            if key in load_stats:
+                self.writer.add_scalar(f"Env/{key}", float(load_stats[key]), locs["it"])
             
         if len(locs["rewbuffer"]) > 0:
             self.writer.add_scalar(
