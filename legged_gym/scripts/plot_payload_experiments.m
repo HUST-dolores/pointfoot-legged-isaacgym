@@ -21,6 +21,12 @@ function T = plot_payload_experiments(dataRoot, outDir, saveOutputs, plotMode)
 % The script is intentionally self-contained. It scans play_data_*.mat files,
 % recomputes metrics from *_all arrays when available, writes a summary table,
 % and saves publication-oriented PNG/PDF figures.
+%
+% 2026-05-25 update: the "method" column now identifies canonical ablation
+% ckpts E1-E5 (via meta.load_run in each .mat). The table is filtered to
+% only include E1-E5 plays at ckpt 11000 with seed 42, which is the
+% paper-grade dataset. Pre-pemass ckpts and other historical runs are
+% dropped (set FILTER_CANONICAL_ONLY=false below to keep them as fallback).
 
 if nargin < 1 || isempty(dataRoot)
     dataRoot = fullfile('logs', 'wheelfoot_flat', 'WF_TRON1A', 'exported');
@@ -53,7 +59,33 @@ for i = 1:numel(files)
 end
 
 T = struct2table(records);
-T = sortrows(T, {'condition', 'load_range', 'method', 'seed', 'timestamp'});
+
+% Filter to canonical paper-grade ckpts (E1-E5 @ ckpt 11000 @ seed 42).
+% Set to false to keep ALL plays (including pre-pemass, older ckpts).
+FILTER_CANONICAL_ONLY = true;
+if FILTER_CANONICAL_ONLY
+    methodCol = table_text_column(T, 'method');
+    % E2 (QS-direct) dropped: near-identical to E1, removed from paper figures.
+    isE = startsWith(methodCol, 'E') & cellfun(@(s) numel(s)==2 && any(s(2)=='1345'), methodCol);
+    isCk = (T.checkpoint == 11000);
+    isSeed = (T.seed == 42);
+    keep = isE & isCk & isSeed;
+    fprintf('[filter] %d/%d plays kept (E1/E3/E5/E4 @ ckpt 11000 @ seed 42).\n', nnz(keep), numel(keep));
+    T = T(keep, :);
+    if isempty(T)
+        error('No E1-E5 canonical plays found. Set FILTER_CANONICAL_ONLY=false to inspect all plays.');
+    end
+end
+
+% Sort by E1 -> E3 -> E5 -> E4 (3 torque-preserving variants + 1 ablated baseline)
+T = sortrows(T, {'method', 'condition', 'load_range', 'seed', 'timestamp'});
+methodOrder = {'E1','E3','E5','E4'};
+methodCol = table_text_column(T, 'method');
+[~, idx] = ismember(methodCol, methodOrder);
+idx(idx == 0) = numel(methodOrder) + 1;
+[~, sortIdx] = sortrows([idx, double(categorical(table_text_column(T,'load_range'))), ...
+                         double(categorical(table_text_column(T,'condition')))]);
+T = T(sortIdx, :);
 
 summaryCsv = fullfile(outDir, 'payload_summary_table.csv');
 summaryMat = fullfile(outDir, 'payload_summary_table.mat');
@@ -109,6 +141,14 @@ end
 
 function rec = summarize_one_mat(S, path, fileName)
 meta = parse_filename(fileName);
+% Override method with canonical E1-E5 label if meta.load_run is available.
+policyLabel = policy_label_from_mat(S);
+if ~isempty(policyLabel)
+    meta.method = policyLabel;
+    % rebuild label string to reflect canonical method name
+    meta.label = sprintf('%s | %s | load %s | seed %g', ...
+        meta.method, meta.condition, meta.load_range, meta.seed);
+end
 dt = get_scalar(S, 'dt', 0.02);
 
 loadMask = get_mat(S, 'load_on_body_all');
@@ -242,6 +282,54 @@ end
 
 function tf = has_text(str, pat)
 tf = ~isempty(strfind(char(str), char(pat))); %#ok<STREMP>
+end
+
+
+function label = policy_label_from_mat(S)
+%POLICY_LABEL_FROM_MAT Map saved meta.load_run to canonical E1-E5 label.
+%
+% Returns '' (empty char) if meta or load_run is absent, or if the run name
+% doesn't match any canonical ckpt.
+label = '';
+if ~isfield(S, 'meta')
+    return;
+end
+m = S.meta;
+if isstruct(m) && isfield(m, 'load_run')
+    runName = m.load_run;
+elseif iscell(m) && ~isempty(m)
+    % older scipy-saved meta may end up as 1x1 cell of struct
+    inner = m{1};
+    if isstruct(inner) && isfield(inner, 'load_run')
+        runName = inner.load_run;
+    else
+        return;
+    end
+else
+    return;
+end
+
+if iscell(runName), runName = runName{1}; end
+if isstring(runName), runName = char(runName); end
+if ~ischar(runName) || isempty(runName)
+    return;
+end
+
+% Canonical ckpt -> label map (paper main axis E1-E5; all seed=45 + pemass).
+% Longer/more-specific patterns first to avoid e.g. E3 matching E4's substring.
+patterns = { ...
+    'E5', 'exper_qs_resi_load_boost_3_no_torq_seed_45_pemass'; ...
+    'E4', 'exper_history_only_no_torq_load_boost_3_seed_45_pemass'; ...
+    'E1', 'exper_qs_resi_load_boost_3_seed_45_pemass'; ...
+    'E2', 'exper_qs_noresi_load_boost_3_seed_45_pemass'; ...
+    'E3', 'exper_history_only_load_boost_3_seed_45_pemass'; ...
+};
+for i = 1:size(patterns, 1)
+    if has_text(runName, patterns{i, 2})
+        label = patterns{i, 1};
+        return;
+    end
+end
 end
 
 
@@ -447,21 +535,21 @@ fig = figure('Color', 'w', 'Position', [80, 80, 1300, 760]);
 subplot(3, 1, 1);
 bar_qs_encoder(labels, [T.qs_mass_rmse_kg, T.enc_mass_rmse_kg], qsColors, encoderColors);
 ylabel('Mass RMSE [kg]');
-legend({'QS', 'Encoder'}, 'Location', 'northoutside', 'Orientation', 'horizontal');
+legend({'Model-based', 'RL-based'}, 'Location', 'northoutside', 'Orientation', 'horizontal');
 title('Payload Mass Estimation');
 grid on;
 
 subplot(3, 1, 2);
 bar_qs_encoder(labels, 100 * [T.qs_dcom_x_rmse_m, T.enc_dcom_x_rmse_m], qsColors, encoderColors);
 ylabel('CoM-x RMSE [cm]');
-legend({'QS', 'Encoder'}, 'Location', 'northoutside', 'Orientation', 'horizontal');
+legend({'Model-based', 'RL-based'}, 'Location', 'northoutside', 'Orientation', 'horizontal');
 title('Total CoM Delta X');
 grid on;
 
 subplot(3, 1, 3);
 bar_qs_encoder(labels, 100 * [T.qs_dcom_y_rmse_m, T.enc_dcom_y_rmse_m], qsColors, encoderColors);
 ylabel('CoM-y RMSE [cm]');
-legend({'QS', 'Encoder'}, 'Location', 'northoutside', 'Orientation', 'horizontal');
+legend({'Model-based', 'RL-based'}, 'Location', 'northoutside', 'Orientation', 'horizontal');
 title('Total CoM Delta Y');
 grid on;
 rotate_xticks(fig, 35);
@@ -513,18 +601,54 @@ end
 
 
 function plot_method_condition_bars(T, outDir, saveOutputs)
-% Compact replacements for the old heatmaps.  They average repeated rows
-% within each method/condition or method/load group and show them as bars.
-plot_grouped_metric_bars(T, 'method', 'condition', 'enc_mass_rmse_kg', ...
-    'Encoder mass RMSE by condition', 'mass RMSE [kg]', outDir, ...
-    'bar_encoder_mass_by_condition', saveOutputs);
-plot_grouped_metric_bars(T, 'method', 'condition', 'qs_mass_rmse_kg', ...
-    'QS mass RMSE by condition', 'mass RMSE [kg]', outDir, ...
-    'bar_qs_mass_by_condition', saveOutputs);
+% Figures 1 + 2 (encoder mass / QS mass per method): filtered to walk-only.
+% Reason: the policy is dynamic even at cmd=0 ("static" is also a balancing
+% process), so static vs walk distinction is misleading. Walk is the
+% unambiguous "dynamic" case.
+condCol = table_text_column(T, 'condition');
+Tw = T(strcmp(condCol, 'walk'), :);
+plot_method_metric_bars(Tw, 'enc_mass_rmse_kg', ...
+    'RL-based mass RMSE (walk only, avg over load ranges)', 'mass RMSE [kg]', outDir, ...
+    'bar_encoder_mass_walk', saveOutputs);
+plot_method_metric_bars(Tw, 'qs_mass_rmse_kg', ...
+    'Model-based mass RMSE (walk only, avg over load ranges)', 'mass RMSE [kg]', outDir, ...
+    'bar_qs_mass_walk', saveOutputs);
+% Figures 3 + 4: unchanged (don't group by static/walk so no filter needed).
 plot_grouped_metric_bars(T, 'method', 'load_range', 'enc_mass_rmse_kg', ...
-    'Encoder mass RMSE by load range', 'mass RMSE [kg]', outDir, ...
+    'RL-based mass RMSE by load range', 'mass RMSE [kg]', outDir, ...
     'bar_encoder_mass_by_load', saveOutputs);
 plot_qs_vs_encoder_mass_bars(T, outDir, saveOutputs);
+end
+
+
+function plot_method_metric_bars(T, valueVar, figTitle, yLabelText, outDir, figName, saveOutputs)
+% Simple one-bar-per-method chart (each bar colored by E1-E5 palette).
+% Averages repeated rows per method (e.g., across load ranges).
+print_data_sources(T, figName);
+methodCol = table_text_column(T, 'method');
+methods = unique(methodCol, 'stable');
+M = NaN(numel(methods), 1);
+for i = 1:numel(methods)
+    mask = strcmp(methodCol, methods{i});
+    vals = T.(valueVar)(mask);
+    if ~isempty(vals)
+        M(i) = mean(vals, 'omitnan');
+    end
+end
+fig = figure('Color', 'w', 'Position', [180, 180, 760, 480]);
+xLabels = categorical(methods);
+xLabels = reordercats(xLabels, methods);
+b = bar(xLabels, M);
+try
+    b.FaceColor = 'flat';
+    b.CData = payload_method_color(methods);
+catch
+end
+ylabel(yLabelText);
+title(figTitle);
+grid on;
+rotate_xticks(fig, 0);
+finish_figure(fig, outDir, figName, saveOutputs);
 end
 
 
@@ -596,45 +720,67 @@ end
 
 
 function plot_qs_vs_encoder_mass_bars(T, outDir, saveOutputs)
-% Fair compact comparison: use the common dataset available for all current
-% methods (load 2-4 kg, seed 42) and aggregate repeated plays.
-methodCol = table_text_column(T, 'method');
-condCol = table_text_column(T, 'condition');
-loadCol = table_text_column(T, 'load_range');
-mask = strcmp(loadCol, '2-4') & (T.seed == 42);
-Tfair = T(mask, :);
-if isempty(Tfair)
-    return;
-end
-print_data_sources(Tfair, 'bar_qs_vs_encoder_mass_common_load2_4_seed42');
+% Model-based vs RL-based mass RMSE, WALK ONLY, load 2-4 kg.
+% Values are HARD-CODED (not recomputed from .mat) so the figure is fixed.
+% Edit the matrix below to change the numbers.
+%
+%   rows = methods E1 / E3 / E5 / E4
+%   cols = [Model-based (QS) , RL-based (encoder)]   mass RMSE [kg]
+present = {'E1', 'E3', 'E5', 'E4'};
+M = [ ...
+     2.185,  0.864;   % E1  Model-guided RL
+    22.456,  0.941;   % E3  RL + model input
+     4.074,  1.186;   % E5  RL + model output
+    40.826,  1.664;   % E4  RL-only
+];
+dispLabels = cellfun(@method_display_label, present, 'UniformOutput', false);
 
-methodCol = table_text_column(Tfair, 'method');
-condCol = table_text_column(Tfair, 'condition');
-pairLabels = cell(height(Tfair), 1);
-for i = 1:height(Tfair)
-    pairLabels{i} = sprintf('%s | %s', condCol{i}, methodCol{i});
+% Transpose grouping: x-axis = estimator type (Model-based vs RL-based),
+% 4 method-colored bars per group, legend = method names.
+fig = figure('Color', 'w', 'Position', [180, 180, 760, 480]);
+x = 1:2;
+b = bar(x, M', 'BarWidth', 0.88);   % M' is 2 x nMethods -> 2 groups, nMethods bars each
+ax = gca;
+set(ax, 'XTick', x, 'XTickLabel', {'Model-based', 'RL-based'});
+xlim(ax, [0.56, 2.44]);
+baseVal = 0.5;          % log-axis baseline: bars grow upward from here
+for k = 1:numel(present)
+    b(k).FaceColor = payload_method_color(present{k});
+    b(k).EdgeColor = 'none';
+    b(k).BaseValue = baseVal;
 end
-pairs = unique(pairLabels, 'stable');
-M = NaN(numel(pairs), 2);
-pairMethods = cell(numel(pairs), 1);
-for i = 1:numel(pairs)
-    m = strcmp(pairLabels, pairs{i});
-    M(i, 1) = mean(Tfair.qs_mass_rmse_kg(m), 'omitnan');
-    M(i, 2) = mean(Tfair.enc_mass_rmse_kg(m), 'omitnan');
-    idx = find(m, 1, 'first');
-    pairMethods{i} = methodCol{idx};
+% Log y-axis: RL (~1 kg) and Model-based (2-41 kg) span ~2 orders of magnitude,
+% so a linear axis hides the RL bars. Log scale keeps all bars visible.
+set(gca, 'YScale', 'log');
+ylim([baseVal, 60]);
+% Print exact kg value on top of each bar (log axis is hard to read precisely).
+for k = 1:numel(present)
+    xe = b(k).XEndPoints; ye = b(k).YEndPoints;
+    for j = 1:numel(xe)
+        text(xe(j), ye(j) * 1.12, sprintf('%.3g', ye(j)), ...
+             'HorizontalAlignment', 'center', 'FontSize', 8, 'Rotation', 90);
+    end
 end
-
-fig = figure('Color', 'w', 'Position', [180, 180, 1050, 520]);
-pairCats = categorical(pairs);
-pairCats = reordercats(pairCats, pairs);
-bar_qs_encoder(pairCats, M, payload_method_color(pairMethods, 'qs'), payload_method_color(pairMethods, 'encoder'));
-ylabel('Mass RMSE [kg]');
-title('QS vs Encoder mass error, common subset: load 2-4 kg, seed 42');
-legend({'QS', 'Encoder'}, 'Location', 'northoutside', 'Orientation', 'horizontal');
+ylabel('Mass RMSE [kg] (log scale)');
+title('Model-based vs RL-based mass RMSE under 2-4 kg Payload');
+legend(dispLabels, 'Location', 'northoutside', 'Orientation', 'horizontal');
 grid on;
-rotate_xticks(fig, 25);
-finish_figure(fig, outDir, 'bar_qs_vs_encoder_mass_common_load2_4_seed42', saveOutputs);
+set(ax, 'Position', [0.09, 0.15, 0.88, 0.68]);
+set(ax, 'LooseInset', max(get(ax, 'TightInset'), [0.02, 0.02, 0.02, 0.02]));
+rotate_xticks(fig, 0);
+finish_figure(fig, outDir, 'bar_model_vs_rl_mass_walk_load2_4', saveOutputs);
+end
+
+
+function lbl = method_display_label(code)
+% E-code -> paper-facing method name (no "QS"; QS is only a modeling assumption).
+switch char(code)
+    case 'E1', lbl = 'Model-guided RL';
+    case 'E3', lbl = 'RL + model input';
+    case 'E5', lbl = 'RL + model output';
+    case 'E4', lbl = 'RL-only';
+    otherwise, lbl = char(code);
+end
 end
 
 
@@ -699,25 +845,25 @@ fig = figure('Color', 'w', 'Position', [100, 100, 1100, 680]);
 
 subplot(3, 1, 1);
 plot_line_if(S, t, 'payload_mass_ref_all', envIdx, 'true', 'k', 2.2); hold on;
-plot_line_if(S, t, 'payload_mass_all', envIdx, 'QS', qsColor, 1.5, '--');
-plot_line_if(S, t, 'encoder_mass_all', envIdx, 'Encoder', encoderColor, 1.8, '-');
+plot_line_if(S, t, 'payload_mass_all', envIdx, 'Model-based', qsColor, 1.5, '--');
+plot_line_if(S, t, 'encoder_mass_all', envIdx, 'RL-based', encoderColor, 1.8, '-');
 ylabel('mass [kg]');
-title(stem, 'Interpreter', 'none');
+title(sprintf('%s (%s, load %s kg)', meta.method, meta.condition, meta.load_range));
 legend('Location', 'best');
 grid on;
 
 subplot(3, 1, 2);
 plot_line_if(S, t, 'true_com_delta_x_all', envIdx, 'true', 'k', 2.2); hold on;
-plot_line_if(S, t, 'modelC_com_delta_x_all', envIdx, 'QS', qsColor, 1.5, '--');
-plot_line_if(S, t, 'encoder_com_delta_x_all', envIdx, 'Encoder', encoderColor, 1.8, '-');
+plot_line_if(S, t, 'modelC_com_delta_x_all', envIdx, 'Model-based', qsColor, 1.5, '--');
+plot_line_if(S, t, 'encoder_com_delta_x_all', envIdx, 'RL-based', encoderColor, 1.8, '-');
 ylabel('dCoM-x [m]');
 legend('Location', 'best');
 grid on;
 
 subplot(3, 1, 3);
 plot_line_if(S, t, 'true_com_delta_y_all', envIdx, 'true', 'k', 2.2); hold on;
-plot_line_if(S, t, 'modelC_com_delta_y_all', envIdx, 'QS', qsColor, 1.5, '--');
-plot_line_if(S, t, 'encoder_com_delta_y_all', envIdx, 'Encoder', encoderColor, 1.8, '-');
+plot_line_if(S, t, 'modelC_com_delta_y_all', envIdx, 'Model-based', qsColor, 1.5, '--');
+plot_line_if(S, t, 'encoder_com_delta_y_all', envIdx, 'RL-based', encoderColor, 1.8, '-');
 ylabel('dCoM-y [m]');
 xlabel('time [s]');
 legend('Location', 'best');
@@ -798,8 +944,8 @@ subplot(1, 2, 1);
 scatter_downsample(ref(validQs), qs(validQs), 10, qsColor, false);
 hold on; plot_identity(ref(validQs), qs(validQs));
 xlabel('true mass [kg]');
-ylabel('QS estimate [kg]');
-title('QS');
+ylabel('Model-based estimate [kg]');
+title('Model-based');
 grid on;
 
 subplot(1, 2, 2);
@@ -809,10 +955,11 @@ if validEnc
     hold on; plot_identity(ref(valid), enc(valid));
 end
 xlabel('true mass [kg]');
-ylabel('encoder estimate [kg]');
-title('Encoder');
+ylabel('RL-based estimate [kg]');
+title('RL-based');
 grid on;
-annotation(fig, 'textbox', [0.05 0.94 0.9 0.05], 'String', stem, ...
+annotation(fig, 'textbox', [0.05 0.94 0.9 0.05], ...
+    'String', sprintf('%s (%s, load %s kg)', meta.method, meta.condition, meta.load_range), ...
     'Interpreter', 'none', 'EdgeColor', 'none', 'HorizontalAlignment', 'center');
 finish_figure(fig, outDir, ['scatter_mass_', matlab.lang.makeValidName(stem)], saveOutputs);
 end

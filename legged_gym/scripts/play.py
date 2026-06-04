@@ -140,10 +140,17 @@ def _apply_saved_env_cfg(env_cfg, train_cfg, args, log_root):
     for k in ("num_observations", "num_critic_observations"):
         if se.get(k) is not None:
             _ovr(env_cfg.env, k, int(se[k]))
-    # --- env flags affecting obs structure (None = field absent in older runs; skip) ---
-    for k in ("use_qs_in_obs", "use_residual_learning"):
-        if se.get(k) is not None:
-            _ovr(env_cfg.env, k, bool(se[k]))
+    # --- env flags affecting obs structure ---
+    # 字段存在：使用 saved 值。
+    # 字段缺失（older runs）：use_torques_in_obs 的默认是 True（该 flag 2026-05-24 才加，
+    # 之前所有 ckpt 都有 raw torques）；其他 flag 若缺失则不动 in-tree 默认。
+    _flag_defaults_when_missing = {"use_torques_in_obs": True}
+    for k in ("use_qs_in_obs", "use_residual_learning", "use_torques_in_obs"):
+        sv = se.get(k)
+        if sv is not None:
+            _ovr(env_cfg.env, k, bool(sv))
+        elif k in _flag_defaults_when_missing:
+            _ovr(env_cfg.env, k, _flag_defaults_when_missing[k])
 
     # --- algorithm flag affecting encoder interpretation ---
     if saved_tr is not None:
@@ -188,19 +195,42 @@ def _cmd_tag(vx, vy, yaw, eps=0.05):
 
 
 def _build_auto_exp_tag(env, train_cfg, args, cmd_vx, cmd_vy, cmd_yaw):
-    """Build exp_tag of form lb{N}_qs{0|1}_resid{0|1}_{cmd}_seed{S}_ckpt{C}_[load{lo}-{hi}]."""
+    """Build exp_tag of form lb{N}_qs{0|1}_resid{0|1}_torq{0|1}_{cmd}_seed{S}_ckpt{C}_[load{lo}-{hi}].
+
+    `torq` 后缀仅在 use_torques_in_obs=False 时插入（避免污染历史 tag 命名）。
+    """
     lb_val = getattr(train_cfg.algorithm, "extra_loss_load_boost", None)
     lb_s = f"{lb_val:g}" if lb_val is not None else "x"
     qs = int(bool(getattr(env.cfg.env, "use_qs_in_obs", True)))
     resid = int(bool(getattr(train_cfg.algorithm, "use_load_residual_estimation", False)))
+    torq = bool(getattr(env.cfg.env, "use_torques_in_obs", True))
     seed = getattr(env.cfg, "seed", "x")
     ckpt = getattr(args, "checkpoint", "x")
-    tag = f"lb{lb_s}_qs{qs}_resid{resid}_{_cmd_tag(cmd_vx, cmd_vy, cmd_yaw)}_seed{seed}_ckpt{ckpt}"
+    torq_seg = "" if torq else "_torq0"
+    tag = f"lb{lb_s}_qs{qs}_resid{resid}{torq_seg}_{_cmd_tag(cmd_vx, cmd_vy, cmd_yaw)}_seed{seed}_ckpt{ckpt}"
     # Append load range suffix only when user overrode it (OOD case).
     lm_min = float(getattr(args, "load_mass_min", -1.0) or -1.0)
     lm_max = float(getattr(args, "load_mass_max", -1.0) or -1.0)
     if lm_min >= 0.0 and lm_max >= 0.0:
         tag += f"_load{lm_min:g}-{lm_max:g}"
+    if bool(getattr(args, "flat_terrain", False)):
+        tag += "_flat"
+    if bool(getattr(args, "no_load", False)):
+        tag += "_noload"
+    # Append ext-force suffix (Exp A) so force runs don't collide with mass runs.
+    eff_kg = float(getattr(args, "ext_force_down_kg", 0.0) or 0.0)
+    eff_kg_min = float(getattr(args, "ext_force_down_kg_min", 0.0) or 0.0)
+    eff_kg_max = float(getattr(args, "ext_force_down_kg_max", 0.0) or 0.0)
+    efx = float(getattr(args, "ext_force_x", 0.0) or 0.0)
+    efy = float(getattr(args, "ext_force_y", 0.0) or 0.0)
+    efz = float(getattr(args, "ext_force_z", 0.0) or 0.0)
+    if eff_kg_min > 0.0 and eff_kg_max >= eff_kg_min:
+        fdir = str(getattr(args, "ext_force_dir", "down") or "down").lower()
+        tag += f"_f{fdir}{eff_kg_min:g}-{eff_kg_max:g}kg"
+    elif eff_kg > 0.0:
+        tag += f"_fdown{eff_kg:g}kg"
+    elif abs(efx) > 1e-9 or abs(efy) > 1e-9 or abs(efz) > 1e-9:
+        tag += f"_fxyz{efx:g}-{efy:g}-{efz:g}N"
     return tag
 
 
@@ -238,6 +268,7 @@ def _collect_run_verify(env, train_cfg, args, log_root):
     cur = {
         "use_qs_in_obs":              bool(getattr(cur_env_cfg.env, "use_qs_in_obs", True)),
         "use_residual_learning":      bool(getattr(cur_env_cfg.env, "use_residual_learning", False)),
+        "use_torques_in_obs":         bool(getattr(cur_env_cfg.env, "use_torques_in_obs", True)),
         "use_load_residual_estimation": bool(getattr(train_cfg.algorithm, "use_load_residual_estimation", False)),
         "num_observations":           int(getattr(cur_env_cfg.env, "num_observations", -1)),
         "extra_loss_load_boost":      float(getattr(train_cfg.algorithm, "extra_loss_load_boost", float("nan"))),
@@ -249,6 +280,7 @@ def _collect_run_verify(env, train_cfg, args, log_root):
         saved = {
             "use_qs_in_obs":              _dig(saved_env, "env", "use_qs_in_obs"),
             "use_residual_learning":      _dig(saved_env, "env", "use_residual_learning"),
+            "use_torques_in_obs":         _dig(saved_env, "env", "use_torques_in_obs"),
             "use_load_residual_estimation": _dig(saved_tr,  "algorithm", "use_load_residual_estimation"),
             "num_observations":           _dig(saved_env, "env", "num_observations"),
             "extra_loss_load_boost":      _dig(saved_tr,  "algorithm", "extra_loss_load_boost"),
@@ -264,8 +296,8 @@ def _collect_run_verify(env, train_cfg, args, log_root):
     # --- detect critical mismatches ---
     # These flags MUST match between train and play, otherwise the encoder
     # output is interpreted differently and results are silently wrong.
-    critical = ["use_qs_in_obs", "use_residual_learning", "use_load_residual_estimation",
-                "num_observations"]
+    critical = ["use_qs_in_obs", "use_residual_learning", "use_torques_in_obs",
+                "use_load_residual_estimation", "num_observations"]
     mismatches = []
     for k in critical:
         sv, cv = saved.get(k), cur.get(k)
@@ -276,6 +308,7 @@ def _collect_run_verify(env, train_cfg, args, log_root):
     paste = (
         f"run={load_run} ckpt={ckpt_str} "
         f"qs={cur['use_qs_in_obs']} resid_learn={cur['use_residual_learning']} "
+        f"torq={cur['use_torques_in_obs']} "
         f"resid_est={cur['use_load_residual_estimation']} "
         f"n_obs={cur['num_observations']} lb={cur['extra_loss_load_boost']:g} "
         f"seed={cur['seed']} n_envs={cur['num_envs']} "
@@ -315,8 +348,9 @@ def _print_run_verify_block(v):
     print(f"")
     print(f"  {'key':<32} {'train(saved)':<16} {'play(current)':<16} {'match':<6}")
     print(f"  {'-'*32} {'-'*16} {'-'*16} {'-'*6}")
-    for k in ["use_qs_in_obs", "use_residual_learning", "use_load_residual_estimation",
-              "num_observations", "extra_loss_load_boost", "seed", "num_envs"]:
+    for k in ["use_qs_in_obs", "use_residual_learning", "use_torques_in_obs",
+              "use_load_residual_estimation", "num_observations",
+              "extra_loss_load_boost", "seed", "num_envs"]:
         sv, cv = saved.get(k), cur.get(k)
         sv_s = "N/A" if sv is None else str(sv)
         cv_s = str(cv)
@@ -574,7 +608,7 @@ def play(args):
     _apply_saved_env_cfg(env_cfg, train_cfg, args, _log_root_for_align)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 60
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs,20)
+    env_cfg.env.num_envs = min(env_cfg.env.num_envs,30)
 
     env_cfg.terrain.num_rows = 10
     env_cfg.terrain.num_cols = 20
@@ -622,8 +656,69 @@ def play(args):
         env_cfg.domain_rand.add_load_range = [_lm_min, _lm_max]
         print(f"[PLAY] override add_load_range = {env_cfg.domain_rand.add_load_range}")
 
+    # CLI override: sustained external force (Exp A: 外力 vs 重物辨识). World frame, -Z = downward.
+    _eff_kg = float(getattr(args, "ext_force_down_kg", 0.0) or 0.0)
+    _eff_kg_min = float(getattr(args, "ext_force_down_kg_min", 0.0) or 0.0)
+    _eff_kg_max = float(getattr(args, "ext_force_down_kg_max", 0.0) or 0.0)
+    _ext_force_vec = [
+        float(getattr(args, "ext_force_x", 0.0) or 0.0),
+        float(getattr(args, "ext_force_y", 0.0) or 0.0),
+        float(getattr(args, "ext_force_z", 0.0) or 0.0),
+    ]
+    # per-env sweep: each env a distinct downward force via linspace(min,max,num_envs)
+    _ext_force_sweep = (_eff_kg_min > 0.0 and _eff_kg_max >= _eff_kg_min)
+    if _eff_kg > 0.0:  # convenience: single downward force = _eff_kg of payload weight (all envs)
+        _ext_force_vec[2] = -_eff_kg * 9.81
+    _ext_force_on = _ext_force_sweep or any(abs(v) > 1e-9 for v in _ext_force_vec)
+    if _ext_force_on:
+        # 加力试验不带真实负载：关闭负载生成，使唯一的附加效应就是这个力
+        env_cfg.domain_rand.add_random_load = False
+        if _ext_force_sweep:
+            print(f"[PLAY] EXT-FORCE SWEEP ON: dir={str(getattr(args,'ext_force_dir','down'))} "
+                  f"per-env force = linspace({_eff_kg_min},{_eff_kg_max}) kg-equiv; add_random_load -> False")
+        else:
+            print(f"[PLAY] EXT-FORCE mode ON: world force [N] = {_ext_force_vec} "
+                  f"(down_kg={_eff_kg}); add_random_load -> False")
+
+    # Exp B: 强制平地，使姿态指标只反映控制、不含地形跟随
+    if bool(getattr(args, "flat_terrain", False)):
+        env_cfg.terrain.mesh_type = "plane"
+        env_cfg.terrain.curriculum = False
+        env_cfg.terrain.measure_heights = False
+        print("[PLAY] FLAT terrain mode: terrain.mesh_type='plane'")
+
+    # Exp B baseline: 无负载（隔离负载引起的控制退化）
+    if bool(getattr(args, "no_load", False)):
+        env_cfg.domain_rand.add_random_load = False
+        print("[PLAY] NO-LOAD mode: domain_rand.add_random_load=False")
+
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+
+    # 应用持续外力（在建环境后写入 env 属性；默认关闭则无影响）
+    # ext_force_vec 支持 [3]（全环境同）或 [N,3]（per-env sweep）；_apply_sustained_ext_force
+    # 里 ext_force_vec * mask([N,1]) 两种 shape 都能广播成 [N,3]。
+    # sweep 方向：磁量沿哪个轴施加（默认 down=-Z；水平向为实验2）
+    _ext_force_dir = str(getattr(args, "ext_force_dir", "down") or "down").lower()
+    _DIR2AXIS = {"down": (2, -1.0), "up": (2, 1.0), "fwd": (0, 1.0), "forward": (0, 1.0),
+                 "back": (0, -1.0), "left": (1, 1.0), "right": (1, -1.0),
+                 "x": (0, 1.0), "y": (1, 1.0), "z": (2, -1.0)}
+    _ext_force_equiv_kg_per_env = None  # 每个环境的力当量 (kg)，供 per-env 分析做参考真值
+    if _ext_force_on:
+        env.ext_force_enable = True
+        env.ext_force_body_idx = 0  # base
+        _N = env.num_envs
+        if _ext_force_sweep:
+            _ax, _sg = _DIR2AXIS.get(_ext_force_dir, (2, -1.0))
+            _kg = torch.linspace(_eff_kg_min, _eff_kg_max, _N, device=env.device)
+            _vec = torch.zeros(_N, 3, device=env.device)
+            _vec[:, _ax] = _sg * _kg * 9.81
+            env.ext_force_vec = _vec
+            _ext_force_equiv_kg_per_env = _kg.detach().cpu().numpy().tolist()
+        else:
+            env.ext_force_vec = to_torch(_ext_force_vec, device=env.device)
+            _equiv = (-_ext_force_vec[2] / 9.81) if _ext_force_vec[2] < 0 else 0.0
+            _ext_force_equiv_kg_per_env = [float(_equiv)] * _N
 
     if hasattr(env, "terrain_types"):
         terrain_types_cpu = env.terrain_types.detach().cpu()
@@ -982,6 +1077,15 @@ def play(args):
                     "command_yaw": env.commands[:, 2],
                 }
 
+                # 姿态/高度（实验B：控制稳定性指标，per-env）
+                _bq = env.base_quat  # [N,4] xyzw
+                _qx, _qy, _qz, _qw = _bq[:, 0], _bq[:, 1], _bq[:, 2], _bq[:, 3]
+                full_dict["base_roll"] = torch.atan2(2.0 * (_qw * _qx + _qy * _qz),
+                                                     1.0 - 2.0 * (_qx * _qx + _qy * _qy))
+                full_dict["base_pitch"] = torch.asin(torch.clamp(2.0 * (_qw * _qy - _qz * _qx), -1.0, 1.0))
+                full_dict["base_lin_vel_z"] = env.base_lin_vel[:, 2]
+                full_dict["base_height"] = env.root_states[env.actor_indices, 2]
+
                 # Encoder 输出反归一化到物理单位。
                 # get_inference_encoder(obs_history, obs) already returns the
                 # policy-facing latent. In residual mode this means QS baseline
@@ -1022,7 +1126,12 @@ def play(args):
                         "dof_vel": env.dof_vel[robot_index, joint_index].item(),
                         "filtered_dof_vel": env.filtered_obs_buf[robot_index, 12 + joint_index].item() / env.cfg.normalization.obs_scales.dof_vel if hasattr(env, "filtered_obs_buf") else 0.0,
                         "dof_torque": env.torques[robot_index, joint_index].item(),
-                        "filtered_dof_torque": env.filtered_obs_buf[robot_index, 20 + joint_index].item() / env.cfg.normalization.obs_scales.torque if hasattr(env, "filtered_obs_buf") else 0.0,
+                        # filtered_dof_torque 仅在 use_torques_in_obs=True 时存在于 filtered_obs_buf 中
+                        "filtered_dof_torque": (
+                            env.filtered_obs_buf[robot_index, 20 + joint_index].item() / env.cfg.normalization.obs_scales.torque
+                            if hasattr(env, "filtered_obs_buf") and bool(getattr(env.cfg.env, "use_torques_in_obs", True))
+                            else 0.0
+                        ),
                         "command_x": env.commands[robot_index, 0].item(),
                         "command_y": env.commands[robot_index, 1].item(),
                         "command_yaw": env.commands[robot_index, 2].item(),
@@ -1165,9 +1274,24 @@ def play(args):
                 "checkpoint": str(getattr(args, "checkpoint", "") or ""),
                 "dt": float(env.dt),
                 "cmd_vx": _cmd_vx, "cmd_vy": _cmd_vy, "cmd_yaw": _cmd_yaw,
+                "ext_force_on": bool(_ext_force_on),
+                "ext_force_vec_N": list(_ext_force_vec),     # [Fx,Fy,Fz] world frame, N (单值模式)
+                "ext_force_down_kg": float(_eff_kg),          # 力当量质量 (kg), 0 = 非单值竖直当量模式
+                "ext_force_sweep": bool(_ext_force_sweep),    # True = per-env 力当量扫描
+                "ext_force_dir": str(_ext_force_dir),         # 力方向 down/up/fwd/back/left/right
+                "ext_force_down_kg_min": float(_eff_kg_min),
+                "ext_force_down_kg_max": float(_eff_kg_max),
+                # 每个环境的力当量 (kg)，per-env 分析的参考真值（不要跨环境平均后再算 RMSE）
+                "ext_force_equiv_kg_per_env": (_ext_force_equiv_kg_per_env
+                                               if _ext_force_equiv_kg_per_env is not None else []),
+                # 固定的阶跃时序（力/负载共用），供 MATLAB 重建阶跃参考线
+                "load_start_time_s": float(getattr(env.cfg.domain_rand, "load_start_time_s", 0.0)),
+                "load_duration_s_used": float(getattr(env.cfg.domain_rand, "load_duration_range_s", [0.0, 0.0])[0]),
+                "load_interval_s_used": float(getattr(env.cfg.domain_rand, "load_interval_range_s", [0.0, 0.0])[0]),
                 "load_mass_range_used": list(getattr(env.cfg.domain_rand, "add_load_range", [-1, -1])),
                 "use_qs_in_obs": bool(getattr(env.cfg.env, "use_qs_in_obs", True)),
                 "use_residual_learning": bool(getattr(env.cfg.env, "use_residual_learning", False)),
+                "use_torques_in_obs": bool(getattr(env.cfg.env, "use_torques_in_obs", True)),
                 "use_load_residual_estimation": bool(
                     getattr(train_cfg.algorithm, "use_load_residual_estimation", False)
                 ),

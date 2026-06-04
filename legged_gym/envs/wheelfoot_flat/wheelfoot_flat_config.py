@@ -41,8 +41,14 @@ class BipedCfgWF(BaseConfig):
         #                   False = encoder 直接输出绝对 mass/com（即使 QS 在 obs 也不做残差结构）。
         #                   仅当 use_qs_in_obs=True 时才有意义；False+False 等价 history_only。
         use_residual_learning = True
+        # Ablation flag #3: True = 8-dim raw joint torques 进入 policy obs（encoder 也通过 history 看到）。
+        #                   False = encoder 失去对 raw torques 的直接访问；QS features 仍可在 obs 里（如果 use_qs_in_obs=True）。
+        #                   常用组合：(T, T, T) = E1 main；(T, F, T) = E2 direct；(F, N/A, T) = E3 histonly；
+        #                            (F, N/A, F) = E4 true history-only；(T, T, F) = E5 QS-only-path（无 raw torques）。
+        use_torques_in_obs = False
         _qs_obs_dims = (8 + 4) if use_qs_in_obs else 0
-        num_observations = 30 + 6 - 2 - 4 - 2 + 8 + _qs_obs_dims  # +8 raw torque, [+12 QS if use_qs_in_obs]
+        _torque_obs_dims = 8 if use_torques_in_obs else 0
+        num_observations = 30 + 6 - 2 - 4 - 2 + _torque_obs_dims + _qs_obs_dims  # [+8 torque if on, +12 QS if on]
         num_critic_observations = 7 + num_observations
         num_height_samples = 117
         num_actions = 8
@@ -262,8 +268,10 @@ class BipedCfgWF(BaseConfig):
         push_curriculum_end_iter = 4000
         push_curriculum_min_vel_xy = 0.5
         load_start_time_s = 0.5     # 机器人开始添加负载的时间（秒）
-        load_duration_range_s = [3.0, 4.0] # 负载持续时间随机范围
-        load_interval_range_s = [5.0, 6.0] # 两次负载之间的时间随机范围
+        # 实验A：负载时序改为固定值（去随机），使阶跃时间点确定、力与重物可对齐比较。
+        # 训练旧值为 [3.0,4.0]/[5.0,6.0]，若恢复训练请改回。
+        load_duration_range_s = [6.0, 6.0]  # 负载持续时间（固定 6s）
+        load_interval_range_s = [10.0, 10.0]  # 两次生成之间的周期（固定 10s → 开6s/关4s）
         load_contact_grace_s = 0.2  # 负载生成后忽略接触终止的宽限时间（秒）
         # 负载判定滞回（降低 on/off 抖动）
         load_on_body_on_steps = 2

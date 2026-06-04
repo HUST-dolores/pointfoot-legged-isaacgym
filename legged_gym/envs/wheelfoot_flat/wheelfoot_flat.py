@@ -171,6 +171,7 @@ class BipedWF(BaseTask):
             )
             if self.cfg.domain_rand.push_robots:
                 self._push_robots()
+            self._apply_sustained_ext_force()  # 实验A：持续外力（默认关闭，不影响训练）
             self.gym.simulate(self.sim)
             if self.device == "cpu":
                 self.gym.fetch_results(self.sim, True)
@@ -273,15 +274,19 @@ class BipedWF(BaseTask):
         # 的真值也来自 sim，跟这个无关）。但是否把它喂进 obs 由 cfg.env.use_qs_in_obs 控制。
         load_estimates = self._compute_load_estimates()
         use_qs_in_obs = bool(getattr(self.cfg.env, "use_qs_in_obs", True))
+        use_torques_in_obs = bool(getattr(self.cfg.env, "use_torques_in_obs", True))
 
-        # 基础 obs：跟 use_qs_in_obs 无关的部分
+        # 基础 obs：跟 use_qs_in_obs / use_torques_in_obs 无关的部分
         obs_components = [
             self.base_ang_vel * self.obs_scales.ang_vel,
             self.projected_gravity,
             dof_pos * self.obs_scales.dof_pos,
             self.dof_vel * self.obs_scales.dof_vel,
-            self.torques * self.obs_scales.torque,
         ]
+        # Ablation: raw joint torques (default on; off = "true history-only" baseline,
+        # encoder 失去对 QS 公式底层信号的访问，用于验证 QS-derivable signal 是否必要)
+        if use_torques_in_obs:
+            obs_components.append(self.torques * self.obs_scales.torque)
 
         # QS 部分（only when ablation flag on）
         if use_qs_in_obs:
@@ -697,10 +702,13 @@ class BipedWF(BaseTask):
         noise_vec[12:20] = (
             noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
         )
-        noise_vec[20:28] = 0.0  # raw torques
-        noise_vec[28:36] = 0.0  # load estimation features
-        noise_vec[36:40] = 0.0  # quasi-static latent baseline for residual learning
-        noise_vec[40:] = 0.0  # previous actions
+        # 20:end 全部 0 noise（torques / QS features / prev_actions）。
+        # 即使 use_torques_in_obs / use_qs_in_obs 关掉，对应区段在 obs_buf 里消失，
+        # 这里的越界 slice 会被 PyTorch silently clamp，行为仍然正确（zeros_like 起底）。
+        noise_vec[20:28] = 0.0  # raw torques (if use_torques_in_obs)
+        noise_vec[28:36] = 0.0  # QS load estimation features (if use_qs_in_obs)
+        noise_vec[36:40] = 0.0  # QS residual baseline (if use_qs_in_obs)
+        noise_vec[40:] = 0.0    # previous actions
         return noise_vec
 
     def _init_buffers(self):

@@ -299,6 +299,60 @@ def get_args():
             "default": False,
             "help": "Exit immediately after .mat + plots are saved (auto-enabled under --headless). Use for batch runs to avoid the post-save infinite loop.",
         },
+        {
+            "name": "--ext_force_down_kg",
+            "type": float,
+            "default": 0.0,
+            "help": "Exp A: sustained downward (world -Z) external force on the base, specified as a payload-equivalent mass in kg (force = kg*9.81 N), SAME for all envs. >0 enables ext-force mode. Default 0 = off.",
+        },
+        {
+            "name": "--ext_force_down_kg_min",
+            "type": float,
+            "default": 0.0,
+            "help": "Exp A sweep: per-env downward-force equivalent mass lower bound (kg). With --ext_force_down_kg_max>min, each env gets a distinct force via linspace(min,max,num_envs) -> one play yields the whole transfer curve. Default 0 = off.",
+        },
+        {
+            "name": "--ext_force_down_kg_max",
+            "type": float,
+            "default": 0.0,
+            "help": "Exp A sweep: per-env downward-force equivalent mass upper bound (kg). See --ext_force_down_kg_min.",
+        },
+        {
+            "name": "--ext_force_dir",
+            "type": str,
+            "default": "down",
+            "help": "Exp A/2 sweep direction for the --ext_force_down_kg_min/max magnitude: down(-Z)|up(+Z)|fwd(+X)|back(-X)|left(+Y)|right(-Y). Default down (vertical). Horizontal dirs are Exp 2 (directionality test).",
+        },
+        {
+            "name": "--flat_terrain",
+            "action": "store_true",
+            "default": False,
+            "help": "Exp B: force a flat ground plane (terrain.mesh_type='plane') so attitude metrics reflect control, not terrain-following. Default off (uses trained trimesh terrain).",
+        },
+        {
+            "name": "--no_load",
+            "action": "store_true",
+            "default": False,
+            "help": "Exp B baseline: disable load spawning (domain_rand.add_random_load=False) so the robot walks with NO payload. Used to isolate load-induced control degradation. Default off.",
+        },
+        {
+            "name": "--ext_force_x",
+            "type": float,
+            "default": 0.0,
+            "help": "Exp A/2: sustained external force on the base along world X (N). Default 0.",
+        },
+        {
+            "name": "--ext_force_y",
+            "type": float,
+            "default": 0.0,
+            "help": "Exp A/2: sustained external force on the base along world Y (N). Default 0.",
+        },
+        {
+            "name": "--ext_force_z",
+            "type": float,
+            "default": 0.0,
+            "help": "Exp A/2: sustained external force on the base along world Z (N; negative = downward). Ignored if --ext_force_down_kg>0. Default 0.",
+        },
     ]
     # parse arguments
     args = gymutil.parse_arguments(

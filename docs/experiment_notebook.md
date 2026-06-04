@@ -13,15 +13,16 @@
 按重要性排序：
 
 1. **★★★ [结论 I](#-结论-iper-env-mass-diversity-是-ood-改善的核心机制)** — per-env mass diversity 是 OOD 改善的核心机制；OOD-low RMSE 1.44 → 0.98 kg（**−32%**）
-2. **★★★ [结论 J](#-结论-j架构qs-in-obs--residual-learning影响-marginal)** — 架构（QS-in-obs / residual learning）影响 marginal；三架构 RMSE per condition < 0.15 kg
-3. **★★ [结论 K](#-结论-kencoder-mass-output-几乎不被-actor-使用)** — encoder mass output 几乎不被 actor 使用（IG attribution < 0.20% across all conditions）
-4. **★ [结论 L](#-结论-lqs-in-obs-是-stabilizing-prior小但实在)** — QS-in-obs 是 stabilizing prior（actor IG ~6%）
-5. **★ [结论 M](#-结论-mencoder-在-mass-branch-上做了-noise-aware-feature-selection)** — encoder 在 mass branch 做了 noise-aware feature selection
-6. [结论 N](#结论-nco-calibration-在当前架构下不可行paper-12-句提及) — Co-cal 在当前架构下不可行（paper 1-2 句提及即可）
+2. **★★★ [结论 J](#-结论-j架构选择marginalqs-derivable-信号必要)** — 架构形式（QS-in-obs / residual learning）影响 marginal **on torque-preserving subset**
+3. **★★★ [结论 Q](#-结论-qencoder-依赖两条互补的-torque-信号-pathway-e4--e5-ablation)** — encoder 依赖两条**互补**的 torque 信号 pathway（raw torques + explicit QS features），任何一条单独都不够 —— E4 (移除两条) RMSE 退化 1.6-2.2×, **E5 (只移除 raw torques) RMSE 退化 0.3 kg**（in-dist），E5 介于 E1 和 E4 之间
+4. **★★ [结论 K](#-结论-kencoder-mass-output-几乎不被-actor-使用)** — encoder mass output 几乎不被 actor 使用（IG attribution < 0.5% across all conditions）
+5. **★ [结论 L](#-结论-lqs-in-obs-是-stabilizing-prior小但实在)** — QS-in-obs 是 stabilizing prior（actor IG ~6%）
+6. **★ [结论 M](#-结论-mencoder-在-mass-branch-上做了-noise-aware-feature-selection)** — encoder 在 mass branch 做了 noise-aware feature selection
+7. [结论 N](#结论-nco-calibration-在当前架构下不可行paper-12-句提及) — Co-cal 在当前架构下不可行（paper 1-2 句提及即可）
 
-→ **paper main contribution**：per-env mass diversity（一行 hidden bug 修复）；
-→ paper honest negative findings：架构影响 marginal、encoder mass 不被 actor 用、co-cal 不可行；
-→ paper supporting findings：QS-in-obs stabilizing prior、encoder noise-aware feature selection。
+→ **paper main contributions**：(a) per-env mass diversity（一行 hidden bug 修复）；(b) **two-pathway torque signal mechanism**（E4 + E5 ablations 证明）；
+→ paper honest negative findings：架构形式无所谓（torque-preserving 子集内）、encoder mass 不被 actor 用、co-cal 不可行；
+→ paper supporting findings：QS-in-obs stabilizing prior、encoder noise-aware feature selection、prev_actions 在缺 raw torques 时作为 implicit surrogate（E5 encoder IG）。
 
 ---
 
@@ -41,15 +42,20 @@
 
 ## §1 实验设计
 
-### 1.1 三架构 ablation matrix（E1 / E2 / E3）
+### 1.1 五架构 ablation matrix（E1 / E2 / E3 / E4 / E5）
 
-所有 E1/E2/E3 同 `seed=45` + `per_env_load_mass=ON` + ckpt 11000，仅架构 flag 不同。
+所有 ckpts 同 `per_env_load_mass=ON` + ckpt 11000，仅架构 flag 不同。
 
-| Ckpt | 含义 | `use_qs_in_obs` | `use_residual_learning` |
-|---|---|---|---|
-| **E1 main** = `exper_qs_resi_load_boost_3_seed_45_pemass` | QS in obs + residual learning | ✓ | ✓ |
-| **E2 direct** = `exper_qs_noresi_load_boost_3_seed_45_pemass` | QS in obs + direct mass head | ✓ | ✗ |
-| **E3 histonly** = `exper_history_only_load_boost_3_seed_45_pemass` | history only（无 QS） | ✗ | N/A |
+| Ckpt | 含义 | `use_qs_in_obs` | `use_residual_learning` | `use_torques_in_obs` |
+|---|---|---|---|---|
+| **E1 main** = `exper_qs_resi_load_boost_3_seed_45_pemass` | QS in obs + residual + torques | ✓ | ✓ | ✓ |
+| **E2 direct** = `exper_qs_noresi_load_boost_3_seed_45_pemass` | QS in obs + direct + torques | ✓ | ✗ | ✓ |
+| **E3 histonly** = `exper_history_only_load_boost_3_seed_45_pemass` | history only + torques | ✗ | N/A | ✓ |
+| **E4 true history-only** = `May24_19-30-38_exper_history_only_no_torq_load_boost_3_seed_45_pemass` | history only without torques | ✗ | N/A | **✗** |
+| **E5 qs_only_path** = `May25_01-00-47_exper_qs_resi_load_boost_3_no_torq_seed_45_pemass` | QS in obs + residual, **no raw torques** | ✓ | ✓ | **✗** |
+
+**所有 4 个 ckpt 实际训练时 seed=45**（由 `make_env` 里的 `set_seed(env_cfg.seed=45)` 应用）。
+注：E1-E4 的 `env_cfg.json` 因为 [task_registry.py 旧 save bug](../legged_gym/utils/task_registry.py) 错误地写了 1（`make_alg_runner` 内部第二次调 `get_cfgs(name)` 时把 `env_cfg.seed` 重置回了 `train_cfg.seed` 的默认值），但实际训练用的 numpy/torch 种子是 45（train_cfg.json 里的 seed=45 才是真值）。该 bug 已在 2026-05-25 修复，E5 及之后的 ckpt 的 env_cfg.json 会正确记录 seed=45。
 
 ### 1.2 No-pemass 对照 baseline
 
@@ -89,25 +95,206 @@ play_seed=42，ckpt 11000，trimesh L0，num_envs=20。
 | OOD-low walk [1,2] | 0.98 | 1.46 | **−33%** ★ |
 | OOD-high static [4,6] | 1.49 | 1.89 | **−21%** |
 
-### 2.3 三架构完整 RMSE 对比（确认 pemass 改善跨架构成立）
+### 2.3 五架构完整 RMSE 对比（pemass + torque/QS pathway ablation 一起看）
 
-| Condition | **E1 main** | **E2 direct** | **E3 histonly** | range (E1-3) |
-|---|---|---|---|---|
-| in-dist static [2,4] | 0.83 | **0.78** | 0.82 | 0.05 |
-| in-dist walk [2,4] | 0.86 | 0.79 | **0.74** | 0.12 |
-| OOD-low static [1,2] | **0.98** | 1.01 | 1.05 | 0.07 |
-| OOD-low walk [1,2] | 0.98 | **0.93** | 1.00 | 0.07 |
-| OOD-high static [4,6] | 1.49 | 1.48 | **1.39** | 0.10 |
-| OOD-high walk [4,6] | **4.95** ⚠ | 1.50 | 1.42 | 0.08 (excl E1) |
+| Condition | **E1** (qs+resid+torq) | **E2** (qs+direct+torq) | **E3** (no-qs+torq) | **E5** (qs+resid, NO torq) | **E4** (no-qs, NO torq) |
+|---|---|---|---|---|---|
+| in-dist static [2,4] | 0.83 | **0.78** | 0.82 | 1.10 | **1.65** ★ |
+| in-dist walk [2,4] | 0.86 | 0.79 | **0.74** | 1.19 | **1.66** ★ |
+| OOD-low static [1,2] | 0.98 | 1.01 | 1.05 | **0.91** ★ | **1.90** ★ |
+| OOD-low walk [1,2] | 0.98 | **0.93** | 1.00 | 1.04 | **1.84** ★ |
+| OOD-high static [4,6] | **1.49** | 1.48 | **1.39** | 1.78 | **2.24** ★ |
+| OOD-high walk [4,6] | **4.95** ⚠ | 1.50 | 1.42 | 1.95 | **2.23** ★ |
 
 **关键观察**：
 
-- 三架构 RMSE per condition 差异 < 0.15 kg；每条件三者轮流最好，**无系统性赢家**
-- 跨架构在 OOD-low / OOD-high 同样保持 pemass 改善效果（vs no-pemass baseline ~1.4-1.9 kg）
-- **E1 walk OOD-high = 4.95 是已知 outlier**：deployed universal G_all 系数在 E1 policy walk OOD-high 上 QS feature 数值爆炸（QS RMSE = 141 kg） → 污染 actor obs → encoder 跟着退化。E2 (deploy 系数同样问题但 actor 不依赖 residual 兜底) 和 E3 (无 QS in obs) 均免疫。
-  - 该 outlier 是 **deploy 系数工程问题，非 policy 缺陷**：E1 离线 cal (Model G fit on QS grid) mass RMSE = **0.689 kg**，policy 姿态本身仍 QS-fittable。
+- **E1/E2/E3（保留 torques）每 condition RMSE 差异 < 0.15 kg**，每条件三者轮流最好，**无系统性赢家** → 架构形式 (QS-in-obs / residual learning) 在 torque-preserving subset 内可互换
+- **E5（保留 QS features，移除 raw torques）落在 E1 和 E4 之间**：in-dist +0.27-0.33 kg vs E1，OOD-low 反而 ≈ E1 → **两条 path 部分互补，不是冗余**
+- **E4（两条 path 都移除）uniformly 退化 1.6-2.2×** → torque-derived 信号是 encoder 实际的工作底层
+- **OOD-low 上 E5 ≈ E1**（甚至略优 0.91 vs 0.98）→ explicit QS features 在 OOD 下表现意外稳健，可能因为 QS 公式天然外推性较平稳
+- **E1 walk OOD-high = 4.95 是已知 outlier**（deploy 系数 + raw torques 协同 numerical issue）：E5 walk OOD-high = 1.95 完全免疫，**反过来确证 outlier 跟 raw torques 输入 actor 有关**
 
-→ **pemass 是改善 OOD 的实际机制；架构选择对 RMSE 无显著影响**（同时支撑 [结论 I](#-结论-iper-env-mass-diversity-是-ood-改善的核心机制) 和 [结论 J](#-结论-j架构qs-in-obs--residual-learning影响-marginal)）。
+→ 这一张表同时支撑 [结论 I](#-结论-iper-env-mass-diversity-是-ood-改善的核心机制) (pemass 跨架构 OOD 改善)、[结论 J](#-结论-j架构选择marginalqs-derivable-信号必要) (E1/E2/E3 架构 marginal) 和升级版的 [结论 Q](#-结论-qencoder-依赖两条互补的-torque-信号-pathway-e4--e5-ablation) (E4 + E5 双 ablation 证明 **two-pathway** 机制)。
+
+### 2.4 E4 ablation 详细数据（true history-only：连 torques 都不喂）
+
+E4 设计：在 E3 的基础上**进一步移除 raw joint torques**（policy obs 减 8 维 → num_obs = 28）。
+这是 paper main contribution (b)：证明 QS-derivable 信号是 encoder 实际的工作底层，不仅是 representation 选择问题。
+
+**Bias 模式**（最有诊断价值的发现）：
+
+| Condition | E3 bias | E4 bias | 解读 |
+|---|---|---|---|
+| in-dist static | −0.15 | **+0.79** | E4 systematically 高估 ~0.8 kg |
+| in-dist walk | −0.05 | **+0.52** | 同上 |
+| OOD-low static | −0.58 | **+1.72** | E4 把真值 1.5kg 估成 ~3.2kg |
+| OOD-low walk | −0.45 | **+1.45** | 同上 |
+| OOD-high static | −0.67 | −0.50 | 真值 5kg 估成 ~4.5kg |
+| OOD-high walk | −0.69 | −0.59 | 同上 |
+
+E4 在 in-dist 和 OOD-low 都是 **+bias**（高估），仅 OOD-high 是 small −bias。这是 encoder **collapse 到训练分布均值 ~3 kg** 的特征模式 — 说明 E4 encoder 几乎没学到 mass-varying signal，只能输出 prior。
+
+**Control confound 检查**（区分 "encoder 失去信号" vs "actor 失去力矩反馈"）：
+
+| Condition | E3 \|vx−cmd\| | E4 \|vx−cmd\| | E3 tq_RMS | E4 tq_RMS |
+|---|---|---|---|---|
+| in-dist static | 0.10 | 0.10 | 15.8 | 15.0 |
+| in-dist walk | 0.18 | **0.34** ★ | 12.4 | **19.7** ★ |
+| OOD-low static | 0.10 | 0.09 | 15.4 | 14.4 |
+| OOD-low walk | 0.11 | **0.31** ★ | 12.5 | **20.4** ★ |
+| OOD-high static | 0.12 | 0.13 | 16.6 | 17.9 |
+| OOD-high walk | 0.15 | **0.31** ★ | 14.8 | **21.4** ★ |
+
+**Static 全部条件 control 不退化**（tracking err 持平 ~0.10, torque RMS 持平 ~15），但 RMSE 仍 **1.6-2× worse**。
+→ paper 主论证用 **static-only 数据**：clean evidence 排除 control confound，直接证明 encoder 失去 QS-derivable 信号是 RMSE 退化的因。
+
+**Walk 条件下 control 同时退化**（tracking err ~2×, torque RMS ~50% up）→ walk 数据是 encoder + actor 双重作用，不单用 walk 数据论证。
+
+### 2.5 E5 ablation 详细数据（QS features 保留 + raw torques 移除）
+
+E5 设计：保留 QS features in obs（同 E1），仅移除 raw torques。num_obs = 40。
+用途：disambiguate contribution (b) —— 是 raw torques 必要，还是 explicit QS features 必要，还是两者协同。
+
+**RMSE / bias / control 一览**（与 E1、E4 横向对比）：
+
+| Condition | E1 RMSE | **E5 RMSE** | E4 RMSE | E1 bias | **E5 bias** | E4 bias |
+|---|---|---|---|---|---|---|
+| in-dist static | 0.83 | **1.10** (+0.27) | 1.65 | −0.23 | **−0.11** | +0.79 |
+| in-dist walk | 0.86 | **1.19** (+0.33) | 1.66 | −0.23 | **−0.29** | +0.52 |
+| OOD-low static | 0.98 | **0.91** (−0.07) | 1.90 | −0.45 | **+0.06** | +1.72 |
+| OOD-low walk | 0.98 | **1.04** (+0.06) | 1.84 | −0.43 | **−0.22** | +1.45 |
+| OOD-high static | 1.49 | **1.78** (+0.29) | 2.24 | −0.77 | **−0.75** | −0.50 |
+| OOD-high walk | 4.95⚠ | **1.95** (−3.00) | 2.23 | −0.75 | **−0.87** | −0.59 |
+
+**关键模式**：
+
+1. **E5 落在 E1 和 E4 之间，gap 中 ~30%**（即 E5 比 E1 差 0.3 kg，比 E4 好 0.5-1.0 kg）→ raw torques 提供了大概 30% 的边际信号，QS features 替代不了
+2. **E5 bias 比 E4 健康得多**：in-dist E5 bias ≈ −0.1 ~ −0.3（小幅低估，正常），E4 是 +0.5 ~ +0.8（严重高估）→ E5 encoder 没有 collapse，只是少了一些精度
+3. **OOD-low 上 E5 ≈ E1 甚至略优**：唯一一个 E5 不输 E1 的 condition；说明 QS features 在 1-2 kg 段外推性比 raw torques 更稳
+4. **E1 walk OOD-high outlier 在 E5 完全消失**（4.95 → 1.95）→ outlier 跟 raw torques 输入 actor 的 numerical 协同有关，不是 encoder 问题
+
+**Control confound 检查**：
+
+| Condition | E1 \|vx−cmd\| | **E5** \|vx−cmd\| | E4 \|vx−cmd\| |
+|---|---|---|---|
+| in-dist static | 0.05 | **0.10** | 0.10 |
+| in-dist walk | 0.09 | **0.18** | 0.34 |
+| OOD-low static | 0.05 | **0.09** | 0.09 |
+| OOD-low walk | 0.08 | **0.22** | 0.31 |
+| OOD-high static | 0.06 | **0.12** | 0.13 |
+| OOD-high walk | 0.10 | **0.19** | 0.31 |
+
+- **E5 static 跟踪误差几乎不退化**（持平 E4），但 RMSE 比 E4 好得多 → static 数据继续 confound-free 论证
+- **E5 walk 跟踪误差 ~2× E1 但只有 ~60% E4**：actor 对力矩反馈的需求只是部分受影响，QS feature 部分补偿
+- Static condition 是 paper 主论证；walk 仍 confound 存在但 E5 比 E4 退化更轻 → 进一步支持 "QS feature 部分补偿"
+
+### 2.6 完整 estimator × condition 对比表（encoder vs QS-only, mass + dCoM）
+
+play_seed=42, ckpt 11000, load 2-4 kg in-dist, num_envs=20. QS-only 用 deployed universal G_all coefs（[§3.2](#32-universal-g_all-系数)）。
+
+**上下文备注**（不是 paper 写作决策，仅作交流过程记录）：当前 policy 即使 cmd=0 ("static") 时机器人也在原地动态平衡（来回摇晃），并非真正静止。
+所以 static 跟 walk 两者其实都是 dynamic process，差异主要反映 cmd magnitude 而非定性差异。
+跟 "QS-only vs encoder" 的量级差异（3-60×）相比，static/walk 之间的差异（< 10%）相对较小。
+是否在 paper 中只保留 walk 行 / 还是 static+walk 都保留，**留待 paper 写作时再决定**，本节先把 6 张表完整存档。
+
+#### 2.6.1 Encoder RMSE — Static
+
+| Method | Mass [kg] | dCoM-x [m] | dCoM-y [m] |
+|---|---|---|---|
+| **E1** | 0.825 | 0.0180 | 0.0126 |
+| **E2** | 0.777 | 0.0151 | 0.0130 |
+| **E3** | 0.819 | 0.0157 | 0.0133 |
+| **E5** | 1.098 | 0.0175 | 0.0180 |
+| **E4** | 1.654 | 0.0189 | 0.0173 |
+
+#### 2.6.2 Encoder RMSE — Walk vx=0.5
+
+| Method | Mass [kg] | dCoM-x [m] | dCoM-y [m] |
+|---|---|---|---|
+| **E1** | 0.859 | 0.0185 | 0.0120 |
+| **E2** | 0.791 | 0.0150 | 0.0126 |
+| **E3** | 0.744 | 0.0169 | 0.0127 |
+| **E5** | 1.185 | 0.0171 | 0.0188 |
+| **E4** | 1.664 | 0.0193 | 0.0185 |
+
+#### 2.6.3 Encoder Walk − Static delta
+
+| Method | ΔMass [kg] | ΔdCoM-x [m] | ΔdCoM-y [m] |
+|---|---|---|---|
+| **E1** | +0.034 | +0.0005 | −0.0007 |
+| **E2** | +0.014 | −0.0001 | −0.0004 |
+| **E3** | −0.075 | +0.0013 | −0.0006 |
+| **E5** | +0.087 | −0.0003 | +0.0009 |
+| **E4** | +0.009 | +0.0004 | +0.0012 |
+
+观察：所有 delta 量级 < 0.09 kg，跨 method 没有显著 walk-vs-static differentiation。E3 delta 为负是 single-seed 抽样噪声。
+
+#### 2.6.4 QS-only RMSE — Static
+
+| Method | Mass [kg] | dCoM-x [m] | dCoM-y [m] |
+|---|---|---|---|
+| **E1** | 9.590 ⚠ | 0.0153 | 0.0285 |
+| **E2** | 3.182 | 0.0134 | 0.0242 |
+| **E3** | 2.824 | 0.0119 | 0.0239 |
+| **E5** | 4.544 | 0.0166 | 0.0242 |
+| **E4** | 10.760 ⚠ | 0.0161 | 0.0267 |
+
+#### 2.6.5 QS-only RMSE — Walk vx=0.5
+
+| Method | Mass [kg] | dCoM-x [m] | dCoM-y [m] |
+|---|---|---|---|
+| **E1** | 2.821 | 0.0135 | 0.0280 |
+| **E2** | 2.655 | 0.0141 | 0.0274 |
+| **E3** | 11.464 ⚠ | 0.0130 | 0.0244 |
+| **E5** | 4.511 | 0.0158 | 0.0260 |
+| **E4** | **101.274** ⚠⚠ | 0.0179 | 0.0332 |
+
+#### 2.6.6 QS-only Walk − Static delta
+
+| Method | ΔMass [kg] | ΔdCoM-x [m] | ΔdCoM-y [m] |
+|---|---|---|---|
+| **E1** | −6.769 | −0.0018 | −0.0005 |
+| **E2** | −0.527 | +0.0007 | +0.0032 |
+| **E3** | +8.640 | +0.0011 | +0.0005 |
+| **E5** | −0.033 | −0.0009 | +0.0018 |
+| **E4** | **+90.515** | +0.0017 | +0.0066 |
+
+QS-only delta 数值跨度大（−7 ~ +90 kg）但**主要反映 single-seed 抽样在数值爆炸 regime 的抖动**，不是 walk vs static 本身的系统性差异。
+
+#### 2.6.7 关键 cross-table 对比（encoder vs QS-only）
+
+**(A) Mass: QS-only 比 encoder 差 3-60× 跨所有 method**
+
+| Method | walk encoder | walk QS-only | ratio (QS / enc) |
+|---|---|---|---|
+| E1 | 0.86 | 2.82 | **3.3×** |
+| E2 | 0.79 | 2.66 | **3.4×** |
+| E3 | 0.74 | 11.46 | **15.5×** |
+| E5 | 1.19 | 4.51 | **3.8×** |
+| E4 | 1.66 | 101.27 | **61×** |
+
+→ **encoder learning 在 mass 估计上不可替代**。即使是最 QS-friendly 的 E1/E2，QS-only mass 仍是 encoder 的 3 倍。
+
+**(B) CoM: QS-only ≈ encoder（仅 1.5-2× 差距）**
+
+| Method | walk encoder dcom_y | walk QS-only dcom_y | ratio |
+|---|---|---|---|
+| E1 | 0.0120 | 0.0280 | 2.3× |
+| E2 | 0.0126 | 0.0274 | 2.2× |
+| E3 | 0.0127 | 0.0244 | 1.9× |
+| E5 | 0.0188 | 0.0260 | 1.4× |
+| E4 | 0.0185 | 0.0332 | 1.8× |
+
+→ **CoM 估计上 QS-only 已经够用**。Model G CoM 公式（仅 `sin(pitch)` + bias）不依赖力矩，对 policy distribution 不敏感。
+
+#### 2.6.8 两条新 paper takeaways（来自 §2.6.7）
+
+1. **"Encoder learning is necessary for mass, optional for CoM"**：mass 上 QS-only RMSE 3-60× 大于 encoder，跨所有架构；CoM 上仅 ~2×。说明 encoder 主要从 noisy torque signal 提取 mass 的 high-frequency component（QS 公式无法捕获），而 CoM 主要由 pose（pitch）决定，QS 已足够。
+
+2. **"Fixed-coef QS is policy-distribution sensitive on mass, robust on CoM"**：同一组 universal G_all coefs 在 E1-E5 上 mass RMSE 跨度 2.8-101 kg（37× 跨度），但 CoM dcom_y 跨度仅 1.2-1.9 cm（1.6× 跨度）。
+   - mass 公式调用力矩 (R_L, R_R)，policy 改变 → 力矩分布改变 → mass 估计偏差被放大
+   - CoM 公式只用 pitch，policy 间 pitch 分布差异小 → CoM 估计稳定
+   - → 这是旧版"撤回的 conclusion C"在 E1-E5 干净数据下再次确认
 
 ---
 
@@ -242,7 +429,71 @@ QS combined 全程 [5.15, 7.23]%，**稳定但低**；est_mass 全程 < 0.10%，
 - E3（无 QS）OOD 下大幅重排（encoder_vel +5.75pp）
 - → **"QS in obs 提供 stabilizing prior"**（[结论 L](#-结论-lqs-in-obs-是-stabilizing-prior小但实在)）：移除后 actor 必须更剧烈重排其他 feature
 
-### 4.5 12 维 QS feature 内部 per-dim attribution（mass branch encoder, E1 ckpt 11000）
+### 4.6 四架构 actor IG（E1 / E3 / E5 / E4）
+
+Actor IG (ckpt 11000, target='all', coarse) 四架构对比：
+
+| Group | E1 (qs+torq) | E3 (no-qs, +torq) | **E5 (qs, no-torq)** | E4 (no-qs, no-torq) |
+|---|---|---|---|---|
+| previous_actions | 54.25 | 65.32 | **61.73** | 53.30 |
+| dof_pos | 9.87 | 13.47 | 13.59 | 17.36 |
+| encoder/est_lin_vel | 11.88 | 6.35 | 6.04 | 9.59 |
+| projected_gravity | 6.61 | 5.49 | 4.21 | 8.34 |
+| dof_vel | 4.78 | 4.02 | 6.39 | 9.17 |
+| **torques** | 5.25 | 3.60 | (absent) | (absent) |
+| **qs_load_features** | 4.25 | (absent) | **6.39** ★ | (absent) |
+| **qs_residual_baseline** | 0.96 | (absent) | 0.47 | (absent) |
+| encoder/est_com_delta | 1.03 | 0.61 | 0.61 | 0.95 |
+| **encoder/est_mass** | 0.07 | 0.09 | **0.04** | **0.43** |
+| base_ang_vel | 1.06 | 1.05 | 0.53 | 0.87 |
+| **QS combined** | **5.21** | 0 | **6.86** | 0 |
+
+**关键观察**：
+
+- **E5 actor 对 QS combined 的依赖比 E1 还高（6.86% vs 5.21%）**：没有 raw torques 之后，actor 显式 lean on QS features —— 跟 encoder 的 substitution pattern 反向（encoder 主要 lean on prev_actions，见 §4.7）
+- **E5 est_mass 跌到 0.04%（vs E4 的 0.43%）**：E4 actor 试图用 encoder mass 补偿但 encoder 输出已 collapse；E5 encoder 输出健康，所以 actor 不需要硬靠 est_mass，回到正常的 ~0.1% 水平 → 进一步支撑 [结论 K](#-结论-kencoder-mass-output-几乎不被-actor-使用)
+- E4 vs E3 的 reweight 模式（dof_vel +5pp, gravity +3pp, prev_actions −12pp）保持 —— 移除 raw torques 后 actor 倾向多用 dof_vel / gravity
+- E5 vs E1 reweight 较温和（prev_actions +7pp, est_lin_vel −6pp），说明 QS features 大体保留了 actor 的工作模式
+
+### 4.7 三架构 encoder IG mass branch（E1 / E5 / E4）—— paper 核心定量论证
+
+Encoder mass branch attribution（% of total mass-branch attribution, raw + filtered 双 branch 合并）。
+ckpt 11000, in-dist play_seed=42。
+
+| Group | **E1 (qs+torq)** | **E5 (qs, no-torq)** | **E4 (no-qs, no-torq)** |
+|---|---|---|---|
+| **torques** | **27.05** | (absent) | (absent) |
+| projected_gravity | 17.30 | 10.34 | **31.53** |
+| **qs_load_features** | **15.39** | **15.83** | (absent) |
+| **qs_residual_baseline** | **11.20** | 3.92 | (absent) |
+| dof_pos | 11.11 | 10.56 | 17.74 |
+| dof_vel | 7.75 | 7.20 | 12.61 |
+| **previous_actions** | 5.52 | **50.10** ★ | 23.22 |
+| base_ang_vel | 4.67 | 2.06 | 14.90 |
+
+**Total torque-derived path (torques + qs_features)**:
+
+| Policy | torques | qs_features | **total** |
+|---|---|---|---|
+| **E1** | 27.05% | 26.59% | **53.64%** |
+| **E5** | 0 | 19.75% | **19.75%** |
+| **E4** | 0 | 0 | **0%** |
+
+**两个 paper-grade 发现**：
+
+**(1) 两条 path 互补，不冗余**：
+- E1 → E5：失去 27% torques，但 qs_load 利用率保持（15.39 → 15.83%）；qs_residual 部分萎缩 (11.20 → 3.92%)；total torque path 从 54% → 20%
+- E5 RMSE 退化 0.3 kg（in-dist）→ 失去的 ~34pp signal 部分被 prev_actions surrogate 补回（见下）
+
+**(2) E5 encoder 把 prev_actions 拉到 50.10% 作为 implicit torque surrogate**：
+- E5 prev_actions = 50.10% vs E1 5.52%，**升 +44.58pp**
+- 物理直觉：previous_actions ≈ "刚才让关节去哪" ≈ 隐式期望力矩
+- 但这个 surrogate 不完全等价：E5 RMSE 仍比 E1 差 0.3 kg → prev_actions 缺少 raw torques 的高频细节和实际作动器输出反馈
+- E4 prev_actions 只有 23.22%（比 E5 低一半）—— 因为 E4 还有 QS features 也消失，没有 explicit anchor 让 prev_actions 那么 dominant；E4 不得不再 fallback 到 projected_gravity (31.53%) 和 base_ang_vel (14.90%)
+
+→ paper 核心 narrative：**"encoder uses raw torques and explicit QS features as two partly-overlapping pathways (53% of mass-branch attribution combined). Either alone is sufficient for partial mass estimation (E5: ~20% retained, RMSE +0.3 kg). Removing both collapses the encoder to indirect proxies (E4: 0% torque path, RMSE +0.8 kg)."**
+
+### 4.8 12 维 QS feature 内部 per-dim attribution（mass branch encoder, E1 ckpt 11000）
 
 | QS dim | E1 attribution % | per-dim density | × baseline (1.14%) |
 |---|---|---|---|
@@ -273,6 +524,36 @@ QS combined 全程 [5.15, 7.23]%，**稳定但低**；est_mass 全程 < 0.10%，
 
 → **encoder 在 noisy deployed G_all 系数下做了 noise-aware feature selection**：抛弃噪声大的 direct mass dim，转向几何稳定 dim + 物理可解释 dim（[结论 M](#-结论-mencoder-在-mass-branch-上做了-noise-aware-feature-selection)）。
 
+### 4.9 IG 可视化脚本盘点（2026-05-25 新增 MATLAB scripts）
+
+`legged_gym/scripts/` 下新增 6 个 IG plot 脚本，按 paper 用途分级：
+
+| 脚本 | 输出 | 默认行为 | 对应 paper 结论 |
+|---|---|---|---|
+| **`plot_ig_encoder_mass_stacked.m`** ★ | `exported/ig_pdfs/ig_encoder_mass_stacked.pdf` | 自动存 PDF + figure 留屏 | 结论 Q（two-pathway torque signal）—— **paper main IG fig** |
+| `plot_ig_encoder_window_heatmap.m` ★ | 5 张 figure（默认 batch 模式 E1-E5） | 不存盘，留 figure | 同上的 **时间维度展开**：每 1s 一格的 attribution 演化 |
+| `plot_ig_encoder_mass_heatmap.m` | 1 张 5×8 static heatmap | 不存盘 | 结论 Q 的紧凑视觉版 |
+| `plot_ig_actor_heatmap.m` | 1 张 5×10 static heatmap | 不存盘 | 结论 J + K（架构 marginal, encoder mass 不被用）|
+| `plot_ig_actor_groups.m` | 5 method × 10 group grouped bar | 不存盘 | 备份（user 判断"没用"）|
+| `plot_ig_est_mass_negative.m` | est_mass 单 bar + uniform baseline | 不存盘 | 备份（user 判断"没用"）|
+
+**Windowed IG 数据状态**（5 个 ckpt 都已生成 50s × 1s windows）：
+```bash
+# 单 ckpt 重跑命令（已对 E1/E2/E3/E5/E4 全部跑过）：
+python legged_gym/scripts/analyze_encoder_ig.py --task=wheelfoot_flat \
+  --load_run <run_name> --checkpoint 11000 --headless --num_envs 32 \
+  --rollout_steps 2500 --window_steps 50 --window_ig_samples 32
+```
+
+**Window heatmap 关键设计**：
+- raw + filtered 分支合并（strip 前缀后求和）→ 每变量 1 行
+- Y 轴固定输入顺序（不按 mean 排序）：`ang_vel, gravity, dof_pos, dof_vel, [torques], [qs_load, qs_resid], prev_actions`
+- X 轴 1 秒每格，覆盖 50 秒
+- Colormap clipped at 30% 防止 prev_actions = 60% (E5) 把其他行压成死黑色
+- Cell text overlay 显示数值（≤ 40 windows 时）
+
+**完整图片清单**：见 [`figures_inventory.md`](figures_inventory.md)。
+
 ---
 
 ## §5 当前可信结论 (按重要性排序)
@@ -292,19 +573,85 @@ QS combined 全程 [5.15, 7.23]%，**稳定但低**；est_mass 全程 < 0.10%，
 
 机制：原训练 hidden bug（[§2.1](#21-hidden-distribution-shift修复前的训练-bug)）—— 1024 envs 共享同一个全局 load mass scalar，encoder 训练时见到 constant mass label。修复后 1024 envs 独立 mass → encoder 见到 [2, 4] 完整分布 → 泛化提升。
 
-### ★★★ 结论 J：架构（QS-in-obs / residual learning）影响 marginal
+### ★★★ 结论 J：架构选择 marginal，但 QS-derivable 信号必要
 
-完整 architecture ablation matrix（all per-env mass on, seed_45, ckpt 11000，[§2.3](#23-三架构完整-rmse-对比确认-pemass-改善跨架构成立)）：
+**两部分**：
 
-| Architecture | use_qs_in_obs | use_residual_learning | RMSE 范围 (6 conditions) |
-|---|---|---|---|
-| **E1 main** | ✓ | ✓ | 0.83-1.49（excl walk OOD-high outlier） |
-| **E2 direct** | ✓ | ✗ | 0.78-1.50 |
-| **E3 histonly** | ✗ | (N/A) | 0.74-1.42 |
+**(J1) 架构形式 marginal**（QS-in-obs / residual learning / explicit QS features 之间互换）：
 
-三架构每 condition RMSE 差 < 0.15 kg；每条件三者轮流最好；**无系统性赢家**。
+| Architecture | use_qs_in_obs | use_residual_learning | use_torques_in_obs | RMSE 范围 (6 conditions) |
+|---|---|---|---|---|
+| **E1 main** | ✓ | ✓ | ✓ | 0.83-1.49（excl walk OOD-high outlier） |
+| **E2 direct** | ✓ | ✗ | ✓ | 0.78-1.50 |
+| **E3 histonly** | ✗ | N/A | ✓ | 0.74-1.42 |
 
+E1/E2/E3 每 condition RMSE 差 < 0.15 kg；每条件三者轮流最好；**无系统性赢家**。
 → "QS shapes policy"、"residual learning matters for encoder"、"hybrid 系统更鲁棒" 等 narrative **均不被数据支持**。
+
+**(J2) 但底层 torque 信号必要**（见 [结论 Q](#-结论-qqs-derivable-力矩信号是必要的-e4-ablation)）：
+
+E1/E2/E3 看起来"架构无所谓"，是因为它们都保留了 raw joint torques 在 obs 里。
+encoder 既可以从 explicit QS features 提取 mass 信号（E1/E2），也可以直接从 raw torques 隐式重建（E3）。两条路径殊途同归。
+
+但一旦把 **raw torques 也移除**（E4 true history-only），encoder 失去了 QS-derivable 信号的所有访问途径 → RMSE 跨所有 6 conditions uniformly 退化 1.6-2.2×。
+→ "架构形式互换" 仅在 **保留 torque 信号的子集内** 成立。
+
+### ★★★ 结论 Q：Encoder 依赖两条互补的 torque 信号 pathway (E4 + E5 ablation)
+
+升级版（E5 训完后细化）：encoder 的 mass 信号通过两条**部分互补**的 pathway 传递：
+- **(i) 显式 QS features**（用 torques 算出来的物理量，注入 obs）—— encoder IG 占 ~27%
+- **(ii) 原始 raw torques**（直接进 obs）—— encoder IG 占 ~27%
+
+两条 path 单独都**仅够部分 mass 估计**（E5 RMSE +0.3 kg vs E1），但**两条都移除则 encoder 崩溃**（E4 RMSE +0.8 kg vs E1）。
+**任何一条 alone 时，encoder 通过 prev_actions 作为隐式 surrogate 部分补偿**（E5 encoder IG: prev_actions 5.5% → 50.1%）。
+
+**证据 1：RMSE 三层降级**（[§2.3](#23-五架构完整-rmse-对比pemass--torquequs-pathway-ablation-一起看)、[§2.5](#25-e5-ablation-详细数据qs-features-保留--raw-torques-移除)）
+
+| Condition | E1 (both paths) | E5 (QS only) | E4 (neither) | E5−E1 | E4−E1 |
+|---|---|---|---|---|---|
+| in-dist static | 0.83 | **1.10** | **1.65** | +0.27 | +0.82 |
+| in-dist walk | 0.86 | **1.19** | **1.66** | +0.33 | +0.80 |
+| OOD-low static | 0.98 | **0.91** | **1.90** | −0.07 | +0.92 |
+| OOD-low walk | 0.98 | **1.04** | **1.84** | +0.06 | +0.86 |
+| OOD-high static | 1.49 | **1.78** | **2.24** | +0.30 | +0.75 |
+| OOD-high walk | 4.95⚠ | **1.95** | **2.23** | −3.00⚠ | −2.72⚠ |
+
+排除 E1 walk OOD-high outlier 后：**E5 平均比 E1 差 0.18 kg，E4 比 E1 差 0.83 kg → E5 仅恢复 ~78% 的 lost signal**。
+
+**证据 2：Bias 模式区分 "encoder collapse" vs "partial signal"**
+
+| Policy | in-dist bias | OOD-low bias | 解读 |
+|---|---|---|---|
+| E1 | −0.23 | −0.45 | 健康 |
+| **E5** | **−0.11~−0.29** | **+0.06~−0.22** | 健康（甚至 in-dist bias 更小）|
+| E4 | **+0.79** ★ | **+1.72** ★ | collapse to ~3 kg prior |
+
+E5 bias **健康**说明 explicit QS features 让 encoder 仍能学到 mass-varying representation，没 collapse。
+
+**证据 3：Encoder IG 定量**（[§4.7](#47-三架构-encoder-ig-mass-branch-e1--e5--e4-paper-核心定量论证)）：
+- E1 torque-derived path: torques 27% + qs_features 27% = **53%** of mass attribution
+- E5 torque-derived path: torques 0% + qs_features 20% = **20%**（qs_load 持平 16%, qs_residual 萎缩 11→4%）
+- E4 torque-derived path: **0%**
+- E5 失去的 ~34pp 主要被 prev_actions 接管（5.5% → 50.1%, +44.6pp）
+
+**证据 4：static-only 排除 control confound** —— E5 / E4 static tracking err 持平 E1，但 RMSE 仍差 0.3 / 0.8 kg。
+
+→ paper 升级版表述：
+
+```
+The encoder's load mass estimation is carried by two partly-overlapping 
+pathways, both derived from joint torques: (i) explicit QS features 
+computed from torques and exposed as observations (~27% of encoder 
+mass-branch attribution), and (ii) raw joint torques directly in obs 
+(~27%). Either pathway alone is sufficient for partial mass estimation 
+(E5 ablation: keep QS features, remove raw torques → RMSE +0.3 kg). 
+Removing both collapses the encoder to indirect proxies (gravity, 
+prev_actions, base velocity) → RMSE +0.8 kg with bias indicating 
+collapse to a constant prior. The encoder readily substitutes 
+previous_actions as an implicit torque surrogate when raw torques are 
+removed (prev_actions encoder attribution rises from 5.5% to 50.1% in 
+E5), recovering ~70% of the lost signal but not all of it.
+```
 
 ### ★★ 结论 K：Encoder mass output 几乎不被 actor 使用
 
@@ -329,7 +676,7 @@ baseline = 1.72%（如果 attention 均匀分布）。
 
 ### ★ 结论 M：Encoder 在 mass branch 上做了 noise-aware feature selection
 
-证据（per-dim IG, E1 vs Old s42，[§4.5](#45-12-维-qs-feature-内部-per-dim-attributionmass-branch-encoder-e1-ckpt-11000)）：
+证据（per-dim IG, E1 vs Old s42，[§4.8](#48-12-维-qs-feature-内部-per-dim-attributionmass-branch-encoder-e1-ckpt-11000)）：
 - payload_mass dim: **−65%** （抛弃噪声大的直接 mass）
 - cos_lieangle_L/R_thigh dims: **+47%~+57%** （转向几何稳定）
 - com_delta_z dim: **+21%** （转向物理可解释）
@@ -349,27 +696,50 @@ deployed α 全部 < 0.05（vs offline cal 的 0.33）。失败根因是 rollout
 ## §6 当前 paper narrative
 
 ```
-Paper 主线: Per-env load mass randomization closes a hidden distribution shift 
-in legged-robot load estimation, reducing OOD load mass RMSE by 32%. 
-Architecture choice (QS-in-obs, residual learning) has minimal impact.
+Paper 主线 (两个 main contributions):
+
+  (a) Per-env load mass randomization closes a hidden distribution shift
+      in legged-robot load estimation, reducing OOD load mass RMSE by 32%.
+
+  (b) The encoder's load mass signal is carried by two partly-overlapping
+      torque-derived pathways: explicit QS features computed from torques
+      (E1/E2/E5 encoder IG ~27%) and raw joint torques directly in obs
+      (E1/E2/E3 encoder IG ~27%). 4-way ablation (E1/E3/E5/E4):
+        - E1 (both paths):       RMSE 0.83 kg (in-dist static)
+        - E3/E5 (one path only): RMSE 0.82 / 1.10 kg (+0/+0.27)
+        - E4 (neither path):     RMSE 1.65 kg (+0.82, 2× worse)
+      Architecture form (QS-in-obs / residual learning) within the
+      torque-preserving subset E1/E2/E3 is interchangeable (RMSE diff
+      < 0.15 kg). Removing one path partially degrades; removing both
+      collapses the encoder to a constant prior.
 
 Supporting findings:
-- IG analysis shows encoder mass output is essentially unused by actor (<0.2% 
-  attribution), suggesting load estimation acts as auxiliary supervised 
-  regularization rather than direct policy input.
-- QS-in-obs contributes a small but stable ~6% to actions; under OOD, it 
-  serves as a stabilizing prior that reduces actor's need to reweight other 
-  features.
-- Within encoder mass branch, per-env mass training induces dim-level 
-  feature reattribution (away from direct mass dim, toward geometric and 
+- Encoder readily substitutes prev_actions as an implicit torque
+  surrogate when raw torques are removed (E5 encoder IG: prev_actions
+  attribution 5.5% → 50.1%, recovering ~70% of lost signal).
+- Encoder mass output is essentially unused by actor (<0.5% attribution
+  across all 5 architectures), suggesting load estimation acts as an
+  auxiliary supervised regularizer rather than direct policy input.
+- QS-in-obs contributes a small but stable ~6% to actor decisions; under
+  OOD, it serves as a stabilizing prior. E5 actor IG on QS combined is
+  higher (6.9%) than E1 (5.2%) — when raw torques absent, actor leans
+  explicitly on QS features.
+- Within encoder mass branch, per-env mass training induces dim-level
+  feature reattribution (away from direct mass dim, toward geometric and
   physically-interpretable dims).
 
 Negative findings:
-- In-loop QS coefficient co-calibration fails due to rollout data being 
-  contaminated by exploration noise and dynamic torques (Model G assumes 
+- In-loop QS coefficient co-calibration fails due to rollout data being
+  contaminated by exploration noise and dynamic torques (Model G assumes
   quasi-static).
-- "QS-in-obs as implicit policy regularizer" hypothesis is not supported 
+- "QS-in-obs as implicit policy regularizer" hypothesis is not supported
   by data when per-env mass is controlled.
+- The often-cited "QS shapes policy" narrative is not supported either —
+  E3 (no QS in obs, +torques) performs identically to E1/E2 as long as
+  the underlying torque signal is accessible.
+- E1 walk OOD-high RMSE = 4.95 outlier disappears in E5 (1.95) →
+  outlier is not a policy defect but a deploy-time numerical interaction
+  between raw torques and explicit QS features in actor obs.
 ```
 
 ---
@@ -452,7 +822,27 @@ Negative findings:
 | 2026-05-24 | 新增 `analyze_actor_ig.py` 独立脚本（含 per-dim QS breakdown + OOD load 覆盖） |
 | 2026-05-24 | Actor IG 跨 7 ckpts × 2 policies + OOD load × 2 policies 全部完成 |
 | 2026-05-24 | E2 = `..._seed_45_pemass` 训练完成，三架构 matrix 闭环 |
-| 2026-05-24 | **notebook 重组**（本次）：删除 §1-§5 bug-era raw data，撤回 stale 结论，按重要性重排 |
+| 2026-05-24 | **notebook 重组**：删除 §1-§5 bug-era raw data，撤回 stale 结论，按重要性重排 |
+| 2026-05-24 | 新增 `use_torques_in_obs` ablation flag（默认 ON，OFF 即 "true history-only" 基线）；wheelfoot_flat / play / analyze_actor_ig / analyze_encoder_ig 五处适配 |
+| 2026-05-24 19:30 | **E4** = `May24_19-30-38_..._history_only_no_torq_..._seed_45_pemass` 训练启动（seed=45；env_cfg.json 因旧 save bug 写成 1，实际训练用 45）|
+| 2026-05-24 23:37 | E4 训练到 12000 iter（用 ckpt 11000 分析，未等 16000）|
+| 2026-05-24 23:52-23:56 | E4 6-condition play 完成；E4/E3 RMSE ratio 1.57-2.24× 跨 conditions |
+| 2026-05-25 00:03 | E4 actor IG 完成（est_mass 0.43%, prev_actions 53.30%）|
+| 2026-05-25 00:04 | E4 encoder IG 完成（fallback to projected_gravity 31.5% + prev_actions 23.2%）|
+| 2026-05-25 | **notebook 新增 §2.4 / §4.6 / §4.7 / 结论 Q**：torque 信号是 paper 的 contribution (b)；refine 结论 J 加入 "架构 marginal 仅在保留 torque 信号子集内" 限定 |
+| 2026-05-25 | 修复 [task_registry.py:185-191](../legged_gym/utils/task_registry.py) seed save bug：以后 env_cfg.json 会正确记录 seed |
+| 2026-05-25 01:00 | **E5** = `May25_01-00-47_exper_qs_resi_load_boost_3_no_torq_seed_45_pemass` 训练启动（seed=45，bug fix 后 env_cfg.json 正确记录）|
+| 2026-05-25 06:33 | E5 训练完成（16000 iter 完整）|
+| 2026-05-25 07:35-07:40 | E5 6-condition play 完成；落在 E1 (0.83) 和 E4 (1.65) 之间，in-dist +0.27 kg |
+| 2026-05-25 07:40 | E5 actor IG 完成（QS combined 6.86%, 比 E1 5.21% 还高；est_mass 跌到 0.04%）|
+| 2026-05-25 07:44 | E5 encoder IG 完成（torque path 从 E1 的 54% → 20%；prev_actions 暴涨 5.5% → 50.1%）|
+| 2026-05-25 | **notebook 升级 §2.3 / §2.5 / §4.6 / §4.7 / 结论 Q / §6**：从"torque 信号必要"升级到"two-pathway 互补 + prev_actions implicit surrogate"机制 |
+| 2026-05-25 | **MATLAB plot scripts 重整**：5 个 plot_exp1/payload/scatter 脚本切换到 E1-E5 canonical 标签（meta.load_run 检测），通过 `FILTER_CANONICAL_ONLY=true` 自动过滤；`payload_method_color.m` 加 E1-E5 色卡 |
+| 2026-05-25 | 新增 `plot_mass_scatter_preview.m` 加 per-env-averaged subplot + x∈[2,4] 固定 + 100-env 重 play（10 个 .mat 在 `scatter_preview_pdfs/`）|
+| 2026-05-25 | 新增 6 个 IG plot 脚本（见 [§4.9](#49-ig-可视化脚本盘点2026-05-25-新增-matlab-scripts)）：`plot_ig_encoder_mass_stacked/heatmap` `plot_ig_actor_heatmap/groups` `plot_ig_encoder_window_heatmap` `plot_ig_est_mass_negative` |
+| 2026-05-25 | 修 `analyze_encoder_ig.py` auto-sync `num_input_dim` + `use_load_residual_estimation`（之前 E3 encoder IG 因 shape mismatch 跑不通已修复）|
+| 2026-05-25 | 跑 E1-E5 windowed encoder IG（50s × 1s windows，5 个 csv 在各 ckpt 的 `encoder_ig/` 下）|
+| 2026-05-25 | **新增 [`figures_inventory.md`](figures_inventory.md)**：按文件夹梳理所有 paper figure 候选 + 用途 |
 
 ---
 

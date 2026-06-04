@@ -99,11 +99,16 @@ def get_args():
 
 # ---- Group structure ----
 
-def build_actor_input_groups(num_obs, num_actions, num_commands, encoder_dim=7):
+def build_actor_input_groups(num_obs, num_actions, num_commands,
+                             use_qs=True, use_torques=True, encoder_dim=7):
     """Per-dim groups for actor input = cat([encoder_out, obs, commands]).
 
     Returns: list of (label, group_name, start, end) where indices are within
     one actor input vector (NOT including any history dim).
+
+    Obs 顺序需与 wheelfoot_flat.compute_group_observations() 严格一致：
+        ang_vel(3) | gravity(3) | dof_pos(6) | dof_vel(8) |
+        [torques(8) if use_torques] | [qs_load(8) + qs_residual(4) if use_qs] | prev_actions(num_actions)
     """
     groups = []
     offset = 0
@@ -122,24 +127,23 @@ def build_actor_input_groups(num_obs, num_actions, num_commands, encoder_dim=7):
     add("est_mass", 1)             # 3
     add("est_com_delta", 3)        # 4-6
 
-    # Observations: 48 (with qs) or 36 (without qs)
-    filtered_size = num_obs - num_actions  # 40 or 28
-    # Pre-action obs slice (always 28 dims for the non-QS part, plus optionally 12 QS dims)
-    add("base_ang_vel", 3)         # obs[0:3]
-    add("projected_gravity", 3)    # obs[3:6]
-    add("dof_pos", 6)              # obs[6:12]
-    add("dof_vel", 8)              # obs[12:20]
-    add("torques", 8)              # obs[20:28]
-    if num_obs >= 48:
-        add("qs_load_features", 8)         # obs[28:36] — split per-dim below
-        add("qs_residual_baseline", 4)     # obs[36:40]
-    add("previous_actions", num_actions)   # obs[28:36] or obs[40:48]
+    add("base_ang_vel", 3)
+    add("projected_gravity", 3)
+    add("dof_pos", 6)
+    add("dof_vel", 8)
+    if use_torques:
+        add("torques", 8)
+    if use_qs:
+        add("qs_load_features", 8)
+        add("qs_residual_baseline", 4)
+    add("previous_actions", num_actions)
     # Commands
     add("cmd", num_commands)
     return groups
 
 
-def build_per_dim_groups(num_obs, num_actions, num_commands, encoder_dim=7):
+def build_per_dim_groups(num_obs, num_actions, num_commands,
+                         use_qs=True, use_torques=True, encoder_dim=7):
     """Same as build_actor_input_groups but qs_load_features + qs_residual_baseline
     + encoder_out split per single dim. Used for fine-grained breakdown.
     """
@@ -163,9 +167,9 @@ def build_per_dim_groups(num_obs, num_actions, num_commands, encoder_dim=7):
     add("obs", "projected_gravity", 3)
     add("obs", "dof_pos", 6)
     add("obs", "dof_vel", 8)
-    add("obs", "torques", 8)
-    if num_obs >= 48:
-        # qs_load_features per-dim
+    if use_torques:
+        add("obs", "torques", 8)
+    if use_qs:
         qs_names = ["payload_mass", "load_x", "load_y", "payload_present",
                     "sin_lieangle_L_thigh", "cos_lieangle_L_thigh",
                     "sin_lieangle_R_thigh", "cos_lieangle_R_thigh"]
@@ -338,13 +342,19 @@ def main():
                 sv = _se.get("env", {}).get(k)
                 if sv is not None and getattr(env_cfg.env, k, None) != sv:
                     setattr(env_cfg.env, k, int(sv))
-            for k in ("use_qs_in_obs", "use_residual_learning"):
+            # 字段缺失（older runs）：use_torques_in_obs 的默认是 True（flag 2026-05-24 才加）。
+            _flag_defaults_when_missing = {"use_torques_in_obs": True}
+            for k in ("use_qs_in_obs", "use_residual_learning", "use_torques_in_obs"):
                 sv = _se.get("env", {}).get(k)
-                if sv is not None and getattr(env_cfg.env, k, None) != bool(sv):
-                    setattr(env_cfg.env, k, bool(sv))
+                if sv is not None:
+                    if getattr(env_cfg.env, k, None) != bool(sv):
+                        setattr(env_cfg.env, k, bool(sv))
+                elif k in _flag_defaults_when_missing:
+                    setattr(env_cfg.env, k, _flag_defaults_when_missing[k])
             print(f"[actor IG] auto-aligned env_cfg from saved: "
                   f"n_obs={env_cfg.env.num_observations}, "
-                  f"use_qs_in_obs={env_cfg.env.use_qs_in_obs}")
+                  f"use_qs_in_obs={env_cfg.env.use_qs_in_obs}, "
+                  f"use_torques_in_obs={getattr(env_cfg.env, 'use_torques_in_obs', True)}")
         except Exception as e:
             print(f"[actor IG] warn: could not align cfg from saved: {e}")
 
@@ -401,9 +411,15 @@ def main():
         for i in range(num_actions):
             target_specs.append((f"act_{i}", [i]))
 
-    # Build group structures
-    groups_coarse = build_actor_input_groups(num_obs, num_actions, num_commands, encoder_dim)
-    groups_fine = build_per_dim_groups(num_obs, num_actions, num_commands, encoder_dim)
+    # Build group structures (must match env.compute_group_observations layout)
+    use_qs_flag = bool(getattr(env.cfg.env, "use_qs_in_obs", True))
+    use_torq_flag = bool(getattr(env.cfg.env, "use_torques_in_obs", True))
+    groups_coarse = build_actor_input_groups(num_obs, num_actions, num_commands,
+                                             use_qs=use_qs_flag, use_torques=use_torq_flag,
+                                             encoder_dim=encoder_dim)
+    groups_fine = build_per_dim_groups(num_obs, num_actions, num_commands,
+                                       use_qs=use_qs_flag, use_torques=use_torq_flag,
+                                       encoder_dim=encoder_dim)
 
     # Run IG for each target
     output_dir = args.output_dir

@@ -130,8 +130,10 @@ class BaseTask:
         
         # self.num_actors_per_env = 2 # Robot + Load
         self.load_offset_range = {
-            "x": (-0.17, 0.21),  # x 方向的偏移范围  稍微有些偏移，因为机器人前进时会有一个向前的速度
-            "y": (-0.19, 0.19),  # y 方向的偏移范围
+            # 实验A（外力 vs 重物辨识）：负载置于机体正中央，使“加质量”与“加力”作用点一致，比较才干净。
+            # 注意：若日后要恢复训练时的质心随机化，把 x/y 改回 (-0.17,0.21)/(-0.19,0.19)。
+            "x": (0.0, 0.0),     # x 方向的偏移范围（居中）
+            "y": (0.0, 0.0),     # y 方向的偏移范围（居中）
             "z": (0.10, 0.10),   # z 方向的偏移范围 平板在机体上方0.1m处 平板长宽0.5m，高度0.005米
         }   #000
         
@@ -1381,6 +1383,46 @@ class BaseTask:
             # gymtorch.unwrap_tensor(self.rigid_body_external_torques),
             gymapi.ENV_SPACE,
         )
+
+    def _apply_sustained_ext_force(self):
+        """对 base 按与负载相同的固定时序施加外力（实验A：外力 vs 重物辨识）。
+
+        力在 ENV_SPACE 下给定（z 轴与世界 z 对齐），竖直向下 = ext_force_vec=[0,0,-F]，
+        与机器人姿态无关。施加时序复用负载的 domain_rand 参数
+        （load_start_time_s / load_duration_range_s / load_interval_range_s），
+        即 start_s 起、每周期 interval_s 内前 dur_s 施力，其余置零——这样“加力的 play”
+        与“加负载的 play”阶跃时间点对齐，可直接叠图比较。若 dur/interval<=0 则退化为
+        start_s 之后全程恒定力。
+        必须在 decimation 子步循环内、simulate() 之前调用，否则力只在 1/decimation 的
+        时间内生效（被悄悄缩小）。默认 enable=False，对训练无影响。
+        注意：与 _push_robots 互斥；施加外力时请关闭 push_robots（play 阶段默认即关闭）。
+        """
+        if not self.ext_force_enable:
+            return
+        dr = self.cfg.domain_rand
+        start_s = float(getattr(dr, "load_start_time_s", 0.0))
+        dur_rng = getattr(dr, "load_duration_range_s", None)
+        int_rng = getattr(dr, "load_interval_range_s", None)
+        dur_s = float(dur_rng[0]) if dur_rng is not None else float(getattr(dr, "load_duration_s", 0.0))
+        interval_s = float(int_rng[0]) if int_rng is not None else float(getattr(dr, "load_interval_s", 0.0))
+
+        t = self.episode_length_buf.float() * self.dt  # [num_envs]
+        if interval_s > 0.0 and dur_s > 0.0:
+            phase = torch.remainder(t - start_s, interval_s)
+            active = (t >= start_s) & (phase < dur_s)
+        else:
+            active = (t >= start_s)  # 回退：start_s 之后全程恒定
+        mask = active.float().unsqueeze(-1)  # [num_envs,1]
+
+        self.rigid_body_external_forces[:] = 0
+        self.rigid_body_external_forces[:, self.ext_force_body_idx, 0:3] = self.ext_force_vec * mask
+        self.gym.apply_rigid_body_force_tensors(
+            self.sim,
+            gymtorch.unwrap_tensor(self.rigid_body_external_forces.view(-1, 3)),
+            gymtorch.unwrap_tensor(self.rigid_body_external_torques.view(-1, 3)),
+            gymapi.ENV_SPACE,
+        )
+
     def _compute_mass_com(self, env_ids: torch.Tensor = None, load_on_body_mask: torch.Tensor = None):
         """Update effective base mass/COM when a load is present on the robot."""
         if env_ids is None:
@@ -2109,6 +2151,12 @@ class BaseTask:
         self.rigid_body_external_torques = torch.zeros(
             (self.num_envs, self.num_bodies_total, 3), device=self.device, requires_grad=False
         )
+        # --- 持续外力（play 阶段“外力 vs 重物辨识”实验，默认关闭）---
+        # ext_force_vec 为 ENV_SPACE 下的力 [N]，z 轴与世界 z 对齐：竖直向下 = [0,0,-F]，与机器人姿态无关。
+        # 由 play.py 在建环境后设置；训练时保持 enable=False，对训练无任何影响。
+        self.ext_force_enable = False
+        self.ext_force_vec = torch.zeros(3, device=self.device, requires_grad=False)
+        self.ext_force_body_idx = 0  # 0 = base；作用在腿上的力（改 body_idx）留待后续
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         self.base_height = torch.zeros_like(self.root_states[self.actor_indices, 2])
         if self.cfg.terrain.measure_heights or self.cfg.terrain.critic_measure_heights:

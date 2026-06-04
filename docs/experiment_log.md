@@ -13,13 +13,18 @@
 
 | 简称 | run_name | 配置 |
 |---|---|---|
-| **E1 main** | `exper_qs_resi_load_boost_3_seed_45_pemass` | QS-in-obs + residual + pemass + seed=45 |
-| **E2 direct** | `exper_qs_noresi_load_boost_3_seed_45_pemass` | QS-in-obs + 无 residual + pemass + seed=45 |
-| **E3 histonly** | `exper_history_only_load_boost_3_seed_45_pemass` | history only + pemass + seed=45 |
+| **E1 main** | `exper_qs_resi_load_boost_3_seed_45_pemass` | QS-in-obs + residual + torques + pemass + seed=45 |
+| **E2 direct** | `exper_qs_noresi_load_boost_3_seed_45_pemass` | QS-in-obs + no-residual + torques + pemass + seed=45 |
+| **E3 histonly** | `exper_history_only_load_boost_3_seed_45_pemass` | history only + torques + pemass + seed=45 |
+| **E4 true_hist** | `May24_19-30-38_exper_history_only_no_torq_load_boost_3_seed_45_pemass` | history only **no-torques** + pemass + seed=45 |
+| **E5 qs_only_path** | `May25_01-00-47_exper_qs_resi_load_boost_3_no_torq_seed_45_pemass` | QS + residual, **no raw torques** + pemass + seed=45 |
 
-所有当前 paper 数据都来自 E1/E2/E3 (ckpt 11000)。其余 ckpt（no-pemass baselines、co-cal 试错版本）仅作历史参照——见 notebook 附录 A/B。
+所有当前 paper 数据都来自 E1/E2/E3/E4/E5 (ckpt 11000)。其余 ckpt（no-pemass baselines、co-cal 试错版本）仅作历史参照——见 notebook 附录 A/B。
 
 → 数字、结论、IG 表全在 [experiment_notebook.md §2–§5](experiment_notebook.md#tldr-paper-最核心-findings)。
+
+**所有 5 个 ckpt 实际训练时 seed=45**（由 `make_env` 里的 `set_seed(env_cfg.seed=45)` 应用）。
+注：E1-E4 的 `env_cfg.json` 因为 [task_registry.py 旧 save bug](../legged_gym/utils/task_registry.py) 错误地写了 1；实际训练的 numpy/torch 种子是 45（train_cfg.json 里的 seed=45 才是真值）。该 bug 已在 2026-05-25 修复，**E5 的 env_cfg.json 正确记录 seed=45**（验证 bug fix 成功）。
 
 ---
 
@@ -40,19 +45,34 @@
 
 ## 实验 1：负载估计准确性
 
-### 1.1 当前 paper 主轴 (E1 / E2 / E3, pemass on, ckpt 11000)
+### 1.1 当前 paper 主轴 (E1 / E2 / E3 / E4 / E5, pemass on, ckpt 11000)
 
-3 架构 in-dist + OOD-low + OOD-high 完整 RMSE / IG 数据见
-[notebook §2.3 三架构完整 RMSE 对比](experiment_notebook.md#23-三架构完整-rmse-对比确认-pemass-改善跨架构成立) 和
-[§4 actor IG 分析](experiment_notebook.md#4-actor-integrated-gradients-分析)。
+5 架构 in-dist + OOD-low + OOD-high 完整 RMSE / IG 数据见
+[notebook §2.3 五架构完整 RMSE 对比](experiment_notebook.md#23-五架构完整-rmse-对比pemass--torquequs-pathway-ablation-一起看)、
+[§2.4 E4 详细](experiment_notebook.md#24-e4-ablation-详细数据true-history-only连-torques-都不喂)、
+[§2.5 E5 详细](experiment_notebook.md#25-e5-ablation-详细数据qs-features-保留--raw-torques-移除) 和
+[§4 actor / encoder IG 分析](experiment_notebook.md#4-actor-integrated-gradients-分析)。
 
-| 训练配置 | use_qs_in_obs | use_residual | per-env mass | run_name |
-|---|---|---|---|---|
-| **E1 main** | True | True | True | exper_qs_resi_load_boost_3_seed_45_pemass |
-| **E2 direct** | True | False | True | exper_qs_noresi_load_boost_3_seed_45_pemass |
-| **E3 histonly** | False | N/A | True | exper_history_only_load_boost_3_seed_45_pemass |
+| 训练配置 | use_qs_in_obs | use_residual | use_torques_in_obs | per-env mass | run_name |
+|---|---|---|---|---|---|
+| **E1 main** | True | True | True | True | exper_qs_resi_load_boost_3_seed_45_pemass |
+| **E2 direct** | True | False | True | True | exper_qs_noresi_load_boost_3_seed_45_pemass |
+| **E3 histonly** | False | N/A | True | True | exper_history_only_load_boost_3_seed_45_pemass |
+| **E4 true_hist** | False | N/A | **False** | True | May24_19-30-38_exper_history_only_no_torq_load_boost_3_seed_45_pemass |
+| **E5 qs_only_path** | True | True | **False** | True | May25_01-00-47_exper_qs_resi_load_boost_3_no_torq_seed_45_pemass |
 
-→ 主结论 [结论 I-N](experiment_notebook.md#5-当前可信结论-按重要性排序)。本文件不重复贴。
+→ 主结论 [结论 I-N + Q](experiment_notebook.md#5-当前可信结论-按重要性排序)。本文件不重复贴。
+
+**E4/E5 简表速记**（详见 notebook §2.3-2.5）：
+
+| Condition | E1 | E5 (no torq) | E4 (no qs, no torq) | E5 vs E1 | E4 vs E1 |
+|---|---|---|---|---|---|
+| in-dist static | 0.83 | 1.10 | 1.65 | +0.27 | +0.82 |
+| in-dist walk | 0.86 | 1.19 | 1.66 | +0.33 | +0.80 |
+| OOD-low static | 0.98 | 0.91 | 1.90 | −0.07 | +0.92 |
+| OOD-high static | 1.49 | 1.78 | 2.24 | +0.30 | +0.75 |
+
+E5 落在 E1 和 E4 之间（gap 中 ~30%）→ **two-pathway 互补**：移除 raw torques 但保留 QS features，encoder 通过 prev_actions 作为 implicit surrogate 部分补偿（IG 5.5% → 50.1%），仅退化 ~0.3 kg；两条都移除则 collapse to prior，退化 ~0.8 kg。
 
 ### 1.2 No-pemass baseline ckpts（仅对照用）
 
@@ -78,7 +98,27 @@
 Model G (7 params)，universal coefs 在 [`wheelfoot_flat.py:368-382`](../legged_gym/envs/wheelfoot_flat/wheelfoot_flat.py#L368-L382)。
 完整对比 / 系数表见 [notebook §3](experiment_notebook.md#3-model-g-qs-公式部署--universal-系数)。
 
-### 1.5 raw data log
+### 1.5 Figures 清单 + paper 候选
+
+所有 PDF / PNG 路径、来源脚本、用途详见 **[`figures_inventory.md`](figures_inventory.md)**。
+
+5 个 paper-grade 文件夹（都在 `logs/wheelfoot_flat/WF_TRON1A/exported/` 下）：
+
+| 文件夹 | 数量 | 用途 |
+|---|---|---|
+| 顶层 `Figure_1-9_*.pdf` | 9 | 你手存的 paper 候选 |
+| `ig_pdfs/` | 3 | IG 分析，主图 `ig_encoder_mass_stacked.pdf` |
+| `exp1_pdfs/` | 2 | RMSE / bias bar 图（walk-only）|
+| `scatter_preview_pdfs/` | 10 | encoder mass 散点（100 envs, per-timestep + per-env-avg）|
+| `paper_figures_payload/` | 44 | 旧版自动产出，存档 |
+
+新增 MATLAB plot 脚本（2026-05-25, 见 [notebook §4.9](experiment_notebook.md#49-ig-可视化脚本盘点2026-05-25-新增-matlab-scripts)）：
+- `plot_ig_encoder_mass_stacked.m` ★（auto-PDF）
+- `plot_ig_encoder_window_heatmap.m` ★（rollout 时间 × 输入 heatmap, 50s × 1s windows, batch 模式 5 ckpt）
+- `plot_ig_encoder_mass_heatmap.m` / `plot_ig_actor_heatmap.m`（static heatmap）
+- 改造 `plot_mass_scatter_preview.m` / `plot_exp1_estimation_rmse.m` / `plot_summary_condition_bars.m` 切换到 E1-E5 + walk-only
+
+### 1.6 raw data log
 
 新加 play 时直接在表末追加一行。**不在 notes 写结论**——结论统一放 notebook §5。
 
@@ -92,6 +132,14 @@ Model G (7 params)，universal coefs 在 [`wheelfoot_flat.py:368-382`](../legged
 | 2026-05-24 | E2 IG ckpt 11000 | 3610996 | E2/model_11000.pt | in-dist | analyze_actor_ig.py | logs/.../actor_ig_summary_*.csv | qs_combined 5.47% ≈ E1 5.58%；residual 不影响 actor 对 QS 依赖。见 notebook §4.2 |
 | 2026-05-24 | E1 offline cal | 961fcd4 | E1/model_11000.pt | QS grid 4 mass × 16 com | collect_calibration_data.py | logs/.../cal_data_E1_*.npz | offline cal RMSE = 0.689 kg；policy 仍 QS-fittable。见 notebook §A.3 |
 | 2026-05-23 | per-env mass discovery | 016902d | v2/model_11000.pt | OOD-low static | accidental finding | logs/.../v2_cocal_*.mat | 触发 pemass narrative 的偶然实验；详见 notebook 时间线 |
+| 2026-05-24 | E4 训练启动 | 7c78b7c | May24_19-30-38_..._no_torq_..._seed_45_pemass | 同 E3 配置 + use_torques_in_obs=False | num_obs=28, seed=45 (env_cfg.json 因旧 save bug 写成 1，实际训练用 45) | logs/.../model_*.pt | true history-only baseline，只到 12000 iter (paper 用 11000) |
+| 2026-05-24 | E4 in-dist/OOD ×6 | 7c78b7c | E4/model_11000.pt | static + walk × in-dist/[1,2]/[4,6] | history_only + pemass + no-torques | logs/.../play_data_*_torq0_seed42_ckpt11000_load*.mat | RMSE 1.65-2.24 跨 conditions；E4/E3 ratio 1.57-2.24×。见 notebook §2.3-2.4 |
+| 2026-05-25 | E4 actor IG | 7c78b7c | E4/model_11000.pt | in-dist | analyze_actor_ig.py | logs/.../actor_ig_summary_20260525_000350.csv | est_mass 0.43% (5× E3 但仍 < 1%)；prev_actions 53% (E3=66%)；fallback to dof_vel/gravity。见 notebook §4.6 |
+| 2026-05-25 | E4 encoder IG | 7c78b7c | E4/model_11000.pt | in-dist | analyze_encoder_ig.py | logs/.../encoder_ig_summary_20260525_000432.csv | mass 信号 fallback 到 projected_gravity 31.5% + prev_actions 23.2%。E1 中 torques+QS = 53% 的 attribution 在 E4 完全消失。见 notebook §4.7 |
+| 2026-05-25 01:00 | E5 训练启动 | 7c78b7c | May25_01-00-47_..._qs_resi_..._no_torq_..._seed_45_pemass | QS + residual + no-torques 完整跑到 16000 iter | num_obs=40, seed=45 (env_cfg.json 正确记录，task_registry seed bug fix 验证) | logs/.../model_*.pt | E5 = E1 minus raw torques but keep QS features，paper contribution (b) disambiguation |
+| 2026-05-25 | E5 in-dist/OOD ×6 | 7c78b7c | E5/model_11000.pt | static + walk × in-dist/[1,2]/[4,6] | qs+resid + pemass + no-torques | logs/.../play_data_*_qs1_resid1_torq0_*_seed42_ckpt11000_*.mat | RMSE 1.10/1.19/0.91/1.04/1.78/1.95，落在 E1 (0.83) 和 E4 (1.65) 之间。E5 vs E1 ≈ +0.27 kg in-dist。见 notebook §2.3, §2.5 |
+| 2026-05-25 | E5 actor IG | 7c78b7c | E5/model_11000.pt | in-dist | analyze_actor_ig.py | logs/.../actor_ig_summary_20260525_074023.csv | QS combined 6.86% (比 E1 5.21% 还高，没了 raw torques 后 actor 更依赖 QS feature)；est_mass 0.04% (vs E4 的 0.43%，回到健康水平)。见 notebook §4.6 |
+| 2026-05-25 | E5 encoder IG | 7c78b7c | E5/model_11000.pt | in-dist | analyze_encoder_ig.py | logs/.../encoder_ig_summary_20260525_074423.csv | **核心发现**：torque path 从 E1 的 54% → 20%；qs_load 持平 (15.39 → 15.83%)，qs_residual 萎缩 (11.20 → 3.92%)；**prev_actions 暴涨 5.5% → 50.1%** 作为 implicit torque surrogate。见 notebook §4.7 |
 
 > **早期 §1.5 行（lb=6 / lb=3 / history_only 各 1 行）已删除**——它们的数字是 bug-era（[notebook §2.1](experiment_notebook.md#21-hidden-distribution-shift修复前的训练-bug) 的 hidden distribution shift bug 修复前采集），不应作为当前参照。原始 .mat 仍在 `exported/` 目录下，需要时直接读。
 

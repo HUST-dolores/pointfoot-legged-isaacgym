@@ -182,6 +182,13 @@ class TaskRegistry:
                 print(f"'train_cfg' provided -> Ignoring 'name={name}'")
         # override cfg from args (if specified)
         _, train_cfg = update_cfg_from_args(None, train_cfg, args)
+        # Sync seed back to env_cfg so save_cfgs() writes the actually-used seed to
+        # env_cfg.json. get_cfgs() at the top of this method called env_cfg.seed =
+        # train_cfg.seed (which was still the default before the cli override above).
+        # Without this line, env_cfg.json silently records the wrong seed even though
+        # set_seed() in make_env already applied the correct cli-provided seed.
+        if name is not None and name in self.env_cfgs:
+            self.env_cfgs[name].seed = train_cfg.seed
 
         if log_root == "default":
             log_root = os.path.join(

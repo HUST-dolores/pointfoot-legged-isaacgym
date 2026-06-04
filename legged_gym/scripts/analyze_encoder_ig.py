@@ -155,11 +155,15 @@ def set_eval_overrides(env_cfg, args):
     return env_cfg
 
 
-def build_observation_groups(num_obs, num_actions):
+def build_observation_groups(num_obs, num_actions, use_qs=True, use_torques=True):
     """Return per-step groups for raw obs plus filtered obs.
 
     Each group is a tuple: (label, branch, name, start, end).
     Starts/ends are indices within one per-step encoder input frame.
+
+    Obs 顺序需与 wheelfoot_flat.compute_group_observations() 严格一致：
+        ang_vel(3) | gravity(3) | dof_pos(6) | dof_vel(8) |
+        [torques(8) if use_torques] | [qs_load(8) + qs_residual(4) if use_qs] | prev_actions(num_actions)
     """
 
     filtered_size = num_obs - num_actions
@@ -171,32 +175,38 @@ def build_observation_groups(num_obs, num_actions):
             groups.append((f"{branch}/{name}", branch, name, start, end))
 
     def add_pre_action_groups(branch, offset):
-        add(branch, "base_ang_vel", offset + 0, offset + min(3, filtered_size))
-        add(branch, "projected_gravity", offset + 3, offset + min(6, filtered_size))
-        add(branch, "dof_pos", offset + 6, offset + min(12, filtered_size))
-        add(branch, "dof_vel", offset + 12, offset + min(20, filtered_size))
-        add(branch, "torques", offset + 20, offset + min(28, filtered_size))
+        cur = 0  # offset within filtered slice
 
-        extra_start = 28
-        extra_dim = max(0, filtered_size - extra_start)
-        if extra_dim >= 8:
-            add(branch, "qs_load_features", offset + 28, offset + 36)
-            # Per-dim breakdown of qs_load_features (8 dims)
+        def chunk(name, span):
+            nonlocal cur
+            end = min(cur + span, filtered_size)
+            add(branch, name, offset + cur, offset + end)
+            cur = end
+
+        chunk("base_ang_vel", 3)
+        chunk("projected_gravity", 3)
+        chunk("dof_pos", 6)
+        chunk("dof_vel", 8)
+        if use_torques:
+            chunk("torques", 8)
+        if use_qs:
+            qs_load_start = cur
+            chunk("qs_load_features", 8)
             _qs_load_names = ["payload_mass", "load_x", "load_y", "payload_present",
                               "sin_lieangle_L_thigh", "cos_lieangle_L_thigh",
                               "sin_lieangle_R_thigh", "cos_lieangle_R_thigh"]
             for _i, _n in enumerate(_qs_load_names):
-                add(branch, f"qs_dim_{_n}", offset + 28 + _i, offset + 29 + _i)
-            if extra_dim >= 12:
-                add(branch, "qs_residual_baseline", offset + 36, offset + 40)
-                _qs_resid_names = ["mass_delta", "com_delta_x", "com_delta_y", "com_delta_z"]
-                for _i, _n in enumerate(_qs_resid_names):
-                    add(branch, f"qs_dim_{_n}", offset + 36 + _i, offset + 37 + _i)
-                add(branch, "extra_pre_action", offset + 40, offset + filtered_size)
-            else:
-                add(branch, "extra_pre_action", offset + 36, offset + filtered_size)
-        else:
-            add(branch, "extra_pre_action", offset + extra_start, offset + filtered_size)
+                add(branch, f"qs_dim_{_n}",
+                    offset + qs_load_start + _i, offset + qs_load_start + _i + 1)
+            qs_resid_start = cur
+            chunk("qs_residual_baseline", 4)
+            _qs_resid_names = ["mass_delta", "com_delta_x", "com_delta_y", "com_delta_z"]
+            for _i, _n in enumerate(_qs_resid_names):
+                add(branch, f"qs_dim_{_n}",
+                    offset + qs_resid_start + _i, offset + qs_resid_start + _i + 1)
+        # 任何剩余的 pre-action 字段（理论上不应该有）
+        if cur < filtered_size:
+            add(branch, "extra_pre_action", offset + cur, offset + filtered_size)
 
     add_pre_action_groups("raw", 0)
     add("raw", "previous_actions", filtered_size, num_obs)
@@ -659,6 +669,57 @@ def main():
     )
     run_dir = os.path.dirname(checkpoint_path)
 
+    # Auto-align env_cfg from saved train-time cfg (avoids encoder shape mismatch when
+    # in-tree cfg differs from training config, e.g., flipped use_qs_in_obs / use_torques_in_obs).
+    _env_p = os.path.join(run_dir, "env_cfg.json")
+    if os.path.isfile(_env_p):
+        import json as _json
+        try:
+            _se = _json.load(open(_env_p))
+            for k in ("num_observations", "num_critic_observations"):
+                sv = _se.get("env", {}).get(k)
+                if sv is not None and getattr(env_cfg.env, k, None) != sv:
+                    setattr(env_cfg.env, k, int(sv))
+            # 字段缺失（older runs）：use_torques_in_obs 的默认是 True（flag 2026-05-24 才加）。
+            _flag_defaults_when_missing = {"use_torques_in_obs": True}
+            for k in ("use_qs_in_obs", "use_residual_learning", "use_torques_in_obs"):
+                sv = _se.get("env", {}).get(k)
+                if sv is not None:
+                    if getattr(env_cfg.env, k, None) != bool(sv):
+                        setattr(env_cfg.env, k, bool(sv))
+                elif k in _flag_defaults_when_missing:
+                    setattr(env_cfg.env, k, _flag_defaults_when_missing[k])
+            print(f"[encoder IG] auto-aligned env_cfg from saved: "
+                  f"n_obs={env_cfg.env.num_observations}, "
+                  f"use_qs_in_obs={env_cfg.env.use_qs_in_obs}, "
+                  f"use_torques_in_obs={getattr(env_cfg.env, 'use_torques_in_obs', True)}")
+        except Exception as e:
+            print(f"[encoder IG] warn: could not align cfg from saved: {e}")
+
+    # Also sync encoder input dim from saved train_cfg.json (so MLP_Encoder rebuild
+    # matches the saved ckpt's per-step obs width — otherwise shape mismatch on load).
+    _tr_p2 = os.path.join(run_dir, "train_cfg.json")
+    if os.path.isfile(_tr_p2):
+        import json as _json2
+        try:
+            _str2 = _json2.load(open(_tr_p2))
+            sm = _str2.get("MLP_Encoder", {})
+            if sm.get("num_input_dim") is not None:
+                train_cfg.MLP_Encoder.num_input_dim = int(sm["num_input_dim"])
+            if sm.get("obs_history_length") is not None:
+                train_cfg.MLP_Encoder.obs_history_length = int(sm["obs_history_length"])
+            # Also sync algorithm.use_load_residual_estimation (E3 has this False;
+            # leaving in-tree True triggers a 4D-baseline shape check that fails on
+            # 36-dim obs). Mirror play.py's behavior.
+            sa = _str2.get("algorithm", {})
+            if sa.get("use_load_residual_estimation") is not None:
+                train_cfg.algorithm.use_load_residual_estimation = bool(sa["use_load_residual_estimation"])
+            print(f"[encoder IG] auto-aligned train_cfg: "
+                  f"num_input_dim={train_cfg.MLP_Encoder.num_input_dim}, "
+                  f"use_load_residual_estimation={getattr(train_cfg.algorithm, 'use_load_residual_estimation', '?')}")
+        except Exception as e:
+            print(f"[encoder IG] warn: could not align train_cfg from saved: {e}")
+
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     ppo_runner, train_cfg = task_registry.make_alg_runner(
         env=env,
@@ -679,7 +740,10 @@ def main():
 
     hist_len = int(train_cfg.MLP_Encoder.obs_history_length)
     per_step_dim = samples.shape[1] // hist_len
-    groups = build_observation_groups(env.num_obs, env.num_actions)
+    use_qs_flag = bool(getattr(env.cfg.env, "use_qs_in_obs", True))
+    use_torq_flag = bool(getattr(env.cfg.env, "use_torques_in_obs", True))
+    groups = build_observation_groups(env.num_obs, env.num_actions,
+                                      use_qs=use_qs_flag, use_torques=use_torq_flag)
 
     print(
         "[encoder IG] collected "

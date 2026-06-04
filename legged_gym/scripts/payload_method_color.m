@@ -31,6 +31,18 @@ end
 method = char(method);
 
 switch method
+    % Canonical paper-axis ckpts E1-E5 (use_qs / use_residual / use_torques flags)
+    case 'E1'           % qs + residual + torques (main)
+        hex = '#E69F00';
+    case 'E2'           % qs + direct + torques
+        hex = '#009E73';
+    case 'E3'           % no-qs + torques (history-only)
+        hex = '#56B4E9';
+    case 'E5'           % qs + residual + NO torques (QS-only path)
+        hex = '#0072B2';
+    case 'E4'           % no-qs + NO torques (true history-only, broken baseline)
+        hex = '#D55E00';
+    % Legacy filename-based labels (kept for backward compat when meta.load_run absent)
     case 'qs_residual'
         hex = '#E69F00';
     case 'history_only'
