@@ -1,4 +1,4 @@
-function plot_expA_horizontal_force()
+function expA_horizontal_force()
 % 实验2 — Figure：力方向 × 变体 的"幻象质量斜率"对比（分布内 [2,4]，每段去前 1s）。
 % 竖直 down 的斜率高(~0.7-0.8)=被读成质量；水平 fwd/left 斜率≈0=不被读成质量 → 方向特异性。
 % 注：水平力本质是速度扰动，高幅值会把机器人推离指令(max|vx|~7-8 m/s)；Model-guided fwd

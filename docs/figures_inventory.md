@@ -27,18 +27,18 @@
 
 ## 2. `exported/ig_pdfs/` — Integrated Gradients 分析 PDF
 
-来源脚本：`legged_gym/scripts/plot_ig_*.m`。
+来源脚本：`legged_gym/scripts/ig_*.m`。
 
 | 文件 | 来源脚本 | 内容 | 主要作用 |
 |---|---|---|---|
-| **`ig_encoder_mass_stacked.pdf`** ★ | `plot_ig_encoder_mass_stacked.m` | 5 个 ckpt（E1/E2/E3/E5/E4）的 encoder mass-branch 归因堆叠柱状图，分层显示 raw torques / QS load / QS residual / prev_actions / 其他；顶部标注 "torque pathway sum"（54% → 51% → 48% → 20% → 0%） | **paper contribution (b) 主图**：直接证明 two-pathway torque signal 机制 |
-| `ig_actor_groups.pdf` | `plot_ig_actor_groups.m` | 5 method × ~10 input group 的 actor IG grouped bar | 你判断"没用"，留作备份 |
-| `ig_est_mass_negative.pdf` | `plot_ig_est_mass_negative.m` | 5 个 ckpt 的 est_mass attribution 单 bar 图 + uniform baseline 虚线 | 你判断"没用"，留作备份 |
+| **`ig_encoder_mass_stacked.pdf`** ★ | `ig_encoder_mass_stacked.m` | 5 个 ckpt（E1/E2/E3/E5/E4）的 encoder mass-branch 归因堆叠柱状图，分层显示 raw torques / QS load / QS residual / prev_actions / 其他；顶部标注 "torque pathway sum"（54% → 51% → 48% → 20% → 0%） | **paper contribution (b) 主图**：直接证明 two-pathway torque signal 机制 |
+| `ig_actor_groups.pdf` | `ig_actor_groups.m` | 5 method × ~10 input group 的 actor IG grouped bar | 你判断"没用"，留作备份 |
+| `ig_est_mass_negative.pdf` | `ig_est_mass_negative.m` | 5 个 ckpt 的 est_mass attribution 单 bar 图 + uniform baseline 虚线 | 你判断"没用"，留作备份 |
 
 **还未保存为 PDF 的 IG 脚本**（默认开 figure 不存盘）：
-- `plot_ig_encoder_mass_heatmap.m` — 5×8 静态 heatmap（method × group, encoder mass）
-- `plot_ig_actor_heatmap.m` — 5×10 静态 heatmap（method × group, actor IG）
-- `plot_ig_encoder_window_heatmap.m` — **rollout 时间 × 输入 heatmap**（每 1s 一格，raw+filtered 合并，固定输入顺序）—— batch mode 一次出 5 张
+- `ig_encoder_mass_heatmap.m` — 5×8 静态 heatmap（method × group, encoder mass）
+- `ig_actor_heatmap.m` — 5×10 静态 heatmap（method × group, actor IG）
+- `ig_encoder_window_heatmap.m` — **rollout 时间 × 输入 heatmap**（每 1s 一格，raw+filtered 合并，固定输入顺序）—— batch mode 一次出 5 张
 
 ---
 
@@ -147,6 +147,6 @@
 3. **`Figure_5/6/7/8_*_RMSE.pdf`**（你手存的）—— in-dist + OOD 全量化对比
 4. **`exp1_pdfs/exp1_rmse.pdf` + `exp1_bias.pdf`** —— walk-only 简洁版 RMSE/bias 对比
 5. **`scatter_preview_pdfs/scatter_walk_E1/E5/E4.pdf`** —— per-env scatter 显示 collapse 模式
-6. **(脚本待存)** `plot_ig_encoder_window_heatmap` 输出 —— 时间维度的 IG 演化
+6. **(脚本待存)** `ig_encoder_window_heatmap` 输出 —— 时间维度的 IG 演化
 
 剩余 `paper_figures_payload/*` 和 `plots_*` 主要是历史 / 诊断，paper 不用。

@@ -1,14 +1,16 @@
-function plot_ig_actor_heatmap(outDir)
-%PLOT_IG_ACTOR_HEATMAP Heatmap of actor IG (target='all', coarse) per input
-% group, comparing E1-E5.
-% rows = methods (E1, E2, E3, E5, E4)
-% cols = input groups
-% color = actor IG attribution %
-% Each cell has numeric % overlay.
+function ig_actor_groups(outDir)
+%PLOT_IG_ACTOR_GROUPS Grouped-bar visualization of actor IG (target='all',
+% coarse) for E1-E5. Each input group gets 5 colored bars (one per method).
+% Supports paper conclusions J ("architecture marginal"), K ("est_mass unused"),
+% L ("QS-in-obs ~6% stabilizing prior").
+%
+% x-axis: selected input groups (paper-relevant)
+% y-axis: actor IG attribution [%]
+% Bars: 5 method-colored bars per group, ordered E1, E2, E3, E5, E4
 %
 % Usage:
-%   plot_ig_actor_heatmap()         % open figure, do NOT save
-%   plot_ig_actor_heatmap('/dir')   % save PDF, keep figure open
+%   plot_ig_actor_groups()                 % open figure, do NOT save
+%   plot_ig_actor_groups('/tmp/out')       % save PDF, close figure
 
 if nargin < 1, outDir = ''; end
 if ~isempty(outDir) && exist(outDir, 'dir') ~= 7, mkdir(outDir); end
@@ -20,99 +22,89 @@ ckpts = { ...
     'E5', 'May25_01-00-47_exper_qs_resi_load_boost_3_no_torq_seed_45_pemass'; ...
     'E4', 'May24_19-30-38_exper_history_only_no_torq_load_boost_3_seed_45_pemass'; ...
 };
-% Display order: most-attended first (prev_actions), then torque-related groups,
-% then encoder outputs (highlights est_mass < 0.5%).
+
+% Groups to plot (in display order). 'qs_combined' is synthesized from
+% qs_load_features + qs_residual_baseline. Groups absent in a ckpt show 0.
 groups = { ...
-    'previous_actions',  'prev actions'; ...
+    'previous_actions',  'previous actions'; ...
     'dof_pos',           'dof pos'; ...
-    'dof_vel',           'dof vel'; ...
-    'projected_gravity', 'gravity'; ...
     'est_lin_vel',       'enc/est lin vel'; ...
+    'projected_gravity', 'projected gravity'; ...
+    'dof_vel',           'dof vel'; ...
     'torques',           'raw torques'; ...
-    'qs_combined',       'QS features (load+resid)'; ...
+    'qs_combined',       'QS features combined'; ...
     'est_com_delta',     'enc/est com'; ...
     'est_mass',          'enc/est mass'; ...
     'base_ang_vel',      'base ang vel'; ...
 };
-nC = size(ckpts, 1);
-nG = size(groups, 1);
-M = nan(nC, nG);
+nGroups = size(groups, 1);
+nCkpts  = size(ckpts,  1);
+M = zeros(nGroups, nCkpts);
 
-for c = 1:nC
-    csvPath = find_latest_actor_ig(ckpts{c, 2});
+for c = 1:nCkpts
+    runName = ckpts{c, 2};
+    csvPath = find_latest_actor_ig(runName);
     if isempty(csvPath)
-        warning('No actor_ig CSV for %s', ckpts{c, 1}); continue;
+        warning('No actor_ig_summary CSV found for %s (%s)', ckpts{c, 1}, runName);
+        continue;
     end
     attr = load_actor_coarse_all(csvPath);
-    for g = 1:nG
+    for g = 1:nGroups
         gName = groups{g, 1};
         if strcmp(gName, 'qs_combined')
             v = 0;
             if isKey(attr, 'qs_load_features'), v = v + attr('qs_load_features'); end
             if isKey(attr, 'qs_residual_baseline'), v = v + attr('qs_residual_baseline'); end
-            M(c, g) = v;
+            M(g, c) = v;
         elseif isKey(attr, gName)
-            M(c, g) = attr(gName);
-        else
-            M(c, g) = 0;
+            M(g, c) = attr(gName);
         end
     end
 end
 
 % --- Plot
-fig = figure('Color', 'w', 'Position', [120, 120, 1100, 380]);
-imagesc(M);
-try, colormap(turbo); catch, colormap(parula); end
-cb = colorbar;
-cb.Label.String = 'Attribution [%]';
-cb.Label.FontSize = 11;
-
-set(gca, ...
-    'XTick', 1:nG, 'XTickLabel', groups(:, 2), ...
-    'YTick', 1:nC, 'YTickLabel', ckpts(:, 1), ...
-    'TickLabelInterpreter', 'none', 'FontSize', 11);
-try, xtickangle(25); catch, end
-title('Actor IG attribution per input group (target = action, coarse)');
-xlabel('Input group');
-ylabel('Method');
-
-cMax = max(M(:), [], 'omitnan');
-if isempty(cMax) || ~isfinite(cMax) || cMax == 0, cMax = 1; end
-for c = 1:nC
-    for g = 1:nG
-        v = M(c, g);
-        if ~isfinite(v), continue; end
-        ratio = v / cMax;
-        if ratio > 0.55, txtColor = 'w'; else, txtColor = 'k'; end
-        text(g, c, sprintf('%.1f', v), ...
-             'HorizontalAlignment', 'center', ...
-             'Color', txtColor, 'FontSize', 10, 'FontWeight', 'bold');
-    end
+fig = figure('Color', 'w', 'Position', [120, 120, 1100, 520]);
+xCats = categorical(groups(:, 2));
+xCats = reordercats(xCats, groups(:, 2));
+b = bar(xCats, M);   % nGroups x nCkpts -> nCkpts bars per group
+for k = 1:nCkpts
+    b(k).FaceColor = payload_method_color(ckpts{k, 1});
+    b(k).EdgeColor = 'none';
 end
+ylabel('Actor IG attribution [%] (target = full action)');
+title('Actor IG per input group, E1-E5 (ckpt 11000, in-dist, coarse)');
+legend(ckpts(:, 1), 'Location', 'northoutside', 'Orientation', 'horizontal');
+grid on; set(gca, 'GridAlpha', 0.25);
+
+% Rotate group labels for readability
+try, xtickangle(25); catch, end
 
 if ~isempty(outDir)
-    pdfPath = fullfile(outDir, 'ig_actor_heatmap.pdf');
+    pdfPath = fullfile(outDir, 'ig_actor_groups.pdf');
     try
         exportgraphics(fig, pdfPath, 'ContentType', 'vector', 'BackgroundColor', 'white');
     catch
         print(fig, pdfPath, '-dpdf', '-bestfit');
     end
-    fprintf('[plot_ig_actor_heatmap] saved %s\n', pdfPath);
+    close(fig);
+    fprintf('[plot_ig_actor_groups] saved %s\n', pdfPath);
 end
 
-fprintf('\nActor IG attribution (%%):\n');
-fprintf('  %-6s ', 'ckpt');
-for g = 1:nG, fprintf('%14s ', groups{g, 1}); end
+% Print numerical table
+fprintf('\nActor IG attribution per group (%%):\n');
+fprintf('  %-22s ', 'group / ckpt');
+for c = 1:nCkpts, fprintf('%7s ', ckpts{c, 1}); end
 fprintf('\n');
-for c = 1:nC
-    fprintf('  %-6s ', ckpts{c, 1});
-    for g = 1:nG, fprintf('%14.2f ', M(c, g)); end
+for g = 1:nGroups
+    fprintf('  %-22s ', groups{g, 1});
+    for c = 1:nCkpts, fprintf('%7.2f ', M(g, c)); end
     fprintf('\n');
 end
 end
 
 
 function attr = load_actor_coarse_all(csvPath)
+% Returns Map: group_name -> percent  (target=='all', groupset=='coarse')
 attr = containers.Map('KeyType', 'char', 'ValueType', 'double');
 fid = fopen(csvPath, 'r');
 if fid < 0, return; end

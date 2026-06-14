@@ -1,4 +1,4 @@
-function plot_expA_slope_summary()
+function expA_slope_summary()
 % 实验A — Figure：四变体转移曲线斜率汇总（真实质量 vs 向下力），分布内 [2,4]kg。
 % 左=RL 编码器，右=QS(Model-C)。斜率越接近、力与质量越不可分；=1 表示完全当成等效质量。
 % 与 expA_load_runs 一致：每段去前 1s 响应；拟合只用分布内 [2,4] 的点。

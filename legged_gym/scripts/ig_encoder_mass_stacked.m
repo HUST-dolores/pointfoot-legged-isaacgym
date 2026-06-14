@@ -1,4 +1,4 @@
-function plot_ig_encoder_mass_stacked(outDir)
+function ig_encoder_mass_stacked(outDir)
 %PLOT_IG_ENCODER_MASS_STACKED Stacked-bar visualization of encoder mass-branch
 % IG attribution, comparing the four paper methods. Directly visualizes paper contribution (b):
 % the "two-pathway torque signal" mechanism (torques + qs_features = ~54% in

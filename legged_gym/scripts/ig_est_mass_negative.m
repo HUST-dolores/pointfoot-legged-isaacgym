@@ -1,4 +1,4 @@
-function plot_ig_est_mass_negative(outDir)
+function ig_est_mass_negative(outDir)
 %PLOT_IG_EST_MASS_NEGATIVE Single-panel bar plot of actor IG attribution to
 % encoder/est_mass dim across E1-E5, with a reference line showing what
 % attribution a uniform-attention actor would give. Directly visualizes

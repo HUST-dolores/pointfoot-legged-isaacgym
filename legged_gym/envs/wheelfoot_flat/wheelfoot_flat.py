@@ -273,6 +273,30 @@ class BipedWF(BaseTask):
         # 总是计算 load_estimates（play 时要 log 给 Model C RMSE 用；env 内部 base_com / base_mass
         # 的真值也来自 sim，跟这个无关）。但是否把它喂进 obs 由 cfg.env.use_qs_in_obs 控制。
         load_estimates = self._compute_load_estimates()
+        # 第5章 测试时估计消融(仅 play 用;默认 'none' 对训练完全无影响)。
+        # 只篡改"喂进 obs 的负载估计",策略权重一字不动;encoder 读 obs 历史也会看到被改的值。
+        _cm = getattr(self, "qs_corrupt_mode", "none")
+        if _cm != "none":
+            _cv = float(getattr(self, "qs_corrupt_val", 0.0))
+            if _cm in ("zero", "zero_all"):  # 估计=无负载
+                for _k in ("payload_mass", "load_x", "load_y", "payload_present", "qs_mass_delta"):
+                    if _k in load_estimates: load_estimates[_k] = torch.zeros_like(load_estimates[_k])
+                if "qs_com_delta" in load_estimates: load_estimates["qs_com_delta"] = torch.zeros_like(load_estimates["qs_com_delta"])
+                if _cm == "zero_all":
+                    # Strict QS-channel ablation: also remove the analytic angle features
+                    # that are appended together with the load estimate.
+                    for _k in ("sin_lieangle_L_thigh", "cos_lieangle_L_thigh",
+                               "sin_lieangle_R_thigh", "cos_lieangle_R_thigh"):
+                        if _k in load_estimates:
+                            load_estimates[_k] = torch.zeros_like(load_estimates[_k])
+            elif _cm == "scale":        # 质量估计 ×_cv(0.5 低估 / 2.0 高估)
+                load_estimates["payload_mass"] = load_estimates["payload_mass"] * _cv
+                if "qs_mass_delta" in load_estimates: load_estimates["qs_mass_delta"] = load_estimates["qs_mass_delta"] * _cv
+            elif _cm == "fixed":        # 质量估计恒为 _cv kg(无视真实负载)
+                load_estimates["payload_mass"] = torch.full_like(load_estimates["payload_mass"], _cv)
+                if "qs_mass_delta" in load_estimates: load_estimates["qs_mass_delta"] = torch.zeros_like(load_estimates["qs_mass_delta"])
+            elif _cm == "noise":        # 质量估计 + N(0,_cv)
+                load_estimates["payload_mass"] = load_estimates["payload_mass"] + _cv * torch.randn_like(load_estimates["payload_mass"])
         use_qs_in_obs = bool(getattr(self.cfg.env, "use_qs_in_obs", True))
         use_torques_in_obs = bool(getattr(self.cfg.env, "use_torques_in_obs", True))
 

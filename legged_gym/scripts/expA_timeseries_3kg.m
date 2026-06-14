@@ -1,4 +1,4 @@
-function plot_expA_timeseries_3kg(variant)
+function expA_timeseries_3kg(variant)
 % 实验A — Figure：在 3kg 力 / 3kg 真实质量下的估计时间序列（横轴=时间）。
 % 上=真实负载 3kg，下=竖直向下力 3kg 当量（无真实负载）；黑色阶跃为参考真值。
 % 默认变体 Model-guided，可传入其它变体名。

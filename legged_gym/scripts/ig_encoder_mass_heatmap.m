@@ -1,4 +1,4 @@
-function plot_ig_encoder_mass_heatmap(outDir)
+function ig_encoder_mass_heatmap(outDir)
 %PLOT_IG_ENCODER_MASS_HEATMAP Heatmap of encoder mass-branch IG attribution.
 % rows = methods (E1, E2, E3, E5, E4)
 % cols = input groups (sorted by E1 attribution, descending)

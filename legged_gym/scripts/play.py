@@ -217,6 +217,25 @@ def _build_auto_exp_tag(env, train_cfg, args, cmd_vx, cmd_vy, cmd_yaw):
         tag += "_flat"
     if bool(getattr(args, "no_load", False)):
         tag += "_noload"
+    _sl = float(getattr(args, "slope_deg", 0.0) or 0.0)
+    if abs(_sl) > 1e-6:
+        tag += f"_slope{_sl:g}"
+    _ev = float(getattr(args, "estop_vx", 0.0) or 0.0)
+    if _ev > 1e-6:
+        tag += f"_estop{_ev:g}"
+    # Eccentric-load suffix (0.0 is a valid centered value, so do NOT use the `or` idiom).
+    _lox = float(getattr(args, "load_offset_x", -99.0))
+    _loy = float(getattr(args, "load_offset_y", -99.0))
+    if _lox > -90 or _loy > -90:
+        tag += f"_ecc{(_lox if _lox > -90 else 0.0):g}x{(_loy if _loy > -90 else 0.0):g}y"
+    _cm = str(getattr(args, "corrupt_estimate", "none") or "none")
+    if _cm != "none":
+        _cs = str(getattr(args, "corrupt_estimate_scope", "obs") or "obs")
+        scope_seg = "" if _cs == "obs" else f"{_cs}"
+        tag += f"_corr{scope_seg}{_cm}{getattr(args, 'corrupt_val', 0.0):g}"
+    _ldur = float(getattr(args, "load_dur", -1.0)); _lint = float(getattr(args, "load_int", -1.0))
+    if _ldur > 0 and _lint > 0:
+        tag += f"_cycle{_ldur:g}-{_lint:g}"
     # Append ext-force suffix (Exp A) so force runs don't collide with mass runs.
     eff_kg = float(getattr(args, "ext_force_down_kg", 0.0) or 0.0)
     eff_kg_min = float(getattr(args, "ext_force_down_kg_min", 0.0) or 0.0)
@@ -232,6 +251,33 @@ def _build_auto_exp_tag(env, train_cfg, args, cmd_vx, cmd_vy, cmd_yaw):
     elif abs(efx) > 1e-9 or abs(efy) > 1e-9 or abs(efz) > 1e-9:
         tag += f"_fxyz{efx:g}-{efy:g}-{efz:g}N"
     return tag
+
+
+def _corrupt_policy_estimate_latent(est, mode, val, env):
+    """Corrupt mass/CoM entries in the policy-facing encoder latent.
+
+    The latent layout follows the play logging convention: indices 3:7 are
+    mass and CoM delta in normalized units. This is a test-time ablation only.
+    """
+    if mode == "none" or est is None or est.shape[-1] < 7:
+        return est
+    out = est.clone()
+    mass_scale = float(env.cfg.normalization.obs_scales.mass_scale)
+    if mode in ("zero", "zero_all"):
+        out[:, 3:7] = 0.0
+    elif mode == "scale":
+        out[:, 3:7] = out[:, 3:7] * float(val)
+    elif mode == "fixed":
+        out[:, 3] = float(val) * mass_scale
+        out[:, 4:7] = 0.0
+    elif mode == "noise":
+        out[:, 3] = out[:, 3] + float(val) * mass_scale * torch.randn_like(out[:, 3])
+    elif mode == "shuffle":
+        # 跨 env 互换 mass/CoM latent(固定排列,保持分布内但与本 env 真实负载错配)。
+        if not hasattr(env, "_shuffle_perm") or env._shuffle_perm.shape[0] != out.shape[0]:
+            env._shuffle_perm = torch.randperm(out.shape[0], device=out.device)
+        out[:, 3:7] = est[env._shuffle_perm, 3:7]
+    return out
 
 
 def _sanitize_for_mat(obj):
@@ -608,7 +654,9 @@ def play(args):
     _apply_saved_env_cfg(env_cfg, train_cfg, args, _log_root_for_align)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 60
-    env_cfg.env.num_envs = min(env_cfg.env.num_envs,30)
+    # 显式 --num_envs 则尊重其值(可>30,用于统计更平滑);未显式则默认上限 30(交互式)
+    if getattr(args, "num_envs", None) is None:
+        env_cfg.env.num_envs = min(env_cfg.env.num_envs, 30)
 
     env_cfg.terrain.num_rows = 10
     env_cfg.terrain.num_cols = 20
@@ -670,9 +718,12 @@ def play(args):
     if _eff_kg > 0.0:  # convenience: single downward force = _eff_kg of payload weight (all envs)
         _ext_force_vec[2] = -_eff_kg * 9.81
     _ext_force_on = _ext_force_sweep or any(abs(v) > 1e-9 for v in _ext_force_vec)
-    if _ext_force_on:
-        # 加力试验不带真实负载：关闭负载生成，使唯一的附加效应就是这个力
+    _keep_load = bool(getattr(args, "keep_load", False))
+    if _ext_force_on and not _keep_load:
+        # 加力试验不带真实负载：关闭负载生成，使唯一的附加效应就是这个力（Exp A 默认）
         env_cfg.domain_rand.add_random_load = False
+    elif _ext_force_on and _keep_load:
+        print("[PLAY] --keep_load: ext_force 与真实负载同时保留(抗倾覆推-恢复实验)")
         if _ext_force_sweep:
             print(f"[PLAY] EXT-FORCE SWEEP ON: dir={str(getattr(args,'ext_force_dir','down'))} "
                   f"per-env force = linspace({_eff_kg_min},{_eff_kg_max}) kg-equiv; add_random_load -> False")
@@ -692,8 +743,60 @@ def play(args):
         env_cfg.domain_rand.add_random_load = False
         print("[PLAY] NO-LOAD mode: domain_rand.add_random_load=False")
 
+    # Ch5 斜坡标定：负载全程恒定（不 on/off 循环），使翻倒由负载决定而非瞬态
+    if bool(getattr(args, "load_hold", False)):
+        env_cfg.domain_rand.load_start_time_s = 0.5
+        env_cfg.domain_rand.load_duration_range_s = [1.0e6, 1.0e6]
+        env_cfg.domain_rand.load_interval_range_s = [1.0e6, 1.0e6]
+        print("[PLAY] LOAD-HOLD: 负载 0.5s 起全程恒定挂着")
+
+    # 时序图专用:固定 ON 时长 + spawn 间隔 → 所有 env 同步加/卸(看估计瞬态响应)
+    _ldur = float(getattr(args, "load_dur", -1.0)); _lint = float(getattr(args, "load_int", -1.0))
+    if _ldur > 0 and _lint > 0:
+        _lstart = float(getattr(args, "load_start", -1.0))
+        if _lstart >= 0: env_cfg.domain_rand.load_start_time_s = _lstart
+        env_cfg.domain_rand.add_random_load = True
+        env_cfg.domain_rand.load_duration_range_s = [_ldur, _ldur]
+        env_cfg.domain_rand.load_interval_range_s = [_lint, _lint]
+        print(f"[PLAY] LOAD-CYCLE(sync): on={_ldur}s every {_lint}s, start={env_cfg.domain_rand.load_start_time_s}s")
+
+    # Ch5 斜坡标定：向前倾斜重力 slope_deg 度模拟坡度（平地+倾斜重力 ≡ 坡上）
+    _slope_deg = float(getattr(args, "slope_deg", 0.0) or 0.0)
+    if abs(_slope_deg) > 1e-6:
+        _b = np.radians(_slope_deg); _g = 9.81
+        env_cfg.sim.gravity = [float(_g * np.sin(_b)), 0.0, float(-_g * np.cos(_b))]
+        print(f"[PLAY] SLOPE calib: {_slope_deg}° -> sim.gravity={env_cfg.sim.gravity}")
+
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+
+    # Ch5 斜坡标定：obs 的"向下"方向也倾斜，与物理重力一致（否则 projected_gravity 与物理不符）
+    if abs(_slope_deg) > 1e-6:
+        _b = np.radians(_slope_deg)
+        env.gravity_vec = to_torch([float(np.sin(_b)), 0.0, float(-np.cos(_b))],
+                                   device=env.device).repeat(env.num_envs, 1)
+        print(f"[PLAY] SLOPE calib: env.gravity_vec tilted {_slope_deg}°")
+
+    # Ch5 偏心负载:固定负载质心偏置(平地制造 ∝ m·offset 的倾覆力矩,检验 CoM 估计头)
+    _lox = float(getattr(args, "load_offset_x", -99.0))
+    _loy = float(getattr(args, "load_offset_y", -99.0))
+    if _lox > -90 or _loy > -90:
+        ox = _lox if _lox > -90 else 0.0
+        oy = _loy if _loy > -90 else 0.0
+        env.load_offset_range["x"] = (ox, ox)
+        env.load_offset_range["y"] = (oy, oy)
+        env.load_offset_range["z"] = (0.10, 0.10)
+        print(f"[PLAY] ECCENTRIC load offset fixed: x={ox} y={oy} (z=0.10)")
+
+    # Ch5 测试时估计消融:篡改喂进 obs 的负载估计(权重不变),验证"估计→控制"的因果
+    _cmode = str(getattr(args, "corrupt_estimate", "none") or "none")
+    _cscope = str(getattr(args, "corrupt_estimate_scope", "obs") or "obs")
+    if _cmode != "none":
+        if _cscope in ("obs", "both"):
+            env.qs_corrupt_mode = _cmode
+            env.qs_corrupt_val = float(getattr(args, "corrupt_val", 0.0))
+        print(f"[PLAY] ESTIMATE-CORRUPT: mode={_cmode} "
+              f"scope={_cscope} val={float(getattr(args, 'corrupt_val', 0.0))}")
 
     # 应用持续外力（在建环境后写入 env 属性；默认关闭则无影响）
     # ext_force_vec 支持 [3]（全环境同）或 [N,3]（per-env sweep）；_apply_sustained_ext_force
@@ -832,6 +935,13 @@ def play(args):
     # camera_direction = np.array(env_cfg.viewer.lookat) - np.array(env_cfg.viewer.pos)
     img_idx = 0
     est = None
+    # Ch5 急停：速度指令方波（巡航 estop_vx 的 go 段 → 归零的 stop 段，反复）
+    _estop_vx = float(getattr(args, "estop_vx", 0.0) or 0.0)
+    _estop_go = float(getattr(args, "estop_go_s", 4.0) or 4.0)
+    _estop_stop = float(getattr(args, "estop_stop_s", 4.0) or 4.0)
+    _estop_on = _estop_vx > 1e-6
+    if _estop_on:
+        print(f"[PLAY] E-STOP mode: cruise vx={_estop_vx} go={_estop_go}s / stop={_estop_stop}s")
     for i in range(10 * int(env.max_episode_length)):
         if test_joint_mode and test_joint_idx is not None:
             # 单关节测试模式：使用位置控制，只让被测试的关节旋转
@@ -850,9 +960,17 @@ def play(args):
             # 正常策略推理模式
             with torch.no_grad():
                 est_for_action = encoder(obs_history, obs)
+                if _cmode != "none" and _cscope in ("latent", "both"):
+                    est_for_action = _corrupt_policy_estimate_latent(
+                        est_for_action, _cmode, float(getattr(args, "corrupt_val", 0.0)), env
+                    )
                 actions = policy(torch.cat((est_for_action, obs, commands), dim=-1).detach())
 
         env.commands[:, :] = commands_val
+        if _estop_on:
+            _t = i * env.dt
+            _go = (_t % (_estop_go + _estop_stop)) < _estop_go
+            env.commands[:, 0] = _estop_vx if _go else 0.0
 
         obs, rews, dones, infos, obs_history, commands, critic_obs = env.step(
             actions.detach()
@@ -865,6 +983,10 @@ def play(args):
             # pre-step estimate, as in training rollout collection.
             with torch.no_grad():
                 est = encoder(obs_history, obs)
+                if _cmode != "none" and _cscope in ("latent", "both"):
+                    est = _corrupt_policy_estimate_latent(
+                        est, _cmode, float(getattr(args, "corrupt_val", 0.0)), env
+                    )
         if debug_hip_sign and (hip_l_idx is not None) and (hip_r_idx is not None):
             theta_l = env.dof_pos[robot_index, hip_l_idx].item()
             theta_r = env.dof_pos[robot_index, hip_r_idx].item()
@@ -1085,6 +1207,14 @@ def play(args):
                 full_dict["base_pitch"] = torch.asin(torch.clamp(2.0 * (_qw * _qy - _qz * _qx), -1.0, 1.0))
                 full_dict["base_lin_vel_z"] = env.base_lin_vel[:, 2]
                 full_dict["base_height"] = env.root_states[env.actor_indices, 2]
+                # 急停滑移距离用：轮子累计转角(rad, ×Rw=位移) + 真实机体 x 位置(per-env)
+                try:
+                    _wl = env.dof_names.index("wheel_L_Joint"); _wr = env.dof_names.index("wheel_R_Joint")
+                    full_dict["wheel_angle"] = 0.5 * (env.dof_pos[:, _wl] + env.dof_pos[:, _wr])
+                except Exception:
+                    pass
+                full_dict["base_pos_x"] = env.root_states[env.actor_indices, 0]
+                full_dict["base_pos_y"] = env.root_states[env.actor_indices, 1]
 
                 # Encoder 输出反归一化到物理单位。
                 # get_inference_encoder(obs_history, obs) already returns the
@@ -1275,6 +1405,7 @@ def play(args):
                 "dt": float(env.dt),
                 "cmd_vx": _cmd_vx, "cmd_vy": _cmd_vy, "cmd_yaw": _cmd_yaw,
                 "ext_force_on": bool(_ext_force_on),
+                "keep_load": bool(_keep_load),
                 "ext_force_vec_N": list(_ext_force_vec),     # [Fx,Fy,Fz] world frame, N (单值模式)
                 "ext_force_down_kg": float(_eff_kg),          # 力当量质量 (kg), 0 = 非单值竖直当量模式
                 "ext_force_sweep": bool(_ext_force_sweep),    # True = per-env 力当量扫描
@@ -1289,6 +1420,13 @@ def play(args):
                 "load_duration_s_used": float(getattr(env.cfg.domain_rand, "load_duration_range_s", [0.0, 0.0])[0]),
                 "load_interval_s_used": float(getattr(env.cfg.domain_rand, "load_interval_range_s", [0.0, 0.0])[0]),
                 "load_mass_range_used": list(getattr(env.cfg.domain_rand, "add_load_range", [-1, -1])),
+                "load_offset_x": float(_lox if _lox > -90 else np.nan),
+                "load_offset_y": float(_loy if _loy > -90 else np.nan),
+                "slope_deg": float(_slope_deg),
+                "estop_vx": float(_estop_vx),
+                "corrupt_estimate": str(_cmode),
+                "corrupt_estimate_scope": str(_cscope),
+                "corrupt_val": float(getattr(args, "corrupt_val", 0.0)),
                 "use_qs_in_obs": bool(getattr(env.cfg.env, "use_qs_in_obs", True)),
                 "use_residual_learning": bool(getattr(env.cfg.env, "use_residual_learning", False)),
                 "use_torques_in_obs": bool(getattr(env.cfg.env, "use_torques_in_obs", True)),

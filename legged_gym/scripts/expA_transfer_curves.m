@@ -1,4 +1,4 @@
-function plot_expA_transfer_curves()
+function expA_transfer_curves()
 % 实验A — Figure：各变体“真实质量 / 向下力”转移曲线（RL 编码器估计 vs 参考真值）。
 % 每个变体一个子图：散点画全 1–6kg（展示分布外饱和），黄色阴影=训练分布区间 [2,4]kg，
 % 拟合线只用 [2,4] 分布内的点（与 expA_load_runs 的“每段去前 1s 响应”一致）。

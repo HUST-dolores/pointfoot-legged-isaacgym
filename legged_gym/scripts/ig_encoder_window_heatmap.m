@@ -1,4 +1,4 @@
-function plot_ig_encoder_window_heatmap(ckptLabel, targetName, nWindows, outDir)
+function ig_encoder_window_heatmap(ckptLabel, targetName, nWindows, outDir)
 %PLOT_IG_ENCODER_WINDOW_HEATMAP Rollout-time heatmap of encoder IG attribution.
 %
 % x-axis = rollout time, 1-second bins (matches --window_steps=50 @ 50 Hz)
@@ -41,7 +41,7 @@ plot_one(ckptLabel, targetName, nWindows, outDir);
 end
 
 
-function plot_one(ckptLabel, targetName, nWindows, outDir)
+function one(ckptLabel, targetName, nWindows, outDir)
 
 % Canonical ckpt mapping
 ckptMap = containers.Map( ...
