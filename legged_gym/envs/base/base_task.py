@@ -555,6 +555,68 @@ class BaseTask:
         load_start_pose.p.y = self.base_init_state[1]
         load_start_pose.p.z = self.base_init_state[2] - 100
 
+        # --- Co-design: per-env leg-morphology assets (spatial domain randomization) ---
+        # Default OFF -> single shared asset (existing behavior). When ON, generate N URDF variants
+        # (thigh/shank scaled), load one asset per morphology bucket, and assign each env a bucket.
+        self.randomize_morphology = bool(getattr(self.cfg.domain_rand, "randomize_morphology", False))
+        self.robot_assets = None
+        self.env_morphology = None
+        self.morph_bucket_ids = None
+        self._morph_spawn_offset = 0.0
+        if self.randomize_morphology:
+            import json as _json
+            from legged_gym.utils.morphology_urdf import (
+                generate_morphology_set,
+                nominal_base_height,
+            )
+            prefix = str(getattr(self.cfg.domain_rand, "morphology_prefix", "morph"))
+            num_buckets = int(getattr(self.cfg.domain_rand, "morphology_num_buckets", 64))
+            if bool(getattr(self.cfg.domain_rand, "morphology_regenerate", True)):
+                t_lo, t_hi = self.cfg.domain_rand.morphology_thigh_scale_range
+                s_lo, s_hi = self.cfg.domain_rand.morphology_shank_scale_range
+                gen = torch.Generator()
+                gen.manual_seed(int(getattr(self.cfg.domain_rand, "morphology_seed", 0)))
+                scales = []
+                for _b in range(num_buckets):
+                    st = float(torch.empty(1).uniform_(float(t_lo), float(t_hi), generator=gen))
+                    ss = float(torch.empty(1).uniform_(float(s_lo), float(s_hi), generator=gen))
+                    scales.append((st, ss))
+                generate_morphology_set(asset_path, asset_root, scales, prefix)
+            manifest = _json.load(open(os.path.join(asset_root, f"{prefix}_manifest.json")))
+            morph_list = manifest["morphologies"]
+            num_buckets = len(morph_list)
+            self.morphology_scales = to_torch(
+                [[m["thigh_scale"], m["shank_scale"]] for m in morph_list], device=self.device
+            )
+            self.morphology_base_height = to_torch(
+                [m["nominal_base_height"] for m in morph_list], device=self.device
+            )
+            self.morph_bucket_ids = torch.randint(
+                0, num_buckets, (self.num_envs,), device=self.device
+            )
+            self.env_morphology = self.morphology_scales[self.morph_bucket_ids]        # [num_envs, 2]
+            self.env_base_height = self.morphology_base_height[self.morph_bucket_ids]  # [num_envs]
+            # spawn-z offset so that at scale 1.0 the base init height matches the original config value
+            self._morph_spawn_offset = float(self.base_init_state[2]) - nominal_base_height(1.0, 1.0)
+            # Load every bucket asset; assert identical topology. The global state tensors are
+            # reshaped with a single num_dof/num_bodies, so all morphologies MUST share them.
+            self.robot_assets = []
+            for m in morph_list:
+                a = self.gym.load_asset(self.sim, asset_root, m["file"], asset_options)
+                a_dof = self.gym.get_asset_dof_count(a)
+                a_body = self.gym.get_asset_rigid_body_count(a)
+                assert a_dof == self.num_dof, f"morphology {m['file']} dof {a_dof} != base {self.num_dof}"
+                assert a_body == self.num_bodies, f"morphology {m['file']} body {a_body} != base {self.num_bodies}"
+                self.robot_assets.append(a)
+            print(
+                f"[morphology] loaded {num_buckets} leg-morphology assets across {self.num_envs} envs "
+                f"(spawn_offset={self._morph_spawn_offset:.4f} m)"
+            )
+        if bool(getattr(self.cfg.env, "use_morphology_in_critic", False)):
+            assert self.env_morphology is not None, (
+                "env.use_morphology_in_critic=True requires domain_rand.randomize_morphology=True "
+                "(cannot expose a morphology that is not randomized)."
+            )
 
         self._get_env_origins()
         env_lower = gymapi.Vec3(0.0, 0.0, 0.0)
@@ -626,12 +688,17 @@ class BaseTask:
             pos = self.env_origins[i].clone()
             pos[:2] += torch_rand_float(-1.0, 1.0, (2, 1), device=self.device).squeeze(1)
             start_pose.p = gymapi.Vec3(*pos)
+            robot_asset_i = (
+                self.robot_assets[self.morph_bucket_ids[i]]
+                if self.randomize_morphology
+                else robot_asset
+            )
             rigid_shape_props = self._process_rigid_shape_props(rigid_shape_props_asset, i)
 
-            self.gym.set_asset_rigid_shape_properties(robot_asset, rigid_shape_props)
+            self.gym.set_asset_rigid_shape_properties(robot_asset_i, rigid_shape_props)
             actor_handle = self.gym.create_actor(
                 env_handle,
-                robot_asset,
+                robot_asset_i,
                 start_pose,
                 self.cfg.asset.name,
                 i,
@@ -1619,6 +1686,14 @@ class BaseTask:
             # self.root_states[self.actor_indices[env_ids], :3] += self.env_origins[env_ids]
             self.root_states[self.actor_indices[env_ids]] = self.base_init_state
             self.root_states[self.actor_indices[env_ids], :3] += self.env_origins[env_ids]
+        if self.env_morphology is not None:
+            # Co-design: override base spawn height per morphology (taller legs stand higher; avoids
+            # ground penetration / drop shock). At scale 1.0 this reproduces the original init height.
+            self.root_states[self.actor_indices[env_ids], 2] = (
+                self.env_origins[env_ids, 2]
+                + self.env_base_height[env_ids]
+                + self._morph_spawn_offset
+            )
         # base velocities
         # self.root_states[self.actor_indices[env_ids], 7:13] = torch_rand_float(
         #     -0.5, 0.5, (len(self.actor_indices[env_ids]), 6), device=self.device
@@ -1899,6 +1974,32 @@ class BaseTask:
 
         self.last_dof_pos[:] = self.dof_pos[:]
         
+    def _apply_morphology_pd_correction(self):
+        """Co-design: scale leg-joint p_gains/d_gains by eta(xi) for scaled legs (composes with the
+        Kp/Kd domain randomization). Wheel joints are never touched. hip joints use the thigh scale,
+        knee joints use the shank scale, abad joints use the mean of the two."""
+        kp_poly = self.cfg.control.morphology_kp_poly
+        kd_poly = self.cfg.control.morphology_kd_poly
+
+        def _poly(p, x):
+            a, b, c, d = float(p[0]), float(p[1]), float(p[2]), float(p[3])
+            return a * x ** 3 + b * x ** 2 + c * x + d
+
+        thigh_s = self.env_morphology[:, 0]        # [num_envs]
+        shank_s = self.env_morphology[:, 1]        # [num_envs]
+        mean_s = 0.5 * (thigh_s + shank_s)
+        for i, name in enumerate(self.dof_names):
+            if "wheel" in name:
+                continue
+            if "hip" in name:
+                xs = thigh_s
+            elif "knee" in name:
+                xs = shank_s
+            else:  # abad
+                xs = mean_s
+            self.p_gains[:, i] *= _poly(kp_poly, xs)
+            self.d_gains[:, i] *= _poly(kd_poly, xs)
+
     def _init_buffers(self):
         """Initialize torch tensors which will contain simulation states and processed quantities"""
         # get gym GPU state tensors
@@ -2225,6 +2326,11 @@ class BaseTask:
                 self.torques_scale.shape,
                 device=self.device,
             )
+        # Co-design: correct leg-joint PD gains for scaled legs (composes with Kp/Kd randomization).
+        if getattr(self, "randomize_morphology", False) and bool(
+            getattr(self.cfg.control, "morphology_pd_correction", False)
+        ):
+            self._apply_morphology_pd_correction()
         if self.cfg.domain_rand.randomize_default_dof_pos:
             self.default_dof_pos += torch_rand_float(
                 self.cfg.domain_rand.randomize_default_dof_pos_range[0],

@@ -339,13 +339,20 @@ class BipedWF(BaseTask):
 
         obs_components.append(self.actions)
         obs_buf = torch.cat(obs_components, dim=-1)
-        critic_obs_buf = torch.cat((
+        # Critic privileged prefix: lin_vel(0:3), Δmass(3), Δcom(4:7) — these slots are read by the
+        # encoder's vel/mass/com supervision heads at fixed offsets, so nothing may be inserted before them.
+        critic_components = [
             self.base_lin_vel * self.obs_scales.lin_vel,
             (self.base_mass - self.base_mass0).unsqueeze(-1) * self.obs_scales.mass_scale,     # Δmass
-            (self.base_com - self.base_com0)[:, :3] * self.obs_scales.com_scale,            # Δcom(xy)
-            # self.base_inertia * self.obs_scales.inertia_scale,     ##比例
-            # priv_load_feat,
-            self.obs_buf), dim=-1)
+            (self.base_com - self.base_com0)[:, :3] * self.obs_scales.com_scale,            # Δcom(xyz)
+        ]
+        # Co-design: append per-env leg morphology (thigh,shank scale) AFTER index 7, as privileged
+        # info for the critic. Centered at 0 (xi-1) so nominal morphology contributes nothing.
+        if bool(getattr(self.cfg.env, "use_morphology_in_critic", False)) and getattr(self, "env_morphology", None) is not None:
+            morph_scale = float(getattr(self.obs_scales, "morph_scale", 5.0))
+            critic_components.append((self.env_morphology - 1.0) * morph_scale)
+        critic_components.append(self.obs_buf)
+        critic_obs_buf = torch.cat(critic_components, dim=-1)
         return obs_buf, critic_obs_buf
     
     def _compute_load_estimates(self):

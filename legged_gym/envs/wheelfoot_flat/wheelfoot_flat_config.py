@@ -45,11 +45,15 @@ class BipedCfgWF(BaseConfig):
         #                   False = encoder 失去对 raw torques 的直接访问；QS features 仍可在 obs 里（如果 use_qs_in_obs=True）。
         #                   常用组合：(T, T, T) = E1 main；(T, F, T) = E2 direct；(F, N/A, T) = E3 histonly；
         #                            (F, N/A, F) = E4 true history-only；(T, T, F) = E5 QS-only-path（无 raw torques）。
-        use_torques_in_obs = True
+        use_torques_in_obs = False
         _qs_obs_dims = (8 + 4) if use_qs_in_obs else 0
         _torque_obs_dims = 8 if use_torques_in_obs else 0
         num_observations = 30 + 6 - 2 - 4 - 2 + _torque_obs_dims + _qs_obs_dims  # [+8 torque if on, +12 QS if on]
-        num_critic_observations = 7 + num_observations
+        # Co-design: expose per-env leg morphology (thigh,shank scale = 2 dims) to the critic as
+        # privileged info. Set True together with domain_rand.randomize_morphology. Default off → no change.
+        use_morphology_in_critic = False
+        _morph_critic_dims = 2 if use_morphology_in_critic else 0
+        num_critic_observations = 7 + _morph_critic_dims + num_observations
         num_height_samples = 117
         num_actions = 8
         obs_butter_cutoff_hz = 2.0  # 2nd-order Butterworth low-pass cutoff for filtered branch
@@ -185,6 +189,13 @@ class BipedCfgWF(BaseConfig):
         decimation = 4
         user_torque_limit = 80.0
         max_power = 1000.0  # [W]
+        # Co-design: correct leg-joint PD gains for scaled legs via eta(xi) polynomial
+        # (a*x^3 + b*x^2 + c*x + d). Applied ONLY when domain_rand.randomize_morphology is on;
+        # wheel joints are never touched. Defaults: eta_Kp = xi^2 (joint inertia ~ length^2),
+        # eta_Kd = xi. hip joints use thigh scale, knee joints use shank scale, abad uses the mean.
+        morphology_pd_correction = True
+        morphology_kp_poly = [0.0, 1.0, 0.0, 0.0]
+        morphology_kd_poly = [0.0, 0.0, 1.0, 0.0]
 
     class asset:
         file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/WF_TRON1A/urdf/robot.urdf"
@@ -292,6 +303,19 @@ class BipedCfgWF(BaseConfig):
         randomize_imu_offset_range = [-1.2, 1.2]
         delay_ms_range = [0, 20]
         max_push_vel_xy = 2.0
+        # --- Leg-morphology spatial domain randomization (co-design Phase 1) ---
+        # When True, each parallel env loads a robot with a different leg geometry, bucketed into
+        # morphology_num_buckets distinct URDFs generated from asset.file. Default False → single
+        # URDF (existing behavior unchanged). Pair with env.use_morphology_in_critic to feed the
+        # per-env (thigh,shank) scale to the critic as privileged info, and control.morphology_pd_correction
+        # to adjust PD gains. nominal spawn height per morphology is handled in _reset_root_states.
+        randomize_morphology = False
+        morphology_num_buckets = 64
+        morphology_thigh_scale_range = [0.8, 1.2]
+        morphology_shank_scale_range = [0.8, 1.2]
+        morphology_regenerate = True   # (re)generate morph_*.urdf at startup from asset.file
+        morphology_prefix = "morph"
+        morphology_seed = 0            # seed for sampling the bucket scales (reproducible URDF set)
 
     class rewards:
         class scales:
@@ -362,6 +386,7 @@ class BipedCfgWF(BaseConfig):
             mass_scale = 0.05
             com_scale = 5.0
             inertia_scale = 5.0
+            morph_scale = 5.0  # co-design: scales centered morphology features (xi-1)*morph_scale for the critic
         clip_observations = 100.0
         clip_actions = 100.0
 
@@ -457,6 +482,11 @@ class BipedCfgPPOWF(BaseConfig):
         schedule = "adaptive"  # could be adaptive, fixed
         gamma = 0.99
         lam = 0.95
+        # Co-design: discount regularization (paper eq 2-3). When use_discount_regularization=True,
+        # returns/advantages (and the time-out bootstrap) use gamma_reg (< gamma) to shorten the
+        # effective horizon and curb value-network memorization across morphologies. Default off.
+        use_discount_regularization = False
+        gamma_reg = 0.97
         desired_kl = 0.01
         max_grad_norm = 1.0
 

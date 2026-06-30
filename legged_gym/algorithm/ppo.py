@@ -52,6 +52,8 @@ class PPO:
         clip_param=0.2,
         gamma=0.998,
         lam=0.95,
+        gamma_reg=None,
+        use_discount_regularization=False,
         value_loss_coef=1.0,
         entropy_coef=0.0,
         learning_rate=1e-3,
@@ -112,6 +114,11 @@ class PPO:
         self.entropy_coef = entropy_coef
         self.gamma = gamma
         self.lam = lam
+        # Co-design discount regularization: returns/advantages + time-out bootstrap use gamma_used,
+        # which is the shorter-horizon gamma_reg when enabled, else the standard gamma.
+        self.use_discount_regularization = bool(use_discount_regularization)
+        self.gamma_reg = float(gamma_reg) if gamma_reg is not None else gamma
+        self.gamma_used = self.gamma_reg if self.use_discount_regularization else self.gamma
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
         self.extra_loss_vel_w = float(extra_loss_vel_w)
@@ -229,7 +236,7 @@ class PPO:
         self.transition.dones = dones
         # Bootstrapping on time outs
         if "time_outs" in infos:
-            self.transition.rewards += self.gamma * torch.squeeze(
+            self.transition.rewards += self.gamma_used * torch.squeeze(
                 self.transition.values
                 * infos["time_outs"].unsqueeze(1).to(self.device),
                 1,
@@ -243,7 +250,7 @@ class PPO:
 
     def compute_returns(self, last_critic_obs):
         last_values = self.actor_critic.evaluate(last_critic_obs).detach()
-        self.storage.compute_returns(last_values, self.gamma, self.lam)
+        self.storage.compute_returns(last_values, self.gamma_used, self.lam)
 
     def update(self):
         num_updates = 0
