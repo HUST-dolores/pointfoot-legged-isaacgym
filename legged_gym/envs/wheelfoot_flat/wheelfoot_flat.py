@@ -61,7 +61,9 @@ class BipedWF(BaseTask):
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
         self._resample_commands(env_ids)
-        # self._resample_gaits(env_ids)
+        if getattr(self.cfg.env, "use_gait_phase", False):
+            self._resample_gaits(env_ids)
+            self.gait_indices[env_ids] = 0.0
         self.remove_load(env_ids)
         # reset buffers
         self.last_actions[env_ids] = 0.0
@@ -70,6 +72,7 @@ class BipedWF(BaseTask):
         self.last_foot_positions[env_ids] = self.foot_positions[env_ids]
         self.last_dof_vel[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
+        self.foot_stance_steps[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.envs_steps_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -217,7 +220,8 @@ class BipedWF(BaseTask):
         )
         # pd controller
         torques = self.p_gains * (pos_action + self.default_dof_pos - self.dof_pos) + self.d_gains * (vel_action - self.dof_vel)
-        torques = torch.clip(torques, -self.torque_limits, self.torque_limits )  # torque limit is lower than the torque-requiring lower bound
+        _lim = self.torque_limits * self.motor_torque_limit_scale  # co-design Path A: per-env motor torque-limit scale (1.0 default -> identical to before)
+        torques = torch.clip(torques, -_lim, _lim)  # torque limit is lower than the torque-requiring lower bound
         return torques * self.torques_scale #notice that even send torque at torque limit , real motor may generate bigger torque that limit!!!!!!!!!!
 
     def post_physics_step(self):
@@ -338,6 +342,12 @@ class BipedWF(BaseTask):
             obs_components.append(load_residual_baseline_obs)
 
         obs_components.append(self.actions)
+        # Stepping mode: append sin/cos gait clock so the policy can phase-lock its gait.
+        if getattr(self.cfg.env, "use_gait_stepping", False):
+            obs_components.append(self.cmd_step)   # commanded stepping-velocity target
+        if getattr(self.cfg.env, "use_gait_phase", False):
+            obs_components.append(self.clock_inputs_sin.reshape(self.num_envs, 1))
+            obs_components.append(self.clock_inputs_cos.reshape(self.num_envs, 1))
         obs_buf = torch.cat(obs_components, dim=-1)
         # Critic privileged prefix: lin_vel(0:3), Δmass(3), Δcom(4:7) — these slots are read by the
         # encoder's vel/mass/com supervision heads at fixed offsets, so nothing may be inserted before them.
@@ -351,6 +361,10 @@ class BipedWF(BaseTask):
         if bool(getattr(self.cfg.env, "use_morphology_in_critic", False)) and getattr(self, "env_morphology", None) is not None:
             morph_scale = float(getattr(self.obs_scales, "morph_scale", 5.0))
             critic_components.append((self.env_morphology - 1.0) * morph_scale)
+        # Co-design Path A: append per-env motor design scale (1 dim) as privileged critic info, after index 7.
+        if bool(getattr(self.cfg.env, "use_motor_design_in_critic", False)) and getattr(self, "env_motor_scale", None) is not None:
+            motor_scale = float(getattr(self.obs_scales, "motor_scale", 2.0))
+            critic_components.append(((self.env_motor_scale - 1.0) * motor_scale).view(-1, 1))
         critic_components.append(self.obs_buf)
         critic_obs_buf = torch.cat(critic_components, dim=-1)
         return obs_buf, critic_obs_buf
@@ -633,8 +647,10 @@ class BipedWF(BaseTask):
             .flatten()
         )
         self._resample_commands(env_ids)
-        # self._resample_gaits(env_ids)
-        # self._step_contact_targets()
+        if getattr(self.cfg.env, "use_gait_phase", False):
+            self._step_contact_targets()
+        if getattr(self.cfg.env, "use_gait_stepping", False):
+            self._compute_step_roll_vel()
 
         if self.cfg.commands.heading_command:
             forward = quat_apply(self.base_quat, self.forward_vec)
@@ -678,6 +694,18 @@ class BipedWF(BaseTask):
         ][
             env_ids, 0
         ]
+        # step/roll decomposition: sample the commanded STEPPING-velocity component
+        _sr = self.cfg.commands.cmd_step_range
+        cs = torch.rand(len(env_ids), device=self.device) * (_sr[1] - _sr[0]) + _sr[0]
+        # Unify roll+step in ONE policy: force a fraction of envs to pure-roll (cmd_step=0) each resample,
+        # so the policy learns to ROLL on command (cmd_step~0) and STEP on command (cmd_step>0), instead of
+        # always stepping. The stepping-shaping rewards are gated by (cmd_step>0.05) so pure-roll envs get
+        # no stepping incentive. cmd_step_zero_prob=0.0 -> old behavior (always some stepping).
+        p_roll = float(getattr(self.cfg.commands, "cmd_step_zero_prob", 0.0))
+        if p_roll > 0.0:
+            roll_mask = torch.rand(len(env_ids), device=self.device) < p_roll
+            cs = torch.where(roll_mask, torch.zeros_like(cs), cs)
+        self.cmd_step[env_ids, 0] = cs
         if self.cfg.commands.heading_command:
             self.commands[env_ids, 3] = torch_rand_float(
                 self.command_ranges["heading"][0],
@@ -745,6 +773,10 @@ class BipedWF(BaseTask):
     def _init_buffers(self):
         super()._init_buffers()
         self.wheel_lin_vel = torch.zeros_like(self.foot_velocities)
+        self.cmd_step = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+        self.foot_stance_steps = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
+        self.v_roll = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.v_step = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.wheel_ang_vel = torch.zeros_like(self.base_ang_vel)
 
         self.filtered_size = self.num_obs - self.cfg.env.num_actions
@@ -833,6 +865,174 @@ class BipedWF(BaseTask):
         return torch.sum(
             torch.norm(
                 self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 1.0, dim=1)
+
+    # ---- Stepping-gait rewards (PF-style contact schedule; active only when
+    #      use_gait_stepping=True populates self.desired_contact_states) ----
+    def _reward_tracking_contacts_shaped_force(self):
+        # Penalize ground contact force during the SWING phase (desired_contact=0).
+        foot_forces = torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1)
+        desired_contact = self.desired_contact_states
+        reward = 0
+        if self.reward_scales["tracking_contacts_shaped_force"] > 0:
+            for i in range(len(self.feet_indices)):
+                reward += (1 - desired_contact[:, i]) * torch.exp(
+                    -foot_forces[:, i] ** 2 / self.cfg.rewards.gait_force_sigma)
+        else:
+            for i in range(len(self.feet_indices)):
+                reward += (1 - desired_contact[:, i]) * (
+                    1 - torch.exp(-foot_forces[:, i] ** 2 / self.cfg.rewards.gait_force_sigma))
+        return reward / len(self.feet_indices)
+
+    def _reward_tracking_contacts_shaped_vel(self):
+        # Reward foot stillness during the STANCE phase (desired_contact=1).
+        foot_velocities = torch.norm(self.foot_velocities, dim=-1)
+        desired_contact = self.desired_contact_states
+        reward = 0
+        if self.reward_scales["tracking_contacts_shaped_vel"] > 0:
+            for i in range(len(self.feet_indices)):
+                reward += desired_contact[:, i] * torch.exp(
+                    -foot_velocities[:, i] ** 2 / self.cfg.rewards.gait_vel_sigma)
+        else:
+            for i in range(len(self.feet_indices)):
+                reward += desired_contact[:, i] * (
+                    1 - torch.exp(-foot_velocities[:, i] ** 2 / self.cfg.rewards.gait_vel_sigma))
+        return reward / len(self.feet_indices)
+
+    def _reward_feet_regulation(self):
+        # Penalize planar foot velocity while the foot is on the ground.
+        feet_height = self.cfg.rewards.base_height_target * 0.001
+        reward = torch.sum(
+            torch.exp(-self.foot_heights / feet_height)
+            * torch.square(torch.norm(self.foot_velocities[:, :, :2], dim=-1)), dim=1)
+        return reward
+
+    def _reward_foot_landing_vel(self):
+        # Penalize downward velocity of a foot about to land (soft touchdown).
+        z_vels = self.foot_velocities[:, :, 2]
+        contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
+        about_to_land = (self.foot_heights < self.cfg.rewards.about_landing_threshold) & (~contacts) & (z_vels < 0.0)
+        landing_z_vels = torch.where(about_to_land, z_vels, torch.zeros_like(z_vels))
+        reward = torch.sum(torch.square(landing_z_vels), dim=1)
+        return reward
+
+    def _reward_foot_clearance(self):
+        # Reward the SWING foot (desired_contact~0) for lifting toward feet_height_target.
+        # This is the direct "pick your foot up" drive that forces real stepping (vs rolling).
+        target = self.cfg.rewards.feet_height_target
+        reward = 0
+        for i in range(len(self.feet_indices)):
+            swing = 1.0 - self.desired_contact_states[:, i]
+            clearance = torch.clip(self.foot_heights[:, i], 0.0, target) / target
+            reward += swing * clearance
+        return reward / len(self.feet_indices)
+
+    def _reward_wheel_vel(self):
+        # Penalize wheel spin -> removes the free-rolling shortcut so the robot must STEP to move.
+        # Wheels stay UNLOCKED (velocity-mode, can still spin passively); this only discourages
+        # actively driving them for propulsion. Wheel DOFs are indices 3 (wheel_L) and 7 (wheel_R).
+        return torch.sum(torch.square(self.dof_vel[:, [3, 7]]), dim=1)
+
+    def _reward_swing_phase(self):
+        # Phase-gated ALTERNATION: reward the LEFT foot lifting during gait phase [0,0.5) and the
+        # RIGHT foot during [0.5,1). Imposes which foot swings when -> forces genuine left/right
+        # alternation (the emergent gait had no timing, so one foot dominated = limp). Soft: rewards
+        # the correct foot's swing clearance; no harsh contact penalty. Needs use_gait_phase=True so
+        # self.gait_indices advances.
+        target = self.cfg.rewards.feet_swing_height_target
+        left_should = (self.gait_indices < 0.5).float()
+        clr_L = torch.clip(self.foot_heights[:, 0], 0.0, target) / target
+        clr_R = torch.clip(self.foot_heights[:, 1], 0.0, target) / target
+        step_gate = (self.cmd_step[:, 0] > 0.05).float()   # unify roll+step: only demand stepping when commanded
+        return (left_should * clr_L + (1.0 - left_should) * clr_R) * step_gate
+
+    def _reward_weight_shift(self):
+        # Teach the lateral WEIGHT TRANSFER needed to lift a foot: when the LEFT foot should swing
+        # (gait phase < 0.5), reward the vertical CONTACT FORCE being on the RIGHT foot; when the RIGHT
+        # foot should swing, reward force on the LEFT. Defined via contact force so there is no left/right
+        # sign ambiguity. This is the missing skill for 2-wheel alternating stepping (phase timing alone
+        # made it fall; this directly rewards shifting the body weight onto the intended stance foot).
+        fL = self.contact_forces[:, self.feet_indices[0], 2].clamp(min=0.0)
+        fR = self.contact_forces[:, self.feet_indices[1], 2].clamp(min=0.0)
+        total = (fL + fR).clamp(min=1.0)
+        right_frac = fR / total
+        left_should_swing = (self.gait_indices < 0.5).float()
+        step_gate = (self.cmd_step[:, 0] > 0.05).float()   # gate off when rolling (cmd_step~0)
+        return (left_should_swing * right_frac + (1.0 - left_should_swing) * (1.0 - right_frac)) * step_gate
+
+    def _reward_feet_air_time(self):
+        # Reward each foot for a proper SWING (airborne >= target) between contacts, scored at
+        # touchdown. A foot that never lifts earns 0; a foot that only "paws" (air_time < target)
+        # is PENALIZED (air_time-target < 0). Maximizing forces BOTH feet to take real alternating
+        # swings -> genuine stepping (kills the "one foot planted + one foot pawing" cheat).
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        contact_filt = torch.logical_or(contact, self.last_contacts)
+        self.last_contacts = contact
+        first_contact = (self.feet_air_time > 0.0) * contact_filt
+        self.feet_air_time += self.dt
+        rew = torch.sum((self.feet_air_time - self.cfg.rewards.feet_air_time_target) * first_contact, dim=1)
+        stepping = self.cmd_step[:, 0] > 0.05   # only reward swings when stepping is commanded (unify roll+step)
+        rew *= stepping.float()
+        self.feet_air_time *= ~contact_filt
+        return rew
+
+    def _reward_stance_symmetry(self):
+        # Penalize one foot dominating stance over the episode (the "one foot always planted" cheat).
+        # Tracks cumulative stance steps per foot; penalty = normalized |left_stance - right_stance|.
+        contact = (self.contact_forces[:, self.feet_indices, 2] > 1.0).float()
+        self.foot_stance_steps += contact
+        total = self.foot_stance_steps.sum(dim=1).clamp(min=1.0)
+        imbalance = torch.abs(self.foot_stance_steps[:, 0] - self.foot_stance_steps[:, 1]) / total
+        step_gate = (self.cmd_step[:, 0] > 0.05).float()   # L/R stance balance only matters when stepping
+        return imbalance * step_gate
+
+    def _compute_step_roll_vel(self):
+        # Decompose forward base velocity into WHEEL-ROLLING vs LEG-STEPPING parts.
+        # v_roll = contact-weighted mean wheel rolling speed (omega * radius);
+        # v_step = base_vx - v_roll (the part the body gains by the legs vaulting over planted feet).
+        r = self.cfg.asset.foot_radius
+        sign = getattr(self.cfg.commands, "wheel_roll_sign", 1.0)
+        wheel_w = self.dof_vel[:, [3, 7]]                                        # [N,2]
+        v_roll_per = wheel_w * r * sign                                          # [N,2]
+        contact = (self.contact_forces[:, self.feet_indices, 2] > 1.0).float()   # [N,2]
+        csum = contact.sum(dim=1)
+        v_roll = torch.where(
+            csum > 0,
+            (v_roll_per * contact).sum(dim=1) / csum.clamp(min=1.0),
+            v_roll_per.mean(dim=1),
+        )
+        self.v_roll = v_roll
+        self.v_step = self.base_lin_vel[:, 0] - v_roll
+
+    def _reward_tracking_step_vel(self):
+        # Track the commanded STEPPING velocity component.
+        err = torch.square(self.cmd_step[:, 0] - self.v_step)
+        return torch.exp(-err / self.cfg.rewards.tracking_sigma)
+
+    def _reward_tracking_roll_vel(self):
+        # Track the commanded ROLLING velocity component (commands[:,0] = cmd_roll).
+        err = torch.square(self.commands[:, 0] - self.v_roll)
+        return torch.exp(-err / self.cfg.rewards.tracking_sigma)
+
+    def _reward_no_fly(self):
+        # Reward exactly ONE foot in contact (single support = mid-step).
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        single = (torch.sum(contact.float(), dim=1) == 1)
+        step_gate = (self.cmd_step[:, 0] > 0.05).float()   # single-support only wanted while stepping; at roll want both down
+        return single.float() * step_gate
+
+    def _reward_no_jump(self):
+        # Reward BOTH feet in contact (prevents both-feet-off / hopping).
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        both = (torch.sum(contact.float(), dim=1) == 2)
+        return both.float()
+
+    def _reward_feet_swing_height(self):
+        # Penalize a SWING foot (not in contact) for deviating from target clearance -> forces lift.
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
+        target = self.cfg.rewards.feet_swing_height_target
+        err = torch.square(self.foot_heights - target) * (~contact).float()
+        step_gate = (self.cmd_step[:, 0] > 0.05).float()   # don't demand swing clearance when rolling
+        return torch.sum(err, dim=1) * step_gate
 
     def _reward_nominal_foot_position(self):
         #1. calculate foot postion wrt base in base frame  

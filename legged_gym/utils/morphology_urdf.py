@@ -86,6 +86,10 @@ def _kinematic_joint(root, name):
 
 def scale_robot(base_root, thigh_scale, shank_scale):
     """Return a deep-copied URDF <robot> element with thigh/shank scaled."""
+    assert thigh_scale > 0 and shank_scale > 0, (
+        f"scales must be positive (s<=0 gives zero/negative mass+inertia that destabilizes PhysX); "
+        f"got thigh={thigh_scale}, shank={shank_scale}"
+    )
     root = copy.deepcopy(base_root)
     for lname in THIGH_LINKS:
         link = root.find(f"link[@name='{lname}']")

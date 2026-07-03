@@ -48,12 +48,22 @@ class BipedCfgWF(BaseConfig):
         use_torques_in_obs = False
         _qs_obs_dims = (8 + 4) if use_qs_in_obs else 0
         _torque_obs_dims = 8 if use_torques_in_obs else 0
-        num_observations = 30 + 6 - 2 - 4 - 2 + _torque_obs_dims + _qs_obs_dims  # [+8 torque if on, +12 QS if on]
+        # Stepping/gait mode: expose sin/cos gait clock to policy obs (+2) so the policy can
+        # phase-lock a stepping gait (PF-style contact-schedule rewards). Set True together with
+        # the stepping reward scales. Default off -> baseline unchanged. Wheels stay free-rolling.
+        use_gait_stepping = True   # step/roll decomposition: adds cmd_step to obs + stepping rewards
+        use_gait_phase = True      # variant A: also add sin/cos gait clock + phase contact-schedule rewards
+        _gait_obs_dims = (1 if use_gait_stepping else 0) + (2 if use_gait_phase else 0)
+        num_observations = 30 + 6 - 2 - 4 - 2 + _torque_obs_dims + _qs_obs_dims + _gait_obs_dims  # [+2 gait clock if stepping]
         # Co-design: expose per-env leg morphology (thigh,shank scale = 2 dims) to the critic as
         # privileged info. Set True together with domain_rand.randomize_morphology. Default off → no change.
         use_morphology_in_critic = False
         _morph_critic_dims = 2 if use_morphology_in_critic else 0
-        num_critic_observations = 7 + _morph_critic_dims + num_observations
+        # Co-design Path A: expose per-env motor-torque design scale (1 dim) to the critic.
+        # Set True together with domain_rand.randomize_motor_design. Default off -> no change.
+        use_motor_design_in_critic = False
+        _motor_critic_dims = 1 if use_motor_design_in_critic else 0
+        num_critic_observations = 7 + _morph_critic_dims + _motor_critic_dims + num_observations
         num_height_samples = 117
         num_actions = 8
         obs_butter_cutoff_hz = 2.0  # 2nd-order Butterworth low-pass cutoff for filtered branch
@@ -111,6 +121,9 @@ class BipedCfgWF(BaseConfig):
 
     class commands:
         curriculum = False
+        cmd_step_range = [0.0, 0.4]   # [m/s] commanded stepping-velocity component (roll-dominant: keep small)
+        cmd_step_zero_prob = 0.0      # unify roll+step: fraction of envs forced to pure-roll (cmd_step=0) each resample. 0=off
+        wheel_roll_sign = 1.0         # sign so that +wheel_dof_vel*r == +forward roll (flip to -1.0 if smoke shows anti-correlation)
         smooth_max_lin_vel_x = 2.0
         smooth_max_lin_vel_y = 1.0
         non_smooth_max_lin_vel_x = 1.0
@@ -255,7 +268,7 @@ class BipedCfgWF(BaseConfig):
         restitution_range = [0.0, 1.0]
         randomize_base_mass = False
         added_mass_range = [-0.1, 0.1]         #
-        add_random_load = True
+        add_random_load = False  # STEPPING run: isolate walking first (re-enable to add load-carrying later)
         add_load_range = [2, 30]  # [kg] load mass range. With per_env_load_mass=True
                                  # each env independently samples one mass from this
                                  # range at actor creation (encoder sees 1024 distinct
@@ -316,6 +329,14 @@ class BipedCfgWF(BaseConfig):
         morphology_regenerate = True   # (re)generate morph_*.urdf at startup from asset.file
         morphology_prefix = "morph"
         morphology_seed = 0            # seed for sampling the bucket scales (reproducible URDF set)
+        # --- Motor-torque co-design (Path A): per-env motor "size" = torque-limit scale + mass cost ---
+        # When True, each env samples a motor_torque_scale k in motor_torque_scale_range; the joint
+        # torque LIMITS scale by k, and per the ENCOS cost curve (legged_gym/utils/motor_cost.py) the
+        # extra motor mass is added to each actuated joint's link (a real "no free torque" trade-off).
+        # Default False -> nominal motors, behavior unchanged. 1-D design variable for the simplest pipeline.
+        randomize_motor_design = False
+        motor_torque_scale_range = [0.6, 1.6]
+        motor_design_seed = 0
 
     class rewards:
         class scales:
@@ -323,18 +344,28 @@ class BipedCfgWF(BaseConfig):
             keep_balance = 1.0
 
             # tracking related rewards
-            tracking_lin_vel = 4.0
             tracking_ang_vel = 2.0
-            tracking_lin_vel_pb = 1.0
             tracking_ang_vel_pb = 0.2
+            # step/roll decomposition tracking (replaces tracking_lin_vel)
+            tracking_step_vel = 2.0   # track commanded stepping-velocity component
+            tracking_roll_vel = 2.0   # track commanded rolling-velocity component
+            no_fly = 2.5              # reward single-support (mid-step)
+            swing_phase = 3.0         # phase-gated alternation: reward correct foot swinging per gait phase
+            weight_shift = 2.0        # reward shifting weight onto the intended stance foot per gait phase
+            no_jump = 3.0             # reward double-support (no both-feet-off)
+            feet_air_time = 2.0        # reward proper alternating swings (force both feet to step)
+            stance_symmetry = -1.0     # penalize one foot dominating stance (force L/R alternation)
+            feet_swing_height = -20.0 # force swing foot up to target clearance
 
             # regulation related rewards
-            nominal_foot_position = 4.0
-            leg_symmetry = 0.5
-            same_foot_x_position = -50 # 0.5
-            same_foot_z_position = -10
+            # --- STEPPING MODE (use_gait_stepping=True): the posture-lock rewards below are
+            #     zeroed/loosened because they penalize lifting/striding feet (see WORKLOG 2026-07-01). ---
+            nominal_foot_position = 0.0     # was 4.0 — pinned foot height, blocked stepping
+            leg_symmetry = 0.0              # was 0.5
+            same_foot_x_position = 0.0      # was -50 — penalized fore/aft stride
+            same_foot_z_position = 0.0      # was -10 — penalized lifting one foot
             lin_vel_z = -0.3
-            ang_vel_xy = -0.3 #原来是-0.3，改成-0.1试试 修改
+            ang_vel_xy = -0.3
             torques = -0.00016
             dof_acc = -1.5e-7
             action_rate = -0.03
@@ -342,8 +373,13 @@ class BipedCfgWF(BaseConfig):
             collision = -50
             action_smooth = -0.03
             orientation = -12.0
-            feet_distance = -100
-            base_height = -20 #原来是-20，改成-5试试 修改
+            feet_distance = -20             # was -100 — loosened for stepping
+            base_height = -5                # was -20 — allow vertical motion for stepping
+            # --- stepping-gait contact-schedule rewards (PF-style; need use_gait_stepping=True) ---
+            tracking_contacts_shaped_force = -4.0   # STEPPING v2: was -2.0 — enforce swing-off-ground harder
+            tracking_contacts_shaped_vel = -2.0
+            foot_landing_vel = -0.15
+            feet_regulation = -0.05
 
         only_positive_rewards = False  # if true negative total rewards are clipped at zero (avoids early termination problems)
         clip_reward = 100
@@ -362,6 +398,8 @@ class BipedCfgWF(BaseConfig):
         soft_torque_limit = 0.8
         base_height_target = 0.6 + 0.1664
         feet_height_target = 0.10
+        feet_swing_height_target = 0.08   # [m] target swing-foot clearance for feet_swing_height reward
+        feet_air_time_target = 0.3   # [s] target swing duration; airborne longer than this is rewarded
         min_feet_distance = 0.32
         max_feet_distance = 0.35
         max_contact_force = 100.0  # forces above this value are penalized
@@ -370,6 +408,7 @@ class BipedCfgWF(BaseConfig):
         gait_vel_sigma = 0.25
         gait_height_sigma = 0.005
         feet_height_tracking_sigma = 0.005
+        about_landing_threshold = 0.08  # foot below this height + descending -> penalize landing vel (stepping)
 
     class normalization:
         class obs_scales:
@@ -387,6 +426,7 @@ class BipedCfgWF(BaseConfig):
             com_scale = 5.0
             inertia_scale = 5.0
             morph_scale = 5.0  # co-design: scales centered morphology features (xi-1)*morph_scale for the critic
+            motor_scale = 2.0  # co-design Path A: scales centered motor design feature (k-1)*motor_scale for the critic
         clip_observations = 100.0
         clip_actions = 100.0
 
@@ -425,7 +465,7 @@ class BipedCfgWF(BaseConfig):
             rest_offset = 0.0  # [m]
             bounce_threshold_velocity = 0.5  # 0.5 [m/s]
             max_depenetration_velocity = 1.0
-            max_gpu_contact_pairs = 2**23  # 2**24 -> needed for 8000 envs and more
+            max_gpu_contact_pairs = 2**24  # 2**24 -> needed for ~4000+ envs (WF has robot+load actor per env)
             default_buffer_size_multiplier = 5
             contact_collection = (
                 2  # 0: never, 1: last sub-step, 2: all sub-steps (default=2)

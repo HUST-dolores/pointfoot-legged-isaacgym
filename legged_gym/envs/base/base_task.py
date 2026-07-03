@@ -605,8 +605,15 @@ class BaseTask:
                 a = self.gym.load_asset(self.sim, asset_root, m["file"], asset_options)
                 a_dof = self.gym.get_asset_dof_count(a)
                 a_body = self.gym.get_asset_rigid_body_count(a)
+                a_shape = len(self.gym.get_asset_rigid_shape_properties(a))
                 assert a_dof == self.num_dof, f"morphology {m['file']} dof {a_dof} != base {self.num_dof}"
                 assert a_body == self.num_bodies, f"morphology {m['file']} body {a_body} != base {self.num_bodies}"
+                # shape props are fetched once from the base asset and written onto every bucket asset
+                # at create-time (see set_asset_rigid_shape_properties in the env loop), so the shape
+                # COUNT must also match or the base props would be mis-mapped onto a different asset.
+                assert a_shape == len(rigid_shape_props_asset), (
+                    f"morphology {m['file']} rigid-shape count {a_shape} != base {len(rigid_shape_props_asset)}"
+                )
                 self.robot_assets.append(a)
             print(
                 f"[morphology] loaded {num_buckets} leg-morphology assets across {self.num_envs} envs "
@@ -616,6 +623,26 @@ class BaseTask:
             assert self.env_morphology is not None, (
                 "env.use_morphology_in_critic=True requires domain_rand.randomize_morphology=True "
                 "(cannot expose a morphology that is not randomized)."
+            )
+
+        # --- Co-design Path A: per-env motor-torque design (torque-limit scale + mass cost) ---
+        # Default OFF -> nominal motors. When ON, each env samples a continuous torque scale k; the
+        # joint torque limits scale by k (applied in _compute_torques) and the ENCOS cost-curve motor
+        # mass is added to each actuated joint's link (in _process_rigid_body_props, which runs in the
+        # actor-creation loop below, so env_motor_scale must be ready here).
+        self.randomize_motor_design = bool(getattr(self.cfg.domain_rand, "randomize_motor_design", False))
+        self.env_motor_scale = None
+        if self.randomize_motor_design:
+            lo, hi = self.cfg.domain_rand.motor_torque_scale_range
+            _mgen = torch.Generator()
+            _mgen.manual_seed(int(getattr(self.cfg.domain_rand, "motor_design_seed", 0)))
+            self.env_motor_scale = (
+                torch.rand(self.num_envs, generator=_mgen) * (float(hi) - float(lo)) + float(lo)
+            ).to(self.device)
+            print(f"[motor-design] per-env motor torque scale in [{lo}, {hi}] across {self.num_envs} envs")
+        if bool(getattr(self.cfg.env, "use_motor_design_in_critic", False)):
+            assert self.env_motor_scale is not None, (
+                "env.use_motor_design_in_critic=True requires domain_rand.randomize_motor_design=True."
             )
 
         self._get_env_origins()
@@ -963,6 +990,23 @@ class BaseTask:
             device=self.device,
             dtype=torch.float,
         )
+        # Co-design Path A: add motor mass to each actuated joint's link per the ENCOS cost curve.
+        # (recomputeInertia=True at actor creation re-derives inertia from the heavier link, so both
+        # mass and inertia increase. Trunk props[0] is untouched, so base_mass0/com0 above are unchanged.)
+        if getattr(self, "randomize_motor_design", False) and getattr(self, "env_motor_scale", None) is not None:
+            from legged_gym.utils.motor_cost import motor_mass_delta_kg
+            if env_id == 0:
+                self._motor_leg_body_idx = [
+                    i for i, n in enumerate(self.body_names) if any(j in n for j in ("abad", "hip", "knee"))
+                ]
+                self._motor_wheel_body_idx = [i for i, n in enumerate(self.body_names) if "wheel" in n]
+            k = float(self.env_motor_scale[env_id])
+            d_leg = motor_mass_delta_kg(80.0, k)    # leg joints: 80 N·m nominal motor
+            d_wheel = motor_mass_delta_kg(40.0, k)  # wheel joints: 40 N·m nominal motor
+            for i in self._motor_leg_body_idx:
+                props[i].mass += d_leg
+            for i in self._motor_wheel_body_idx:
+                props[i].mass += d_wheel
         return props
 
     def _step_contact_targets(self):
@@ -2331,6 +2375,11 @@ class BaseTask:
             getattr(self.cfg.control, "morphology_pd_correction", False)
         ):
             self._apply_morphology_pd_correction()
+        # Co-design Path A: per-env motor torque-limit scale (default 1.0 = nominal motor). Broadcasts
+        # against torque_limits[num_dof] -> [num_envs, num_dof] inside _compute_torques.
+        self.motor_torque_limit_scale = torch.ones(self.num_envs, 1, device=self.device)
+        if getattr(self, "randomize_motor_design", False) and getattr(self, "env_motor_scale", None) is not None:
+            self.motor_torque_limit_scale = self.env_motor_scale.view(self.num_envs, 1).clone()
         if self.cfg.domain_rand.randomize_default_dof_pos:
             self.default_dof_pos += torch_rand_float(
                 self.cfg.domain_rand.randomize_default_dof_pos_range[0],

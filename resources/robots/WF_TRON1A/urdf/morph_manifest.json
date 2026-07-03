@@ -1,0 +1,26 @@
+{
+  "base_urdf": "/home/xu/limx_rl/pointfoot-legged-gym/resources/robots/WF_TRON1A/urdf/robot.urdf",
+  "morphologies": [
+    {
+      "index": 0,
+      "file": "morph_000.urdf",
+      "thigh_scale": 0.8,
+      "shank_scale": 0.8,
+      "nominal_base_height": 0.802896
+    },
+    {
+      "index": 1,
+      "file": "morph_001.urdf",
+      "thigh_scale": 1.0,
+      "shank_scale": 1.0,
+      "nominal_base_height": 0.90682
+    },
+    {
+      "index": 2,
+      "file": "morph_002.urdf",
+      "thigh_scale": 1.2,
+      "shank_scale": 1.2,
+      "nominal_base_height": 1.0107439999999999
+    }
+  ]
+}
