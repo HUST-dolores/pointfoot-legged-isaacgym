@@ -338,6 +338,25 @@ class BipedCfgWF(BaseConfig):
         motor_torque_scale_range = [0.6, 1.6]
         motor_design_seed = 0
 
+    class scenario:
+        # Co-design multi-scenario training (KNOWLEDGE_NOTES §11-12). Each env is assigned ONE primary
+        # scenario + a per-env curriculum level; conditions are realized per-env. partition=False -> no-op.
+        partition = False
+        weights = [1.0, 1.0, 1.0, 1.0]         # env-fraction weights: [obstacle, slope, load, accel]
+        curriculum = True
+        curriculum_start_frac = 0.35           # each env starts at this fraction of its scenario difficulty range
+        curriculum_step = 0.04                 # +/- level per reset on survive/early-fall
+        # obstacle: reward high foot-lift clearance + command stepping (proxy for obstacle height; no real obstacle)
+        obstacle_swing_target_range = [0.06, 0.18]   # [m] required swing clearance (curriculum)
+        obstacle_cmd_step = 0.35                      # [m/s] commanded stepping velocity for obstacle envs
+        # slope: per-env horizontal down-slope force = robot_weight_n*sin(theta) (climb +x); gravity obs tilted
+        slope_deg_range = [1.0, 10.0]                 # [deg] recalib 2026-07-04: [4,22]饱和(13°=100%摔); 过渡4-10°
+        robot_weight_n = 220.0                        # ~22.4 kg * 9.81 (nominal robot weight for slope force)
+        # load: per-env downward force = m_load*g  (force ~ weight per Exp A; avoids load-actor machinery)
+        load_kg_range = [3.0, 28.0]                   # [kg] (curriculum)
+        # accel: per-env high forward-speed command, rolling (tests wheel-motor torque)
+        accel_vx_range = [1.0, 2.5]                   # [m/s] (curriculum)
+
     class rewards:
         class scales:
             # termination related rewards

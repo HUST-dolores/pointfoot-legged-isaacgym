@@ -57,6 +57,7 @@ class BipedWF(BaseTask):
             time_out_env_ids = self.time_out_buf.nonzero(as_tuple=False).flatten()
             self.update_command_curriculum(time_out_env_ids)
         self._reset_load_timers(env_ids)
+        self._update_scenario_curriculum(env_ids)   # co-design: per-env scenario difficulty (no-op if off)
         # reset robot states
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
@@ -175,6 +176,7 @@ class BipedWF(BaseTask):
             if self.cfg.domain_rand.push_robots:
                 self._push_robots()
             self._apply_sustained_ext_force()  # 实验A：持续外力（默认关闭，不影响训练）
+            self._apply_scenario_forces()      # co-design 场景外力（坡=水平力/负载=向下力，默认关闭）
             self.gym.simulate(self.sim)
             if self.device == "cpu":
                 self.gym.fetch_results(self.sim, True)
@@ -633,6 +635,106 @@ class BipedWF(BaseTask):
     
     
     
+    # ==================== SCENARIO PARTITION (co-design multi-scenario training) ====================
+    # Each env gets ONE primary scenario (0=obstacle 1=slope 2=load 3=accel) + a per-env curriculum
+    # level. Realized via: obstacle=high foot-clearance target + commanded stepping; slope=per-env
+    # horizontal down-slope force + tilted gravity obs; load=per-env downward force (force~weight, Exp A);
+    # accel=high forward-speed command. Difficulty ramps per-env on survival. cfg.scenario.partition=False
+    # -> every method here is a no-op (existing single-condition behavior preserved).
+    def _init_scenarios_if_needed(self):
+        if hasattr(self, "scenario_id"):
+            return
+        sc = getattr(self.cfg, "scenario", None)
+        if sc is None or not getattr(sc, "partition", False):
+            self.scenario_id = None
+            return
+        w = torch.tensor([float(x) for x in sc.weights], device=self.device)
+        self.scenario_id = torch.multinomial(w, self.num_envs, replacement=True)   # 0..3 per env
+        self.scenario_level = torch.full((self.num_envs,), float(sc.curriculum_start_frac), device=self.device)
+        self.swing_height_target = torch.full(
+            (self.num_envs,), float(self.cfg.rewards.feet_swing_height_target), device=self.device
+        )
+        self._update_scenario_conditions(torch.arange(self.num_envs, device=self.device))
+        c = [int((self.scenario_id == k).sum()) for k in range(4)]
+        print(f"[scenario] partition ON: obstacle={c[0]} slope={c[1]} load={c[2]} accel={c[3]} / {self.num_envs} envs")
+
+    def _scenario_diff(self, lo, hi, env_ids=None):
+        lvl = self.scenario_level if env_ids is None else self.scenario_level[env_ids]
+        return lo + (hi - lo) * lvl
+
+    def _update_scenario_conditions(self, env_ids):
+        # Refresh per-env quantities that depend on curriculum level: obstacle swing target + slope gravity obs.
+        if getattr(self, "scenario_id", None) is None:
+            return
+        sc = self.cfg.scenario
+        sid = self.scenario_id[env_ids]
+        obst = sid == 0
+        if obst.any():
+            e = env_ids[obst]
+            self.swing_height_target[e] = self._scenario_diff(*sc.obstacle_swing_target_range, e)
+        slope = sid == 1
+        if slope.any():
+            e = env_ids[slope]
+            theta = torch.deg2rad(self._scenario_diff(*sc.slope_deg_range, e))
+            self.gravity_vec[e, 0] = torch.sin(theta)
+            self.gravity_vec[e, 1] = 0.0
+            self.gravity_vec[e, 2] = -torch.cos(theta)
+
+    def _apply_scenario_commands(self, env_ids):
+        # Override commands per scenario (called at the end of _resample_commands). Lazily inits scenarios.
+        self._init_scenarios_if_needed()
+        if getattr(self, "scenario_id", None) is None:
+            return
+        sc = self.cfg.scenario
+        sid = self.scenario_id[env_ids]
+        obst = sid == 0
+        if obst.any():
+            self.cmd_step[env_ids[obst], 0] = float(sc.obstacle_cmd_step)   # obstacle -> command stepping
+        acc = sid == 3
+        if acc.any():
+            e = env_ids[acc]
+            self.commands[e, 0] = self._scenario_diff(*sc.accel_vx_range, e)  # accel -> high forward speed
+            self.cmd_step[e, 0] = 0.0                                         # ...rolling
+        rolln = (sid == 1) | (sid == 2)
+        if rolln.any():
+            self.cmd_step[env_ids[rolln], 0] = 0.0                            # slope/load -> rolling
+
+    def _apply_scenario_forces(self):
+        # Per-env base force inside the decimation substep: slope=horizontal down-slope, load=downward weight.
+        if getattr(self, "scenario_id", None) is None:
+            return
+        sc = self.cfg.scenario
+        g = 9.81
+        self.rigid_body_external_forces[:] = 0
+        slope = (self.scenario_id == 1).float()
+        theta = torch.deg2rad(self._scenario_diff(*sc.slope_deg_range))
+        self.rigid_body_external_forces[:, self.ext_force_body_idx, 0] += (
+            -float(sc.robot_weight_n) * torch.sin(theta) * slope
+        )
+        load = (self.scenario_id == 2).float()
+        m_load = self._scenario_diff(*sc.load_kg_range)
+        self.rigid_body_external_forces[:, self.ext_force_body_idx, 2] += -m_load * g * load
+        self.gym.apply_rigid_body_force_tensors(
+            self.sim,
+            gymtorch.unwrap_tensor(self.rigid_body_external_forces.view(-1, 3)),
+            gymtorch.unwrap_tensor(self.rigid_body_external_torques.view(-1, 3)),
+            gymapi.ENV_SPACE,
+        )
+
+    def _update_scenario_curriculum(self, env_ids):
+        # Per-env adaptive difficulty: advance on survival, back off on early fall; then refresh conditions.
+        if getattr(self, "scenario_id", None) is None or not getattr(self.cfg.scenario, "curriculum", True):
+            return
+        success = self.episode_length_buf[env_ids] > (0.8 * self.max_episode_length)
+        step = float(self.cfg.scenario.curriculum_step)
+        delta = torch.where(
+            success,
+            torch.full_like(self.scenario_level[env_ids], step),
+            torch.full_like(self.scenario_level[env_ids], -step),
+        )
+        self.scenario_level[env_ids] = torch.clamp(self.scenario_level[env_ids] + delta, 0.0, 1.0)
+        self._update_scenario_conditions(env_ids)
+
     def _post_physics_step_callback(self):
         """Callback called before computing terminations, rewards, and observations
         Default behaviour: Compute ang vel command based on target and heading, compute measured terrain heights and randomly push robots
@@ -706,6 +808,7 @@ class BipedWF(BaseTask):
             roll_mask = torch.rand(len(env_ids), device=self.device) < p_roll
             cs = torch.where(roll_mask, torch.zeros_like(cs), cs)
         self.cmd_step[env_ids, 0] = cs
+        self._apply_scenario_commands(env_ids)   # co-design: override cmd per scenario (no-op if partition off)
         if self.cfg.commands.heading_command:
             self.commands[env_ids, 3] = torch_rand_float(
                 self.command_ranges["heading"][0],
@@ -938,10 +1041,13 @@ class BipedWF(BaseTask):
         # alternation (the emergent gait had no timing, so one foot dominated = limp). Soft: rewards
         # the correct foot's swing clearance; no harsh contact penalty. Needs use_gait_phase=True so
         # self.gait_indices advances.
-        target = self.cfg.rewards.feet_swing_height_target
+        _sht = getattr(self, "swing_height_target", None)   # per-env target (obstacle scenario curriculum)
+        if _sht is None:
+            _sht = self.foot_heights.new_full((self.num_envs,), float(self.cfg.rewards.feet_swing_height_target))
+        target = _sht   # always a [num_envs] tensor now (clip needs matched min/max types)
         left_should = (self.gait_indices < 0.5).float()
-        clr_L = torch.clip(self.foot_heights[:, 0], 0.0, target) / target
-        clr_R = torch.clip(self.foot_heights[:, 1], 0.0, target) / target
+        clr_L = torch.minimum(self.foot_heights[:, 0].clamp(min=0.0), target) / target
+        clr_R = torch.minimum(self.foot_heights[:, 1].clamp(min=0.0), target) / target
         step_gate = (self.cmd_step[:, 0] > 0.05).float()   # unify roll+step: only demand stepping when commanded
         return (left_should * clr_L + (1.0 - left_should) * clr_R) * step_gate
 
@@ -1029,7 +1135,8 @@ class BipedWF(BaseTask):
     def _reward_feet_swing_height(self):
         # Penalize a SWING foot (not in contact) for deviating from target clearance -> forces lift.
         contact = self.contact_forces[:, self.feet_indices, 2] > 1.0
-        target = self.cfg.rewards.feet_swing_height_target
+        _sht = getattr(self, "swing_height_target", None)   # per-env target (obstacle scenario curriculum)
+        target = _sht.unsqueeze(-1) if _sht is not None else self.cfg.rewards.feet_swing_height_target
         err = torch.square(self.foot_heights - target) * (~contact).float()
         step_gate = (self.cmd_step[:, 0] > 0.05).float()   # don't demand swing clearance when rolling
         return torch.sum(err, dim=1) * step_gate

@@ -1,0 +1,61 @@
+{
+  "base_urdf": "/home/xu/limx_rl/pointfoot-legged-gym/resources/robots/WF_TRON1A/urdf/robot.urdf",
+  "morphologies": [
+    {
+      "index": 0,
+      "file": "morphev_000.urdf",
+      "thigh_scale": 0.8327661156654358,
+      "shank_scale": 0.9964550137519836,
+      "nominal_base_height": 0.8624499416339397
+    },
+    {
+      "index": 1,
+      "file": "morphev_001.urdf",
+      "thigh_scale": 0.9613173604011536,
+      "shank_scale": 0.954367995262146,
+      "nominal_base_height": 0.8849142122548819
+    },
+    {
+      "index": 2,
+      "file": "morphev_002.urdf",
+      "thigh_scale": 1.152529001235962,
+      "shank_scale": 1.1524395942687988,
+      "nominal_base_height": 0.9860538907980918
+    },
+    {
+      "index": 3,
+      "file": "morphev_003.urdf",
+      "thigh_scale": 1.0896990299224854,
+      "shank_scale": 1.001309871673584,
+      "nominal_base_height": 0.9304650227236748
+    },
+    {
+      "index": 4,
+      "file": "morphev_004.urdf",
+      "thigh_scale": 1.1299469470977783,
+      "shank_scale": 0.9053738713264465,
+      "nominal_base_height": 0.9159967018347978
+    },
+    {
+      "index": 5,
+      "file": "morphev_005.urdf",
+      "thigh_scale": 0.9244974255561829,
+      "shank_scale": 1.0379141569137573,
+      "nominal_base_height": 0.897054153241515
+    },
+    {
+      "index": 6,
+      "file": "morphev_006.urdf",
+      "thigh_scale": 0.8436717391014099,
+      "shank_scale": 1.0485228300094604,
+      "nominal_base_height": 0.8788110710006951
+    },
+    {
+      "index": 7,
+      "file": "morphev_007.urdf",
+      "thigh_scale": 1.0940130949020386,
+      "shank_scale": 1.1959298849105835,
+      "nominal_base_height": 0.9821500855851173
+    }
+  ]
+}
