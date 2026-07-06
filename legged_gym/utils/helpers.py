@@ -282,6 +282,12 @@ def get_args():
             "help": "Commanded yaw rate (rad/s). Default 0.0.",
         },
         {
+            "name": "--cmd_step",
+            "type": float,
+            "default": 0.0,
+            "help": "Commanded stepping-velocity target (WF unified policy). 0=rolling (default); >0 up to 0.4=alternating stepping. Pinned every step so it survives command resampling.",
+        },
+        {
             "name": "--load_mass_min",
             "type": float,
             "default": -1.0,

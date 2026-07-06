@@ -745,10 +745,11 @@ def play(args):
 
     # Ch5 斜坡标定：负载全程恒定（不 on/off 循环），使翻倒由负载决定而非瞬态
     if bool(getattr(args, "load_hold", False)):
+        env_cfg.domain_rand.add_random_load = True   # ★确保物理负载启用(否则若 config add_random_load=False 则无负载)
         env_cfg.domain_rand.load_start_time_s = 0.5
         env_cfg.domain_rand.load_duration_range_s = [1.0e6, 1.0e6]
         env_cfg.domain_rand.load_interval_range_s = [1.0e6, 1.0e6]
-        print("[PLAY] LOAD-HOLD: 负载 0.5s 起全程恒定挂着")
+        print("[PLAY] LOAD-HOLD: 负载 0.5s 起全程恒定挂着 (add_random_load=True)")
 
     # 时序图专用:固定 ON 时长 + spawn 间隔 → 所有 env 同步加/卸(看估计瞬态响应)
     _ldur = float(getattr(args, "load_dur", -1.0)); _lint = float(getattr(args, "load_int", -1.0))
@@ -846,13 +847,14 @@ def play(args):
     _cmd_vx = float(getattr(args, "cmd_vx", 0.0) or 0.0)
     _cmd_vy = float(getattr(args, "cmd_vy", 0.0) or 0.0)
     _cmd_yaw = float(getattr(args, "cmd_yaw", 0.0) or 0.0)
+    _cmd_step = float(getattr(args, "cmd_step", 0.0) or 0.0)   # WF unified: 0=rolling, >0=stepping
     if robot_type.startswith("PF"):
         commands_val = to_torch([_cmd_vx, _cmd_vy, _cmd_yaw, 0], device=env.device)
     elif robot_type == "WF_TRON1A":
         commands_val = to_torch([_cmd_vx, _cmd_vy, _cmd_yaw], device=env.device)
     else:
         commands_val = to_torch([_cmd_vx, _cmd_vy, _cmd_yaw, 0.0, 0.0], device=env.device)
-    print(f"[PLAY] command = vx={_cmd_vx} vy={_cmd_vy} yaw={_cmd_yaw}")
+    print(f"[PLAY] command = vx={_cmd_vx} vy={_cmd_vy} yaw={_cmd_yaw} cmd_step={_cmd_step}")
     action_scale = env.cfg.control.action_scale_pos if robot_type == "WF_TRON1A"\
         else env.cfg.control.action_scale
     obs, obs_history, commands, critic_obs = env.get_observations()
@@ -868,6 +870,8 @@ def play(args):
     policy = ppo_runner.get_inference_policy(device=env.device)
     encoder = ppo_runner.get_inference_encoder(device=env.device)
     env.commands[:, :] = commands_val
+    if _cmd_step and hasattr(env, "cmd_step"):
+        env.cmd_step[:, 0] = _cmd_step
     obs, obs_history, commands, critic_obs = env.get_observations()
 
     # export policy as a jit module (used to run it from C++)
@@ -967,6 +971,8 @@ def play(args):
                 actions = policy(torch.cat((est_for_action, obs, commands), dim=-1).detach())
 
         env.commands[:, :] = commands_val
+        if _cmd_step and hasattr(env, "cmd_step"):
+            env.cmd_step[:, 0] = _cmd_step
         if _estop_on:
             _t = i * env.dt
             _go = (_t % (_estop_go + _estop_stop)) < _estop_go
