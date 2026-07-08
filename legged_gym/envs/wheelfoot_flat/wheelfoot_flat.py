@@ -74,6 +74,18 @@ class BipedWF(BaseTask):
         self.last_dof_vel[env_ids] = 0.0
         self.feet_air_time[env_ids] = 0.0
         self.foot_stance_steps[env_ids] = 0.0
+        if getattr(self.cfg.env, "use_jump", False):
+            self.cmd_jump[env_ids] = 0.0
+            self.jump_height_cmd[env_ids] = 0.0
+            self.jump_state[env_ids] = 0
+            self.jump_trigger_time[env_ids] = 0.0
+            self.jump_phase_time[env_ids] = 0.0
+            self.jump_peak_height[env_ids] = 0.0
+            self.jump_prev_vz[env_ids] = 0.0
+            self.jumped_flag[env_ids] = False
+            self.jump_apex_fire[env_ids] = False
+            self.jump_landed_once[env_ids] = False
+            self.jump_air_steps[env_ids] = 0.0
         self.episode_length_buf[env_ids] = 0
         self.envs_steps_buf[env_ids] = 0
         self.reset_buf[env_ids] = 1
@@ -350,6 +362,9 @@ class BipedWF(BaseTask):
         if getattr(self.cfg.env, "use_gait_phase", False):
             obs_components.append(self.clock_inputs_sin.reshape(self.num_envs, 1))
             obs_components.append(self.clock_inputs_cos.reshape(self.num_envs, 1))
+        if getattr(self.cfg.env, "use_jump", False):
+            obs_components.append(self.cmd_jump)   # command-triggered jump signal (jump task)
+            obs_components.append(self.jump_height_cmd / 0.5)   # 指定跳高目标(归一化)
         obs_buf = torch.cat(obs_components, dim=-1)
         # Critic privileged prefix: lin_vel(0:3), Δmass(3), Δcom(4:7) — these slots are read by the
         # encoder's vel/mass/com supervision heads at fixed offsets, so nothing may be inserted before them.
@@ -765,6 +780,151 @@ class BipedWF(BaseTask):
         self.base_height = torch.mean(
             self.root_states[self.actor_indices, 2].unsqueeze(1) - self.measured_heights, dim=1
         )
+        if getattr(self.cfg.env, "use_jump", False):
+            self._update_jump_command()
+
+    def _update_jump_command(self):
+        """Jump 任务(事件驱动重设计, 取代窗口法): cmd_jump 是锁存位(非窗口), 配跳跃状态机
+        IDLE(0)→CROUCH(1)→FLIGHT(2)→LANDED(3)。触发时置 cmd_jump=1 并采样目标跳高 h*; 落地站稳/超时清 0。
+        apex(vz 由正转负)一次性结算峰高(jumped_flag 锁, 每 latch 只发一次) -> 结构性单跳。
+        参考: Cassie RSS'23(2302.09450) + arXiv:2510.24584 / 2401.16337。在 base_height 更新后、compute_reward 前调用。"""
+        t = self.episode_length_buf.float() * self.dt
+        lo, hi = self.cfg.commands.jump_interval_s
+        on_ground = (self.contact_forces[:, self.feet_indices, 2] > 1.0).any(dim=1)
+        airborne = ~on_ground
+        self.jump_air_steps = torch.where(airborne, self.jump_air_steps + 1, torch.zeros_like(self.jump_air_steps))  # 连续腾空步数
+        vz = self.root_states[self.actor_indices, 9]                          # 世界系竖直速度
+        h_above = self.base_height - self.cfg.rewards.base_height_target      # 相对站高(可负)
+        st = self.jump_state.clone()                                          # 本步快照, 每 env 至多进一个相
+        self.jump_apex_fire[:] = False
+
+        init = self.jump_trigger_time == 0                                    # 首步排触发时间
+        if init.any():
+            self.jump_trigger_time[init] = t[init] + lo + (hi - lo) * torch.rand(int(init.sum()), device=self.device)
+
+        trig = (st == 0) & (t >= self.jump_trigger_time)                      # IDLE 到点 -> 触发一次跳
+        if trig.any():
+            ids = trig.nonzero(as_tuple=False).flatten()
+            self.jump_state[ids] = 1
+            self.cmd_jump[ids, 0] = 1.0
+            self.jumped_flag[ids] = False
+            self.jump_landed_once[ids] = False
+            self.jump_peak_height[ids] = 0.0
+            self.jump_phase_time[ids] = t[ids]
+            lo_h, hi_h = self.cfg.commands.jump_height_cmd_range
+            self.jump_height_cmd[ids, 0] = lo_h + (hi_h - lo_h) * torch.rand(len(ids), device=self.device)
+
+        takeoff = (st == 1) & airborne                                       # CROUCH 离地 -> FLIGHT
+        if takeoff.any():
+            ids = takeoff.nonzero(as_tuple=False).flatten()
+            self.jump_state[ids] = 2
+            self.jump_phase_time[ids] = t[ids]
+        ctimeout = (st == 1) & (~airborne) & (t - self.jump_phase_time > 1.2)  # 超时没起跳 -> 清 latch
+        if ctimeout.any():
+            ids = ctimeout.nonzero(as_tuple=False).flatten()
+            self.jump_state[ids] = 0
+            self.cmd_jump[ids, 0] = 0.0
+            self.jump_trigger_time[ids] = t[ids] + lo + (hi - lo) * torch.rand(len(ids), device=self.device)
+
+        infl = (st == 2)                                                     # FLIGHT 记峰高 + apex 一次性结算
+        if infl.any():
+            self.jump_peak_height = torch.where(infl, torch.maximum(self.jump_peak_height, h_above), self.jump_peak_height)
+            apex = infl & (self.jump_prev_vz > 0) & (vz <= 0) & (~self.jumped_flag)   # vz 过零
+            if apex.any():
+                self.jump_apex_fire[apex] = True
+                self.jumped_flag[apex] = True
+            land = infl & on_ground                                         # 落地 -> LANDED
+            if land.any():
+                miss = land & (~self.jumped_flag)                           # 没抓到apex -> 落地用峰高兜底结算
+                if miss.any():
+                    self.jump_apex_fire[miss] = True
+                    self.jumped_flag[miss] = True
+                ids = land.nonzero(as_tuple=False).flatten()
+                self.jump_state[ids] = 3
+                self.jump_landed_once[ids] = True
+                self.jump_phase_time[ids] = t[ids]
+
+        landed = (st == 3)                                                  # LANDED 站稳/超时 -> IDLE(清 latch)
+        if landed.any():
+            base_speed = torch.norm(self.base_lin_vel, dim=1)
+            done = (landed & on_ground & (base_speed < 0.3) & (h_above.abs() < 0.12)) | (landed & (t - self.jump_phase_time > 0.8))
+            if done.any():
+                ids = done.nonzero(as_tuple=False).flatten()
+                self.jump_state[ids] = 0
+                self.cmd_jump[ids, 0] = 0.0
+                self.jump_landed_once[ids] = False
+                self.jump_trigger_time[ids] = t[ids] + lo + (hi - lo) * torch.rand(len(ids), device=self.device)
+            reflight = landed & airborne & (self.jump_air_steps >= 3) & (~done)   # 二次起飞(持续腾空≥3步, 排除落地弹跳); jumped_flag已锁不再给apex
+            if reflight.any():
+                self.jump_state[reflight.nonzero(as_tuple=False).flatten()] = 2
+
+        self.jump_prev_vz = vz.clone()
+
+    def _reward_jump_apex(self):
+        # ★主奖励(指定跳高, 一次性): apex/落地时结算峰高与目标 h* 匹配, 每次 latch 只发一次 -> 结构性单跳(蹦两下也只领一次)。
+        sigma = float(getattr(self.cfg.rewards, "jump_height_track_sigma", 0.01))
+        r = torch.exp(-(self.jump_peak_height - self.jump_height_cmd[:, 0]) ** 2 / sigma)
+        return r * self.jump_apex_fire.float()
+
+    def _reward_jump_est_height(self):
+        # 稠密引导(仅 FLIGHT 上升段): 抛体预测最终顶点 z+vz²/2g 匹配目标。由起跳瞬时速度决定、之后封顶 -> 悬空久/低蹦多都不涨 -> 无法刷分。
+        vz = self.root_states[self.actor_indices, 9]
+        h_above = self.base_height - self.cfg.rewards.base_height_target
+        h_pred = h_above + (vz.clamp(min=0.0) ** 2) / (2 * 9.81)
+        # ★仅第一跳上升段(CROUCH蓄力+FLIGHT上升)且apex前给; apex后(jumped_flag)停 -> 第二跳无est可farming
+        ascending = (((self.jump_state == 1) | (self.jump_state == 2)) & (vz > 0) & (~self.jumped_flag)).float()
+        sigma = float(getattr(self.cfg.rewards, "jump_height_track_sigma", 0.01))
+        return torch.exp(-(h_pred - self.jump_height_cmd[:, 0]) ** 2 / sigma) * ascending
+
+    def _reward_jump_relaunch(self):
+        # ★惩罚二次起飞(双跳): 已落地过 且 持续腾空≥3步(真re-takeoff, 非落地弹跳) -> 罚。第一跳/短暂弹跳不误伤。
+        airborne = ~(self.contact_forces[:, self.feet_indices, 2] > 1.0).any(dim=1)
+        return (self.jump_landed_once & airborne & (self.jump_air_steps >= 3)).float()
+
+    def _reward_jump_takeoff_sym(self):
+        # CROUCH 蹬地瞬间两轮接触力对称(竖直对称起跳)。
+        f = self.contact_forces[:, self.feet_indices, 2]
+        both = ((f > 1.0).sum(dim=1) == 2).float()
+        sym = torch.exp(-torch.abs(f[:, 0] - f[:, 1]) / 50.0)
+        return both * sym * (self.jump_state == 1).float()
+
+    def _reward_jump_upright_air(self):
+        # FLIGHT 腾空保持直立。
+        upright = (-self.projected_gravity[:, 2]).clamp(0.0, 1.0)
+        return upright * (self.jump_state == 2).float()
+
+    def _reward_jump_stand(self):
+        # ★落地站住相(IDLE 待命): 机身零速 + 两轮不转 + base 回站高 + 直立。第二跳发生在该站住的相 -> 必摧毁此奖励 -> 结构性压制双跳。
+        # 轮足务必显式约束轮不转(dof 3/7), 否则用滚代替站/蹭分。
+        idle = (self.jump_state == 0).float()
+        on_ground = (self.contact_forces[:, self.feet_indices, 2] > 1.0).any(dim=1).float()
+        base_still = torch.exp(-(torch.norm(self.base_lin_vel, dim=1) ** 2) / 0.1)
+        wheel_still = torch.exp(-((self.dof_vel[:, [3, 7]] ** 2).sum(dim=1)) / 4.0)
+        height_r = torch.exp(-((self.base_height - self.cfg.rewards.base_height_target) ** 2) / 0.02)
+        upright = (-self.projected_gravity[:, 2]).clamp(0.0, 1.0)
+        return idle * on_ground * base_still * wheel_still * height_r * upright
+
+    def _reward_jump_posture(self):
+        # IDLE 待命站立地基(站到目标高度+直立, 至少一脚触地)。防塌陷早死。
+        idle = (self.jump_state == 0).float()
+        on_ground = ((self.contact_forces[:, self.feet_indices, 2] > 1.0).sum(dim=1) >= 1).float()
+        height_r = torch.exp(-((self.base_height - self.cfg.rewards.base_height_target) ** 2) / 0.08)
+        upright = (-self.projected_gravity[:, 2]).clamp(0.0, 1.0)
+        return idle * on_ground * height_r * upright
+
+    def _reward_jump_stance(self):
+        # IDLE 站姿整形: 两脚同x(不前后开立) + 站到目标宽度(不并拢), 像移动策略那样稳站。
+        idle = (self.jump_state == 0).float()
+        on_ground = ((self.contact_forces[:, self.feet_indices, 2] > 1.0).sum(dim=1) >= 1).float()
+        fpb = self.foot_positions - self.base_position.unsqueeze(1).repeat(1, len(self.feet_indices), 1)
+        for i in range(len(self.feet_indices)):
+            fpb[:, i, :] = quat_rotate_inverse(self.base_quat, fpb[:, i, :])
+        dx = fpb[:, 0, 0] - fpb[:, 1, 0]
+        dy = torch.abs(fpb[:, 0, 1] - fpb[:, 1, 1])
+        no_fore_aft = torch.exp(-(dx ** 2) / 0.01)
+        w = float(getattr(self.cfg.rewards, "jump_stance_width", 0.33))
+        width_ok = torch.exp(-((dy - w) ** 2) / 0.01)
+        return idle * on_ground * no_fore_aft * width_ok
 
     def _resample_commands(self, env_ids):
         """Randommly select commands of some environments
@@ -877,6 +1037,18 @@ class BipedWF(BaseTask):
         super()._init_buffers()
         self.wheel_lin_vel = torch.zeros_like(self.foot_velocities)
         self.cmd_step = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+        if getattr(self.cfg.env, "use_jump", False):
+            self.cmd_jump = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)          # 锁存位(obs)
+            self.jump_height_cmd = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)    # 指定跳高目标 h*(obs, m)
+            self.jump_state = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)             # 0 IDLE/1 CROUCH/2 FLIGHT/3 LANDED
+            self.jump_trigger_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)     # 下次触发时刻
+            self.jump_phase_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)       # 当前相开始时刻(超时用)
+            self.jump_peak_height = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)      # 本跳峰高(相对站高)
+            self.jump_prev_vz = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)          # 上步竖直速度(apex过零判)
+            self.jumped_flag = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)            # 本latch是否已结算apex
+            self.jump_apex_fire = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)         # 本步是否结算apex(reward读)
+            self.jump_landed_once = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)       # 本latch是否已落地过(判二次起飞)
+            self.jump_air_steps = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)        # 连续腾空步数(区分落地弹跳与真二次起飞)
         self.foot_stance_steps = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
         self.v_roll = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.v_step = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)

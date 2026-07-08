@@ -54,7 +54,10 @@ class BipedCfgWF(BaseConfig):
         use_gait_stepping = True   # step/roll decomposition: adds cmd_step to obs + stepping rewards
         use_gait_phase = True      # variant A: also add sin/cos gait clock + phase contact-schedule rewards
         _gait_obs_dims = (1 if use_gait_stepping else 0) + (2 if use_gait_phase else 0)
-        num_observations = 30 + 6 - 2 - 4 - 2 + _torque_obs_dims + _qs_obs_dims + _gait_obs_dims  # [+2 gait clock if stepping]
+        # Jump task (jump 分支): command-triggered jump. Adds cmd_jump (1 dim) to obs. Default off -> no change.
+        use_jump = False
+        _jump_obs_dims = 2 if use_jump else 0
+        num_observations = 30 + 6 - 2 - 4 - 2 + _torque_obs_dims + _qs_obs_dims + _gait_obs_dims + _jump_obs_dims  # [+2 gait clock if stepping, +2 cmd_jump+height_cmd if jump]
         # Co-design: expose per-env leg morphology (thigh,shank scale = 2 dims) to the critic as
         # privileged info. Set True together with domain_rand.randomize_morphology. Default off → no change.
         use_morphology_in_critic = False
@@ -592,3 +595,80 @@ class BipedCfgPPOWF(BaseConfig):
         load_run = "-1"  # -1 = last run
         checkpoint = -1  # -1 = last saved model
         resume_path = "None"  # updated from load_run and chkpt
+
+
+# =====================================================================================
+# Jump 分支: 解耦的跳跃任务(命令触发 cmd_jump, 无滚/迈门控, 无负载/形态DR)。
+# 复用 BipedWF 环境类; 只换 config(奖励组/命令/obs维度)。注册名 "wheelfoot_jump"。
+# 设计: Phase1 = 命令触发跳最高(峰值高度奖励, 反小跳); 后续可升级指定高度。
+# =====================================================================================
+class BipedCfgWFJump(BipedCfgWF):
+    class env(BipedCfgWF.env):
+        num_envs = 4096
+        use_gait_stepping = False   # 跳跃任务不用滚/迈步态门控
+        use_gait_phase = False
+        use_jump = True             # obs 加 cmd_jump(1维)
+        # ★子类不会自动重算 parent 的 num_observations, 显式给:
+        # base(30+6-2-4-2=28) + torque0 + qs0 + gait0 + jump2(cmd_jump+height_cmd) = 30
+        num_observations = 30
+        num_critic_observations = 7 + 30   # =37 (无 morph/motor critic)
+        fail_to_terminal_time_s = 1.0      # 0.5→1.0 早期给倾斜容差, 让策略活到用上跳跃信号
+
+    class domain_rand(BipedCfgWF.domain_rand):
+        add_random_load = False        # 跳跃无负载
+        randomize_morphology = False   # 标称机器人
+        randomize_motor_design = False
+        push_robots = False            # 先不推(跳跃已够难), 稳了再开
+
+    class scenario(BipedCfgWF.scenario):
+        partition = False              # 无 co-design 场景分区
+
+    class commands(BipedCfgWF.commands):
+        # cmd_jump 调度: 每 jump_interval_s(随机)发一次跳跃命令, 命令窗口 jump_window_s 内 cmd_jump=1
+        jump_interval_s = [2.0, 3.5]   # 事件模式: 两次跳跃触发之间的 IDLE 待命时长(随机); 窗口概念已删
+        jump_height_cmd_range = [0.15, 0.45]   # ★指定跳高目标范围(base 相对站高峰值, m)
+        resampling_time = 4.0
+
+    class rewards(BipedCfgWF.rewards):
+        # ★全新 scales(不继承父类的滚/迈奖励): roll/step/no_jump/base_height/lin_vel_z 都不列=不激活
+        class scales:
+            # Phase2b 事件驱动指定跳高(锁存位+状态机, 取代窗口法; 见WORKLOG调研): apex一次性 + 抛体稠密 + 落地站住相
+            jump_apex = 150.0          # ★主奖励(一次性): 每次跳只发一次, 峰高匹配目标 h* -> 结构性单跳
+            jump_est_height = 25.0     # 抛体预测顶点匹配目标(CROUCH蓄力+FLIGHT上升, 稠密引导, 封顶防刷分)
+            jump_takeoff_sym = 1.0     # CROUCH 蹬地对称
+            jump_upright_air = 1.5     # FLIGHT 空中直立
+            jump_relaunch = -8.0       # ★惩罚二次起飞(双跳): 落地后又腾空(-5→-8更强)
+            # 落地/待命站立(IDLE 相)
+            jump_stand = 5.0           # ★落地站住相: 零速+两轮不转+回站高(结构性压制双跳)
+            jump_posture = 5.0         # IDLE 站立地基(高度+直立)
+            jump_stance = 3.0          # IDLE 站姿整形(不前后开立+站宽), 治"站姿怪"
+            keep_balance = 1.0         # 生存正奖励
+            # 安全/正则
+            orientation = -2.0
+            ang_vel_xy = -0.1
+            torques = -0.00008
+            dof_acc = -5.0e-8
+            action_rate = -0.01
+            action_smooth = -0.01
+            dof_pos_limits = -2.0
+            collision = -5.0
+            foot_landing_vel = -0.15   # -0.05→-0.15 软着陆减少落地弹跳(弹跳被误计双跳)
+        jump_height_target_scale = 0.35   # (旧 record-increment 模式的软上限, tracking 模式下不用)
+        jump_height_track_sigma = 0.01    # ★指定跳高 tracking 的 exp 带宽(σ≈0.1m)
+        jump_stance_width = 0.33          # ★窗外站姿目标横向脚间距(m, 对齐移动策略 min/max_feet_distance 0.32/0.35)
+
+
+class BipedCfgPPOWFJump(BipedCfgPPOWF):
+    class MLP_Encoder(BipedCfgPPOWF.MLP_Encoder):
+        num_input_dim = (30 + 30 - 8) * 10   # =520 (jump obs=30: base28+cmd_jump+height_cmd)
+
+    class policy(BipedCfgPPOWF.policy):
+        init_noise_std = 1.5     # 1.0→1.5 弹道蹲-蹬-离地是狭窄动作序列, 冷启动需更大探索方差
+
+    class algorithm(BipedCfgPPOWF.algorithm):
+        entropy_coef = 0.02      # 0.01→0.02 早期维持探索, 防过早收敛到"稳站不跳"
+
+    class runner(BipedCfgPPOWF.runner):
+        run_name = "jump"
+        experiment_name = "WF_TRON1A"
+        max_iterations = 8000
