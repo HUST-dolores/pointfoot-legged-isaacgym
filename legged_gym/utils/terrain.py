@@ -68,7 +68,10 @@ class Terrain:
         self.height_field_raw = np.zeros((self.tot_rows, self.tot_cols), dtype=np.int16)
         # make_terrain() reads/writes self.terrain_num regardless of branch; init unconditionally.
         self.terrain_num = np.zeros(7, dtype=np.int16)
-        if cfg.curriculum:
+        evaluation_slopes = getattr(cfg, "evaluation_slope_degrees", None)
+        if evaluation_slopes:
+            self.evaluation_slope_terrain(evaluation_slopes)
+        elif cfg.curriculum:
             self.curiculum()
         elif cfg.selected:
             self.selected_terrain()
@@ -96,6 +99,38 @@ class Terrain:
             difficulty = np.random.choice([0.5, 0.75, 0.9])
             terrain = self.make_terrain(choice, difficulty)
             self.add_terrain_to_map(terrain, i, j)
+
+    def evaluation_slope_terrain(self, slope_degrees):
+        """Build one continuous planar slope patch per terrain row for evaluation."""
+        slopes = [float(value) for value in slope_degrees]
+        if len(slopes) != self.cfg.num_rows:
+            raise ValueError(
+                "terrain.evaluation_slope_degrees must contain exactly "
+                f"num_rows={self.cfg.num_rows} values, got {len(slopes)}"
+            )
+        for i, slope_deg in enumerate(slopes):
+            for j in range(self.cfg.num_cols):
+                terrain = terrain_utils.SubTerrain(
+                    "evaluation_slope",
+                    width=self.length_per_env_pixels,
+                    length=self.width_per_env_pixels,
+                    vertical_scale=self.cfg.vertical_scale,
+                    horizontal_scale=self.cfg.horizontal_scale,
+                )
+                x_m = (
+                    np.arange(self.length_per_env_pixels, dtype=np.float64)
+                    - 0.5 * (self.length_per_env_pixels - 1)
+                ) * self.cfg.horizontal_scale
+                height_m = x_m * np.tan(np.deg2rad(slope_deg))
+                height_raw = np.rint(height_m / self.cfg.vertical_scale)
+                if height_raw.min() < np.iinfo(np.int16).min or height_raw.max() > np.iinfo(np.int16).max:
+                    raise ValueError(
+                        f"evaluation slope {slope_deg:g} deg exceeds int16 heightfield range"
+                    )
+                terrain.height_field_raw[:, :] = height_raw.astype(np.int16)[:, None]
+                # The robot is spawned at the patch center, whose analytical height is zero.
+                terrain.evaluation_origin_z = 0.0
+                self.add_terrain_to_map(terrain, i, j)
 
     def curiculum(self):
         for j in range(self.cfg.num_cols):
@@ -240,8 +275,10 @@ class Terrain:
         x2 = int((self.env_length / 2.0 + 1) / terrain.horizontal_scale)
         y1 = int((self.env_width / 2.0 - 1) / terrain.horizontal_scale)
         y2 = int((self.env_width / 2.0 + 1) / terrain.horizontal_scale)
-        env_origin_z = (
-            np.max(terrain.height_field_raw[x1:x2, y1:y2]) * terrain.vertical_scale
+        env_origin_z = getattr(
+            terrain,
+            "evaluation_origin_z",
+            np.max(terrain.height_field_raw[x1:x2, y1:y2]) * terrain.vertical_scale,
         )
         self.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
 

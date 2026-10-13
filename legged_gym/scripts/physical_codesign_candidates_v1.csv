@@ -1,0 +1,13 @@
+label,thigh_scale,shank_scale,motor_scale,role
+nominal,1.0,1.0,1.0,normalization reference
+short_weak,0.8,0.8,0.6,short-leg motor lower bound
+short_mid,0.8,0.8,0.9571,previous five-metric shortlist
+short_strong,0.8,0.8,1.6,short-leg motor upper bound
+codesign_best,0.9143,0.8,1.1,previous four-scenario optimum
+medium_long,1.0571,1.0571,1.3143,previous interior coverage point
+long_weak,1.2,1.2,0.6,long-leg lower motor corner
+long_strong,1.2,1.2,1.6,long-leg upper motor corner
+thigh_long_shank_short,1.2,0.8,1.1,asymmetric leg coverage
+thigh_short_shank_long,0.8,1.2,1.1,asymmetric leg coverage
+nominal_weak,1.0,1.0,0.6,nominal-leg motor lower bound
+nominal_strong,1.0,1.0,1.6,nominal-leg motor upper bound

@@ -131,9 +131,9 @@ class BaseTask:
         # self.num_actors_per_env = 2 # Robot + Load
         self.load_offset_range = {
             # 训练用：质心偏置随机化（让 encoder 学到负载质心）。Exp A play 时若要居中比较,临时改成 (0,0)。
-            "x": (-0.17, 0.21),  # x 方向的偏移范围  稍微有些偏移，因为机器人前进时会有一个向前的速度
-            "y": (-0.19, 0.19),  # y 方向的偏移范围
-            "z": (0.10, 0.10),   # z 方向的偏移范围 平板在机体上方0.1m处 平板长宽0.5m，高度0.005米
+            "x": tuple(getattr(self.cfg.domain_rand, "load_offset_range_x", (-0.17, 0.21))),
+            "y": tuple(getattr(self.cfg.domain_rand, "load_offset_range_y", (-0.19, 0.19))),
+            "z": tuple(getattr(self.cfg.domain_rand, "load_offset_range_z", (0.10, 0.10))),
         }   #000
         
 
@@ -463,7 +463,28 @@ class BaseTask:
             contact_fail_buf &= self.load_contact_grace_counter <= 0
 
         fail_buf = contact_fail_buf
+        if (
+            bool(getattr(self.cfg.domain_rand, "load_drop_terminal", False))
+            and hasattr(self, "has_load")
+            and hasattr(self, "load_on_body_state")
+        ):
+            load_dropped = self.has_load & (~self.load_on_body_state)
+            if hasattr(self, "load_contact_grace_counter"):
+                load_dropped &= self.load_contact_grace_counter <= 0
+            fail_buf |= load_dropped
         fail_buf |= self.projected_gravity[:, 2] > -0.1
+        # 前跳: CROUCH 中轮心中点水平位移超阈 = 滚而不跳 -> 终止。
+        # ★只在 CROUCH(state==1)判: jump_start_pos 在 trigger 时才 latch, IDLE 相它是旧值不能用。
+        if getattr(self.cfg.env, "use_jump_distance", False) and hasattr(self, "jump_start_pos"):
+            crouch = self.jump_state == 1
+            roll_lim = float(getattr(self.cfg.rewards, "jump_roll_term_dist", 0.15))
+            wheel_mid_xy = self.foot_positions[:, :, :2].mean(dim=1)
+            rolled = crouch & (torch.norm(wheel_mid_xy - self.jump_start_pos, dim=1) > roll_lim)
+            fail_buf = fail_buf | rolled
+            if bool(getattr(self.cfg.rewards, "jump_relaunch_terminal", False)):
+                airborne = ~(self.contact_forces[:, self.feet_indices, 2] > 1.0).any(dim=1)
+                relaunched = self.jump_landed_once & airborne & (self.jump_air_steps >= 3)
+                fail_buf = fail_buf | relaunched
         self.fail_buf += fail_buf
         self.time_out_buf = (
             self.episode_length_buf > self.max_episode_length
@@ -556,6 +577,18 @@ class BaseTask:
         load_start_pose.p.z = self.base_init_state[2] - 100
 
         # --- Co-design: per-env leg-morphology assets (spatial domain randomization) ---
+        self.design_anchor_fraction = float(
+            getattr(self.cfg.domain_rand, "design_anchor_fraction", 0.0)
+        )
+        if not 0.0 <= self.design_anchor_fraction <= 1.0:
+            raise ValueError("design_anchor_fraction must be in [0,1]")
+        anchor_count = int(round(self.design_anchor_fraction * self.num_envs))
+        self.design_anchor_mask = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        if anchor_count > 0:
+            self.design_anchor_mask[:anchor_count] = True
+
         # Default OFF -> single shared asset (existing behavior). When ON, generate N URDF variants
         # (thigh/shank scaled), load one asset per morphology bucket, and assign each env a bucket.
         self.randomize_morphology = bool(getattr(self.cfg.domain_rand, "randomize_morphology", False))
@@ -574,12 +607,22 @@ class BaseTask:
             if bool(getattr(self.cfg.domain_rand, "morphology_regenerate", True)):
                 t_lo, t_hi = self.cfg.domain_rand.morphology_thigh_scale_range
                 s_lo, s_hi = self.cfg.domain_rand.morphology_shank_scale_range
+                if anchor_count > 0 and not (
+                    float(t_lo) <= 1.0 <= float(t_hi)
+                    and float(s_lo) <= 1.0 <= float(s_hi)
+                ):
+                    raise ValueError(
+                        "nominal design anchor requires morphology ranges containing 1.0"
+                    )
                 gen = torch.Generator()
                 gen.manual_seed(int(getattr(self.cfg.domain_rand, "morphology_seed", 0)))
                 scales = []
                 for _b in range(num_buckets):
-                    st = float(torch.empty(1).uniform_(float(t_lo), float(t_hi), generator=gen))
-                    ss = float(torch.empty(1).uniform_(float(s_lo), float(s_hi), generator=gen))
+                    if anchor_count > 0 and _b == 0:
+                        st, ss = 1.0, 1.0
+                    else:
+                        st = float(torch.empty(1).uniform_(float(t_lo), float(t_hi), generator=gen))
+                        ss = float(torch.empty(1).uniform_(float(s_lo), float(s_hi), generator=gen))
                     scales.append((st, ss))
                 generate_morphology_set(asset_path, asset_root, scales, prefix)
             manifest = _json.load(open(os.path.join(asset_root, f"{prefix}_manifest.json")))
@@ -594,6 +637,15 @@ class BaseTask:
             self.morph_bucket_ids = torch.randint(
                 0, num_buckets, (self.num_envs,), device=self.device
             )
+            if anchor_count > 0:
+                if not torch.allclose(
+                    self.morphology_scales[0],
+                    torch.ones(2, device=self.device),
+                ):
+                    raise RuntimeError(
+                        "morphology bucket 0 must be nominal when design anchors are enabled"
+                    )
+                self.morph_bucket_ids[self.design_anchor_mask] = 0
             self.env_morphology = self.morphology_scales[self.morph_bucket_ids]        # [num_envs, 2]
             self.env_base_height = self.morphology_base_height[self.morph_bucket_ids]  # [num_envs]
             # spawn-z offset so that at scale 1.0 the base init height matches the original config value
@@ -625,21 +677,83 @@ class BaseTask:
                 "(cannot expose a morphology that is not randomized)."
             )
 
-        # --- Co-design Path A: per-env motor-torque design (torque-limit scale + mass cost) ---
-        # Default OFF -> nominal motors. When ON, each env samples a continuous torque scale k; the
-        # joint torque limits scale by k (applied in _compute_torques) and the ENCOS cost-curve motor
-        # mass is added to each actuated joint's link (in _process_rigid_body_props, which runs in the
-        # actor-creation loop below, so env_motor_scale must be ready here).
+        # --- Co-design: per-env motor-group design (torque capability + relative mass cost) ---
+        # Default OFF -> nominal motors.  Legacy 3-D runs sample one global k and repeat it over all
+        # groups.  Formal 6-D runs provide four ranges ordered [abad, hip, knee, wheel].  Left/right
+        # actuators share a group scale.  These values must exist before actor creation because the
+        # associated relative motor-mass deltas are applied in _process_rigid_body_props.
         self.randomize_motor_design = bool(getattr(self.cfg.domain_rand, "randomize_motor_design", False))
+        if anchor_count > 0 and not (
+            self.randomize_morphology and self.randomize_motor_design
+        ):
+            raise ValueError(
+                "design_anchor_fraction requires both morphology and motor-design randomization"
+            )
         self.env_motor_scale = None
+        self.env_motor_group_scale = None
+        self.motor_group_names = tuple(
+            getattr(
+                self.cfg.domain_rand,
+                "motor_group_names",
+                ("abad", "hip", "knee", "wheel"),
+            )
+        )
+        if self.motor_group_names != ("abad", "hip", "knee", "wheel"):
+            raise ValueError(
+                "motor_group_names must be ordered [abad, hip, knee, wheel]"
+            )
         if self.randomize_motor_design:
-            lo, hi = self.cfg.domain_rand.motor_torque_scale_range
             _mgen = torch.Generator()
             _mgen.manual_seed(int(getattr(self.cfg.domain_rand, "motor_design_seed", 0)))
-            self.env_motor_scale = (
-                torch.rand(self.num_envs, generator=_mgen) * (float(hi) - float(lo)) + float(lo)
-            ).to(self.device)
-            print(f"[motor-design] per-env motor torque scale in [{lo}, {hi}] across {self.num_envs} envs")
+            group_ranges = getattr(
+                self.cfg.domain_rand,
+                "motor_group_torque_scale_ranges",
+                None,
+            )
+            if group_ranges is None:
+                lo, hi = self.cfg.domain_rand.motor_torque_scale_range
+                if float(lo) <= 0.0 or float(hi) < float(lo):
+                    raise ValueError("motor_torque_scale_range must be positive and nondecreasing")
+                global_scale = (
+                    torch.rand(self.num_envs, generator=_mgen)
+                    * (float(hi) - float(lo))
+                    + float(lo)
+                )
+                self.env_motor_group_scale = global_scale.view(-1, 1).repeat(1, 4)
+                mode = f"global [{lo}, {hi}]"
+            else:
+                if len(group_ranges) != 4 or any(len(bounds) != 2 for bounds in group_ranges):
+                    raise ValueError(
+                        "motor_group_torque_scale_ranges must contain four [lo,hi] pairs"
+                    )
+                ranges = torch.as_tensor(group_ranges, dtype=torch.float)
+                if bool((ranges[:, 0] <= 0.0).any()) or bool(
+                    (ranges[:, 1] < ranges[:, 0]).any()
+                ):
+                    raise ValueError(
+                        "motor group scale ranges must be positive and nondecreasing"
+                    )
+                if anchor_count > 0 and bool(
+                    ((ranges[:, 0] > 1.0) | (ranges[:, 1] < 1.0)).any()
+                ):
+                    raise ValueError(
+                        "nominal design anchor requires every motor range to contain 1.0"
+                    )
+                draws = torch.rand((self.num_envs, 4), generator=_mgen)
+                self.env_motor_group_scale = (
+                    draws * (ranges[:, 1] - ranges[:, 0]) + ranges[:, 0]
+                )
+                mode = f"independent {group_ranges}"
+            self.env_motor_group_scale = self.env_motor_group_scale.to(self.device)
+            if anchor_count > 0:
+                self.env_motor_group_scale[self.design_anchor_mask] = 1.0
+            # Backward-compatible scalar used by legacy logs and the optional one-dimensional
+            # critic feature.  Six-dimensional code must read env_motor_group_scale instead.
+            self.env_motor_scale = self.env_motor_group_scale.mean(dim=1)
+            print(
+                f"[motor-design] per-env motor scales mode={mode} "
+                f"groups={self.motor_group_names} across {self.num_envs} envs"
+            )
         if bool(getattr(self.cfg.env, "use_motor_design_in_critic", False)):
             assert self.env_motor_scale is not None, (
                 "env.use_motor_design_in_critic=True requires domain_rand.randomize_motor_design=True."
@@ -704,6 +818,9 @@ class BaseTask:
         self.whole_body_mass = torch.zeros(
             self.num_envs, dtype=torch.float, device=self.device, requires_grad=False
         )
+        spawn_xy_jitter = float(
+            getattr(self.cfg.terrain, "evaluation_spawn_xy_jitter", 1.0)
+        )
         # self.base_inertia = torch.zeros(
         #     self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False
         # )
@@ -713,7 +830,13 @@ class BaseTask:
                 self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs))
             )
             pos = self.env_origins[i].clone()
-            pos[:2] += torch_rand_float(-1.0, 1.0, (2, 1), device=self.device).squeeze(1)
+            if spawn_xy_jitter > 0.0:
+                pos[:2] += torch_rand_float(
+                    -spawn_xy_jitter,
+                    spawn_xy_jitter,
+                    (2, 1),
+                    device=self.device,
+                ).squeeze(1)
             start_pose.p = gymapi.Vec3(*pos)
             robot_asset_i = (
                 self.robot_assets[self.morph_bucket_ids[i]]
@@ -990,23 +1113,113 @@ class BaseTask:
             device=self.device,
             dtype=torch.float,
         )
-        # Co-design Path A: add motor mass to each actuated joint's link per the ENCOS cost curve.
-        # (recomputeInertia=True at actor creation re-derives inertia from the heavier link, so both
-        # mass and inertia increase. Trunk props[0] is untouched, so base_mass0/com0 above are unchanged.)
-        if getattr(self, "randomize_motor_design", False) and getattr(self, "env_motor_scale", None) is not None:
-            from legged_gym.utils.motor_cost import motor_mass_delta_kg
+        if bool(getattr(self.cfg.domain_rand, "attached_payload", False)):
             if env_id == 0:
-                self._motor_leg_body_idx = [
-                    i for i, n in enumerate(self.body_names) if any(j in n for j in ("abad", "hip", "knee"))
-                ]
-                self._motor_wheel_body_idx = [i for i, n in enumerate(self.body_names) if "wheel" in n]
-            k = float(self.env_motor_scale[env_id])
-            d_leg = motor_mass_delta_kg(80.0, k)    # leg joints: 80 N·m nominal motor
-            d_wheel = motor_mass_delta_kg(40.0, k)  # wheel joints: 40 N·m nominal motor
-            for i in self._motor_leg_body_idx:
-                props[i].mass += d_leg
-            for i in self._motor_wheel_body_idx:
-                props[i].mass += d_wheel
+                mass_range = self.cfg.domain_rand.attached_payload_mass_range
+                offset_x = self.cfg.domain_rand.attached_payload_offset_range_x
+                offset_y = self.cfg.domain_rand.attached_payload_offset_range_y
+                offset_z = self.cfg.domain_rand.attached_payload_offset_range_z
+                eval_masses = getattr(
+                    self.cfg.domain_rand, "attached_payload_eval_masses", None
+                )
+                if eval_masses:
+                    values = torch.as_tensor(
+                        [float(value) for value in eval_masses],
+                        device=self.device,
+                        dtype=torch.float,
+                    )
+                    level_ids = torch.div(
+                        torch.arange(self.num_envs, device=self.device) * len(values),
+                        self.num_envs,
+                        rounding_mode="floor",
+                    ).clamp(max=len(values) - 1)
+                    self.attached_payload_level_ids = level_ids
+                    self.attached_payload_mass = values[level_ids]
+                else:
+                    self.attached_payload_level_ids = None
+                    self.attached_payload_mass = torch.empty(
+                        self.num_envs, device=self.device
+                    ).uniform_(float(mass_range[0]), float(mass_range[1]))
+                self.attached_payload_offset = torch.empty(
+                    self.num_envs, 3, device=self.device
+                )
+                self.attached_payload_offset[:, 0].uniform_(
+                    float(offset_x[0]), float(offset_x[1])
+                )
+                self.attached_payload_offset[:, 1].uniform_(
+                    float(offset_y[0]), float(offset_y[1])
+                )
+                self.attached_payload_offset[:, 2].uniform_(
+                    float(offset_z[0]), float(offset_z[1])
+                )
+
+            payload_mass = float(self.attached_payload_mass[env_id].item())
+            payload_offset = self.attached_payload_offset[env_id]
+            robot_mass = float(props[0].mass)
+            combined_mass = robot_mass + payload_mass
+            combined_com = (
+                robot_mass * self.base_com0[env_id]
+                + payload_mass * payload_offset
+            ) / combined_mass
+            props[0].mass = combined_mass
+            props[0].com.x = float(combined_com[0].item())
+            props[0].com.y = float(combined_com[1].item())
+            props[0].com.z = float(combined_com[2].item())
+            self.base_mass[env_id] = combined_mass
+            self.base_com[env_id] = combined_com
+        # Co-design: add each actuator group's baseline-anchored relative mass delta to its hosting
+        # link.  recomputeInertia=True at actor creation re-derives inertia from the changed link mass.
+        if (
+            getattr(self, "randomize_motor_design", False)
+            and getattr(self, "env_motor_group_scale", None) is not None
+        ):
+            from legged_gym.utils.motor_cost import relative_motor_mass_delta_kg
+            if env_id == 0:
+                self._motor_group_body_idx = {
+                    group: [
+                        i
+                        for i, body_name in enumerate(self.body_names)
+                        if group in body_name.lower()
+                    ]
+                    for group in self.motor_group_names
+                }
+                for group, indices in self._motor_group_body_idx.items():
+                    if len(indices) != 2:
+                        raise RuntimeError(
+                            f"expected two left/right bodies for motor group {group}, got {indices}"
+                        )
+                nominal_masses = tuple(
+                    float(value)
+                    for value in getattr(
+                        self.cfg.domain_rand,
+                        "motor_nominal_masses_kg",
+                        (1.35, 1.35, 0.89, 0.365),
+                    )
+                )
+                if len(nominal_masses) != 4 or any(value <= 0.0 for value in nominal_masses):
+                    raise ValueError(
+                        "motor_nominal_masses_kg must contain four positive values"
+                    )
+                self.motor_nominal_masses_kg = nominal_masses
+                self.motor_mass_exponent = float(
+                    getattr(self.cfg.domain_rand, "motor_mass_exponent", 1.0)
+                )
+                if self.motor_mass_exponent <= 0.0:
+                    raise ValueError("motor_mass_exponent must be positive")
+            scales = self.env_motor_group_scale[env_id]
+            for group_id, group in enumerate(self.motor_group_names):
+                delta_mass = relative_motor_mass_delta_kg(
+                    self.motor_nominal_masses_kg[group_id],
+                    float(scales[group_id]),
+                    self.motor_mass_exponent,
+                )
+                for body_id in self._motor_group_body_idx[group]:
+                    new_mass = float(props[body_id].mass) + delta_mass
+                    if new_mass <= 0.0:
+                        raise RuntimeError(
+                            f"motor mass delta makes {self.body_names[body_id]} non-positive"
+                        )
+                    props[body_id].mass = new_mass
         return props
 
     def _step_contact_targets(self):
@@ -1560,15 +1773,28 @@ class BaseTask:
         m0 = self.base_mass0[env_ids]
         com0 = self.base_com0[env_ids]
 
-        # Use per-env load mass (populated at actor creation when
+        attached_mass = torch.zeros_like(m0)
+        attached_offset = com0
+        if hasattr(self, "attached_payload_mass"):
+            attached_mass = self.attached_payload_mass[env_ids]
+            attached_offset = self.attached_payload_offset[env_ids]
+
+        # Use per-env free-load mass (populated at actor creation when
         # domain_rand.per_env_load_mass=True; else uniform global value).
         if hasattr(self, "load_mass_per_env"):
-            load_mass = self.load_mass_per_env[env_ids] * load_on_body_mask.float()
+            free_mass = self.load_mass_per_env[env_ids] * load_on_body_mask.float()
         else:
-            load_mass = torch.full_like(m0, float(self.load_mass)) * load_on_body_mask.float()
-        m_eff = m0 + load_mass
+            free_mass = (
+                torch.full_like(m0, float(self.load_mass))
+                * load_on_body_mask.float()
+            )
+        m_eff = m0 + attached_mass + free_mass
         denom = m_eff.clamp_min(1e-6).unsqueeze(-1)
-        com_eff = (m0.unsqueeze(-1) * com0 + load_mass.unsqueeze(-1) * rel_body) / denom
+        com_eff = (
+            m0.unsqueeze(-1) * com0
+            + attached_mass.unsqueeze(-1) * attached_offset
+            + free_mass.unsqueeze(-1) * rel_body
+        ) / denom
 
         self.base_mass[env_ids] = m_eff
         self.base_com[env_ids] = com_eff
@@ -1675,12 +1901,15 @@ class BaseTask:
             & (load_norm >= force_min)
             & (rel_err <= force_rel_tol)
         )
+        position_only = bool(
+            getattr(self.cfg.domain_rand, "load_on_body_position_only", False)
+        )
+        inside_raw = pos_inside if position_only else (pos_inside & force_match)
+
         if full_env_query or env_ids.numel() == self.num_envs:
             self.load_pos_inside_ratio_last = pos_inside.float().mean()
             self.load_force_match_ratio_last = force_match.float().mean()
-            self.load_raw_on_body_ratio_last = (pos_inside & force_match).float().mean()
-
-        inside_raw = pos_inside & force_match
+            self.load_raw_on_body_ratio_last = inside_raw.float().mean()
 
         if apply_hysteresis:
             return self._apply_load_on_body_hysteresis(env_ids, inside_raw)
@@ -1715,6 +1944,9 @@ class BaseTask:
             env_ids (List[int]): Environemnt ids
         """
         # base position
+        terrain_z_offset = torch.zeros(
+            len(env_ids), device=self.device, dtype=self.root_states.dtype
+        )
         if self.custom_origins:
             # self.root_states[self.actor_indices[env_ids]] = self.base_init_state
             # self.root_states[self.actor_indices[env_ids], :3] += self.env_origins[env_ids]
@@ -1722,9 +1954,33 @@ class BaseTask:
             #     -0.7, 0.7, (len(self.actor_indices[env_ids]), 2), device=self.device
             self.root_states[self.actor_indices[env_ids]] = self.base_init_state
             self.root_states[self.actor_indices[env_ids], :3] += self.env_origins[env_ids]
-            self.root_states[self.actor_indices[env_ids], :2] += torch_rand_float(
-                -0.7, 0.7, (len(env_ids), 2), device=self.device
-            )  # xy position within 1m of the center
+            reset_xy_jitter = float(
+                getattr(self.cfg.terrain, "evaluation_reset_xy_jitter", 0.7)
+            )
+            if reset_xy_jitter > 0.0:
+                xy_offset = torch_rand_float(
+                    -reset_xy_jitter,
+                    reset_xy_jitter,
+                    (len(env_ids), 2),
+                    device=self.device,
+                )
+                self.root_states[self.actor_indices[env_ids], :2] += xy_offset
+                evaluation_slopes = getattr(
+                    self.cfg.terrain, "evaluation_slope_degrees", None
+                )
+                if evaluation_slopes:
+                    slope_values = torch.as_tensor(
+                        evaluation_slopes,
+                        device=self.device,
+                        dtype=self.root_states.dtype,
+                    )
+                    slope_rad = torch.deg2rad(
+                        slope_values[self.terrain_levels[env_ids]]
+                    )
+                    terrain_z_offset = xy_offset[:, 0] * torch.tan(slope_rad)
+                    self.root_states[
+                        self.actor_indices[env_ids], 2
+                    ] += terrain_z_offset
         else:
             # self.root_states[self.actor_indices[env_ids]] = self.base_init_state
             # self.root_states[self.actor_indices[env_ids], :3] += self.env_origins[env_ids]
@@ -1737,6 +1993,7 @@ class BaseTask:
                 self.env_origins[env_ids, 2]
                 + self.env_base_height[env_ids]
                 + self._morph_spawn_offset
+                + terrain_z_offset
             )
         # base velocities
         # self.root_states[self.actor_indices[env_ids], 7:13] = torch_rand_float(
@@ -1761,8 +2018,9 @@ class BaseTask:
         Args:
             env_ids (List[int]): Environemnt ids
         """
+        dof_rand_range = getattr(self.cfg.init_state, "dof_pos_randomization_range", [-0.5, 0.5])
         self.dof_pos[env_ids] = self.default_dof_pos[env_ids, :] + torch_rand_float(
-            -0.5, 0.5, (len(env_ids), self.num_dof), device=self.device
+            dof_rand_range[0], dof_rand_range[1], (len(env_ids), self.num_dof), device=self.device
         )
         self.dof_vel[env_ids] = 0.0
 
@@ -2375,11 +2633,33 @@ class BaseTask:
             getattr(self.cfg.control, "morphology_pd_correction", False)
         ):
             self._apply_morphology_pd_correction()
-        # Co-design Path A: per-env motor torque-limit scale (default 1.0 = nominal motor). Broadcasts
-        # against torque_limits[num_dof] -> [num_envs, num_dof] inside _compute_torques.
-        self.motor_torque_limit_scale = torch.ones(self.num_envs, 1, device=self.device)
-        if getattr(self, "randomize_motor_design", False) and getattr(self, "env_motor_scale", None) is not None:
-            self.motor_torque_limit_scale = self.env_motor_scale.view(self.num_envs, 1).clone()
+        # Per-env, per-DOF motor torque-limit scales.  Joint names map the four independent
+        # [abad, hip, knee, wheel] group values onto symmetric left/right actuators.
+        self.motor_torque_limit_scale = torch.ones(
+            self.num_envs, self.num_dof, device=self.device
+        )
+        if (
+            getattr(self, "randomize_motor_design", False)
+            and getattr(self, "env_motor_group_scale", None) is not None
+        ):
+            mapped = []
+            for dof_id, dof_name in enumerate(self.dof_names):
+                matches = [
+                    group_id
+                    for group_id, group in enumerate(self.motor_group_names)
+                    if group in dof_name.lower()
+                ]
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        f"DOF {dof_name!r} must map to exactly one motor group"
+                    )
+                group_id = matches[0]
+                self.motor_torque_limit_scale[:, dof_id] = (
+                    self.env_motor_group_scale[:, group_id]
+                )
+                mapped.append((dof_name, self.motor_group_names[group_id]))
+            if len(mapped) != self.num_dof:
+                raise RuntimeError("not all DOFs received a motor group scale")
         if self.cfg.domain_rand.randomize_default_dof_pos:
             self.default_dof_pos += torch_rand_float(
                 self.cfg.domain_rand.randomize_default_dof_pos_range[0],
@@ -2473,9 +2753,28 @@ class BaseTask:
             max_init_level = self.cfg.terrain.max_init_terrain_level
             if not self.cfg.terrain.curriculum:
                 max_init_level = self.cfg.terrain.num_rows - 1
-            self.terrain_levels = torch.randint(
-                0, max_init_level + 1, (self.num_envs,), device=self.device
+            evaluation_slopes = getattr(
+                self.cfg.terrain, "evaluation_slope_degrees", None
             )
+            if evaluation_slopes:
+                if self.cfg.terrain.num_cols != 1:
+                    raise ValueError(
+                        "evaluation_slope_degrees requires terrain.num_cols=1"
+                    )
+                if len(evaluation_slopes) != self.cfg.terrain.num_rows:
+                    raise ValueError(
+                        "evaluation_slope_degrees length must equal terrain.num_rows"
+                    )
+                self.terrain_levels = torch.div(
+                    torch.arange(self.num_envs, device=self.device)
+                    * self.cfg.terrain.num_rows,
+                    self.num_envs,
+                    rounding_mode="floor",
+                ).clamp(max=self.cfg.terrain.num_rows - 1)
+            else:
+                self.terrain_levels = torch.randint(
+                    0, max_init_level + 1, (self.num_envs,), device=self.device
+                )
             self.terrain_types = torch.zeros(
                 self.num_envs, dtype=torch.long, device=self.device, requires_grad=False
             )

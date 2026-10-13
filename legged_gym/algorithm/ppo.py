@@ -28,6 +28,8 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
+import copy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -77,6 +79,9 @@ class PPO:
         extra_loss_huber_delta=1.0e-2,
         use_load_residual_estimation=False,
         load_residual_baseline_obs_start=36,
+        reference_policy_coef=0.0,
+        reference_policy_context_dim=0,
+        reference_policy_anchor_tol=1.0e-6,
         device="cpu",
     ):
         self.device = device
@@ -89,6 +94,14 @@ class PPO:
         self.anneal_lr = anneal_lr
         self.vae_beta = vae_beta
         self.critic_take_latent = critic_take_latent
+        self.reference_policy_coef = float(reference_policy_coef)
+        self.reference_policy_context_dim = int(reference_policy_context_dim)
+        self.reference_policy_anchor_tol = float(reference_policy_anchor_tol)
+        if self.reference_policy_coef < 0.0:
+            raise ValueError("reference_policy_coef must be non-negative")
+        if self.reference_policy_context_dim < 0:
+            raise ValueError("reference_policy_context_dim must be non-negative")
+        self.reference_actor_critic = None
 
         self.encoder = encoder
 
@@ -136,6 +149,17 @@ class PPO:
         self.extra_loss_huber_delta = float(extra_loss_huber_delta)
         self.use_load_residual_estimation = bool(use_load_residual_estimation)
         self.load_residual_baseline_obs_start = int(load_residual_baseline_obs_start)
+
+    def capture_reference_policy(self):
+        if self.reference_policy_coef <= 0.0:
+            return
+        if self.reference_policy_context_dim <= 0:
+            raise ValueError(
+                "reference-policy preservation requires a positive context dimension"
+            )
+        self.reference_actor_critic = copy.deepcopy(self.actor_critic).eval()
+        for parameter in self.reference_actor_critic.parameters():
+            parameter.requires_grad_(False)
 
     def _elementwise_regression_loss(self, pred, target):
         """Element-wise regression loss for extra supervision.
@@ -257,6 +281,8 @@ class PPO:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_kl = 0
+        mean_reference_policy_loss = 0.0
+        mean_reference_anchor_frac = 0.0
         generator = self.storage.mini_batch_generator(
             self.num_group,
             self.num_mini_batches,
@@ -280,12 +306,11 @@ class PPO:
                 encoder_out_batch_raw, obs_batch
             )
             commands_batch = group_commands_batch
-            self.actor_critic.act(
-                torch.cat(
-                    (encoder_out_batch, obs_batch, commands_batch),
-                    dim=-1,
-                )
+            actor_input_batch = torch.cat(
+                (encoder_out_batch, obs_batch, commands_batch),
+                dim=-1,
             )
+            self.actor_critic.act(actor_input_batch)
 
             actions_log_prob_batch = self.actor_critic.get_actions_log_prob(
                 actions_batch
@@ -349,10 +374,32 @@ class PPO:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
             entropy_batch_mean = entropy_batch.mean()
+            reference_policy_loss = torch.zeros(
+                (), device=self.device, dtype=surrogate_loss.dtype
+            )
+            reference_anchor_frac = 0.0
+            if self.reference_actor_critic is not None:
+                context = commands_batch[:, -self.reference_policy_context_dim :]
+                anchor_mask = (
+                    context.abs().amax(dim=-1)
+                    <= self.reference_policy_anchor_tol
+                )
+                reference_anchor_frac = float(anchor_mask.float().mean().item())
+                if bool(anchor_mask.any()):
+                    with torch.no_grad():
+                        reference_mu = self.reference_actor_critic.act_inference(
+                            actor_input_batch
+                        )
+                    reference_policy_loss = (
+                        (mu_batch[anchor_mask] - reference_mu[anchor_mask])
+                        .pow(2)
+                        .mean()
+                    )
             loss = (
                 surrogate_loss
                 + self.value_loss_coef * value_loss
                 - self.entropy_coef * entropy_batch_mean
+                + self.reference_policy_coef * reference_policy_loss
             )
 
             if self.anneal_lr:
@@ -371,6 +418,8 @@ class PPO:
             mean_value_loss += value_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_kl += kl_mean.item()
+            mean_reference_policy_loss += reference_policy_loss.item()
+            mean_reference_anchor_frac += reference_anchor_frac
 
         num_updates_extra = 0
         mean_extra_loss = 0
@@ -517,6 +566,8 @@ class PPO:
             mean_eval_com_target_norm /= max(1, num_updates_extra)
         mean_surrogate_loss /= num_updates
         mean_kl /= num_updates
+        mean_reference_policy_loss /= num_updates
+        mean_reference_anchor_frac /= num_updates
         self.storage.clear()
         
         extra_metrics = {
@@ -526,6 +577,8 @@ class PPO:
             "load_present_frac": mean_eval_load_present_frac,
             "mass_target_abs": mean_eval_mass_target_abs,
             "com_target_norm": mean_eval_com_target_norm,
+            "reference_policy_loss": mean_reference_policy_loss,
+            "reference_anchor_frac": mean_reference_anchor_frac,
         }
 
         return (mean_value_loss, mean_extra_loss, mean_surrogate_loss, mean_kl, extra_metrics)

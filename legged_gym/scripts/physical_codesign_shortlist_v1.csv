@@ -1,0 +1,6 @@
+label,thigh_scale,shank_scale,motor_scale,role
+nominal,1.0,1.0,1.0,normalization reference
+short_mid,0.8,0.8,0.9571,seed-20260724 rank 1 and slope leader
+nominal_weak,1.0,1.0,0.6,seed-20260724 rank 2 and jump leader
+thigh_long_shank_short,1.2,0.8,1.1,seed-20260724 rank 3 and speed leader
+nominal_strong,1.0,1.0,1.6,seed-20260724 rank 4 and payload leader

@@ -2,4 +2,6 @@
 from legged_gym.envs.wheelfoot_flat.wheelfoot_flat_config import (  # noqa: F401
     BipedCfgWFJump,
     BipedCfgPPOWFJump,
+    BipedCfgWFJumpFwd,
+    BipedCfgPPOWFJumpFwd,
 )

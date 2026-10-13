@@ -62,8 +62,12 @@ elif robot_type == "WF_TRON1A":
     task_registry.register("wheelfoot_flat", BipedWF, BipedCfgWF(), BipedCfgPPOWF())
     # jump 分支: 解耦跳跃任务(命令触发 cmd_jump, 环境类复用 BipedWF)
     from legged_gym.envs.wheelfoot_jump.wheelfoot_jump import BipedWFJump
-    from legged_gym.envs.wheelfoot_jump.wheelfoot_jump_config import BipedCfgWFJump, BipedCfgPPOWFJump
+    from legged_gym.envs.wheelfoot_jump.wheelfoot_jump_config import (
+        BipedCfgWFJump, BipedCfgPPOWFJump, BipedCfgWFJumpFwd, BipedCfgPPOWFJumpFwd,
+    )
     task_registry.register("wheelfoot_jump", BipedWFJump, BipedCfgWFJump(), BipedCfgPPOWFJump())
+    # jump-forward 分支: 前跳(立定跳远, 2D命令[h*,d*], use_jump_distance门控)
+    task_registry.register("wheelfoot_jump_forward", BipedWFJump, BipedCfgWFJumpFwd(), BipedCfgPPOWFJumpFwd())
 
 else:
     print("\033[1m\033[31mError: Input ROBOT_TYPE={}".format(robot_type), 

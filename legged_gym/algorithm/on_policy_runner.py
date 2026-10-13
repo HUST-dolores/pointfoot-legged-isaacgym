@@ -222,8 +222,15 @@ class OnPolicyRunner:
 
             if self.log_dir is not None:
                 self.log(locals())
-            if it % self.save_interval == 0:
-                self.save(os.path.join(self.log_dir, "model_{}.pt".format(it)))
+            completed_iteration = it + 1
+            if completed_iteration % self.save_interval == 0:
+                self.save(
+                    os.path.join(
+                        self.log_dir,
+                        "model_{}.pt".format(completed_iteration),
+                    ),
+                    iteration=completed_iteration,
+                )
             ep_infos.clear()
 
         self.current_learning_iteration += num_learning_iterations
@@ -290,6 +297,8 @@ class OnPolicyRunner:
             self.writer.add_scalar("Metric/load_present_frac", locs["extra_metrics"].get("load_present_frac", 0.0), locs["it"])
             self.writer.add_scalar("Metric/mass_target_abs", locs["extra_metrics"].get("mass_target_abs", 0.0), locs["it"])
             self.writer.add_scalar("Metric/com_target_norm", locs["extra_metrics"].get("com_target_norm", 0.0), locs["it"])
+            self.writer.add_scalar("Loss/reference_policy", locs["extra_metrics"].get("reference_policy_loss", 0.0), locs["it"])
+            self.writer.add_scalar("Metric/reference_anchor_frac", locs["extra_metrics"].get("reference_anchor_frac", 0.0), locs["it"])
         self.writer.add_scalar(
             "Loss/surrogate", locs["mean_surrogate_loss"], locs["it"]
         )
@@ -379,29 +388,93 @@ class OnPolicyRunner:
             f"""{'Total timesteps:':>{pad}} {self.tot_timesteps}\n"""
             f"""{'Iteration time:':>{pad}} {iteration_time:.2f}s\n"""
             f"""{'Total time:':>{pad}} {self.tot_time:.2f}s\n"""
-            f"""{'ETA:':>{pad}} {self.tot_time / (locs['it'] + 1) * (
-                               locs['num_learning_iterations'] - locs['it']):.1f}s\n"""
+            f"""{'ETA:':>{pad}} {self.tot_time / (
+                               locs['it'] - self.current_learning_iteration + 1) * (
+                               locs['tot_iter'] - locs['it'] - 1):.1f}s\n"""
         )
         print(log_string)
 
-    def save(self, path, infos=None):
+    def save(self, path, infos=None, iteration=None):
         torch.save(
             {
                 "model_state_dict": self.alg.actor_critic.state_dict(),
                 "encoder_state_dict": self.alg.encoder.state_dict(),
                 "optimizer_state_dict": self.alg.optimizer.state_dict(),
-                "iter": self.current_learning_iteration,
+                "iter": self.current_learning_iteration if iteration is None else iteration,
                 "infos": infos,
             },
             path,
         )
 
+    def _load_actor_critic_with_policy_context(self, loaded_state):
+        context_dim = int(
+            self.alg_cfg.get("reference_policy_context_dim", 0) or 0
+        )
+        if context_dim <= 0:
+            raise RuntimeError(
+                "checkpoint shape mismatch without a configured policy context"
+            )
+
+        current_state = self.alg.actor_critic.state_dict()
+        actor_key = "actor.0.weight"
+        critic_key = "critic.0.weight"
+        old_actor = loaded_state[actor_key]
+        old_critic = loaded_state[critic_key]
+        new_actor = current_state[actor_key].clone()
+        new_critic = current_state[critic_key].clone()
+        if new_actor.shape[1] != old_actor.shape[1] + context_dim:
+            raise RuntimeError(
+                f"actor input width {old_actor.shape[1]} cannot expand to "
+                f"{new_actor.shape[1]} with context_dim={context_dim}"
+            )
+        if new_critic.shape[1] != old_critic.shape[1] + context_dim:
+            raise RuntimeError(
+                f"critic input width {old_critic.shape[1]} cannot expand to "
+                f"{new_critic.shape[1]} with context_dim={context_dim}"
+            )
+
+        new_actor.zero_()
+        new_actor[:, : old_actor.shape[1]] = old_actor
+
+        latent_dim = (
+            self.alg.encoder.num_output_dim
+            if self.alg.critic_take_latent
+            else 0
+        )
+        critic_prefix = old_critic.shape[1] - latent_dim
+        new_critic.zero_()
+        new_critic[:, :critic_prefix] = old_critic[:, :critic_prefix]
+        if latent_dim > 0:
+            new_critic[:, critic_prefix + context_dim :] = old_critic[
+                :, critic_prefix:
+            ]
+
+        migrated_state = dict(loaded_state)
+        migrated_state[actor_key] = new_actor
+        migrated_state[critic_key] = new_critic
+        self.alg.actor_critic.load_state_dict(migrated_state)
+        print(
+            "Expanded resumed actor/critic inputs by "
+            f"{context_dim} zero-initialized hardware-context columns"
+        )
+
     def load(self, path, load_optimizer=False):
         loaded_dict = torch.load(path)
-        self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
+        try:
+            self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
+        except RuntimeError:
+            self._load_actor_critic_with_policy_context(
+                loaded_dict["model_state_dict"]
+            )
         self.alg.encoder.load_state_dict(loaded_dict["encoder_state_dict"])
+        resume_noise_std = float(self.cfg.get("resume_noise_std", 0.0) or 0.0)
+        if resume_noise_std > 0.0:
+            with torch.no_grad():
+                self.alg.actor_critic.logstd.fill_(np.log(resume_noise_std))
+            print(f"Clamped resumed action noise std to {resume_noise_std:.3f}")
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+        self.alg.capture_reference_policy()
         self.current_learning_iteration = loaded_dict["iter"]
         return loaded_dict["infos"]
 

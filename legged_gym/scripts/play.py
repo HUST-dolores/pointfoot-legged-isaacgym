@@ -29,11 +29,13 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 from legged_gym import LEGGED_GYM_ROOT_DIR
+import hashlib
 import os
 import json
 import subprocess
 
 import isaacgym
+from isaacgym import gymapi
 from isaacgym.torch_utils import *
 from legged_gym.envs import *
 from legged_gym.utils import (
@@ -47,6 +49,171 @@ from legged_gym.utils import (
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+
+
+def _collect_robot_body_properties(env):
+    """Return actual per-env robot body masses and local COM offsets."""
+    masses = np.zeros((env.num_envs, env.num_bodies), dtype=np.float32)
+    local_com = np.zeros((env.num_envs, env.num_bodies, 3), dtype=np.float32)
+    for env_id in range(env.num_envs):
+        props = env.gym.get_actor_rigid_body_properties(
+            env.envs[env_id], env.actor_handles[env_id]
+        )
+        if len(props) != env.num_bodies:
+            raise RuntimeError(
+                f"rigid-body property count mismatch: {len(props)} != {env.num_bodies}"
+            )
+        for body_id, prop in enumerate(props):
+            masses[env_id, body_id] = float(prop.mass)
+            local_com[env_id, body_id] = (
+                float(prop.com.x),
+                float(prop.com.y),
+                float(prop.com.z),
+            )
+    return (
+        torch.as_tensor(masses, device=env.device),
+        torch.as_tensor(local_com, device=env.device),
+    )
+
+
+def _compute_inverted_pendulum_state(
+    env, body_masses, body_local_com, load_mass, load_position
+):
+    """Compute robot/system COM and sagittal lean about the wheel support axis."""
+    body_state = env.rigid_body_state[:, : env.num_bodies, :]
+    body_position = body_state[:, :, 0:3]
+    body_quat = body_state[:, :, 3:7]
+    body_com_world = body_position + quat_apply(
+        body_quat.reshape(-1, 4), body_local_com.reshape(-1, 3)
+    ).reshape(env.num_envs, env.num_bodies, 3)
+
+    robot_mass = body_masses.sum(dim=1)
+    robot_com_world = (
+        body_com_world * body_masses.unsqueeze(-1)
+    ).sum(dim=1) / robot_mass.clamp_min(1.0e-6).unsqueeze(-1)
+
+    system_mass = robot_mass + load_mass
+    system_com_world = (
+        robot_mass.unsqueeze(-1) * robot_com_world
+        + load_mass.unsqueeze(-1) * load_position
+    ) / system_mass.clamp_min(1.0e-6).unsqueeze(-1)
+
+    wheel_position = env.foot_positions
+    wheel_force_z = env.contact_forces[:, env.feet_indices, 2].clamp_min(0.0)
+    force_sum = wheel_force_z.sum(dim=1, keepdim=True)
+    wheel_midpoint = wheel_position.mean(dim=1)
+    force_weighted_support = (
+        wheel_position * wheel_force_z.unsqueeze(-1)
+    ).sum(dim=1) / force_sum.clamp_min(1.0e-6)
+    support_world = torch.where(
+        (force_sum > 1.0).expand(-1, 3), force_weighted_support, wheel_midpoint
+    )
+
+    forward_world = quat_apply(env.base_quat, env.forward_vec)
+    forward_xy = forward_world[:, 0:2]
+    forward_xy = forward_xy / torch.norm(forward_xy, dim=1, keepdim=True).clamp_min(1.0e-6)
+
+    def _lean(com_world):
+        delta = com_world - support_world
+        forward_offset = (delta[:, 0:2] * forward_xy).sum(dim=1)
+        height = delta[:, 2]
+        angle = torch.atan2(forward_offset, height)
+        return forward_offset, height, angle
+
+    robot_forward, robot_height, robot_angle = _lean(robot_com_world)
+    system_forward, system_height, system_angle = _lean(system_com_world)
+    return {
+        "robot_total_mass": robot_mass,
+        "system_total_mass": system_mass,
+        "robot_com_world_x": robot_com_world[:, 0],
+        "robot_com_world_z": robot_com_world[:, 2],
+        "system_com_world_x": system_com_world[:, 0],
+        "system_com_world_z": system_com_world[:, 2],
+        "support_world_x": support_world[:, 0],
+        "support_world_z": support_world[:, 2],
+        "support_force_z": force_sum[:, 0],
+        "robot_com_forward_from_support": robot_forward,
+        "robot_com_height_from_support": robot_height,
+        "system_com_forward_from_support": system_forward,
+        "system_com_height_from_support": system_height,
+        "robot_ip_pitch": robot_angle,
+        "system_ip_pitch": system_angle,
+    }
+
+
+def _sample_ground_normals(env, world_points):
+    """Approximate the terrain normal at world_points shaped [N, K, 3]."""
+    normals = torch.zeros_like(world_points)
+    normals[..., 2] = 1.0
+    if env.cfg.terrain.mesh_type not in ("heightfield", "trimesh"):
+        return normals
+    if not hasattr(env, "height_samples") or not hasattr(env, "terrain"):
+        return normals
+
+    horizontal_scale = float(env.terrain.cfg.horizontal_scale)
+    vertical_scale = float(env.terrain.cfg.vertical_scale)
+    border = float(env.terrain.cfg.border_size)
+    px = ((world_points[..., 0] + border) / horizontal_scale).long()
+    py = ((world_points[..., 1] + border) / horizontal_scale).long()
+    px = px.clamp(1, env.height_samples.shape[0] - 2)
+    py = py.clamp(1, env.height_samples.shape[1] - 2)
+    dz_dx = (
+        env.height_samples[px + 1, py].float()
+        - env.height_samples[px - 1, py].float()
+    ) * vertical_scale / (2.0 * horizontal_scale)
+    dz_dy = (
+        env.height_samples[px, py + 1].float()
+        - env.height_samples[px, py - 1].float()
+    ) * vertical_scale / (2.0 * horizontal_scale)
+    normals = torch.stack((-dz_dx, -dz_dy, torch.ones_like(dz_dx)), dim=-1)
+    return normals / torch.norm(normals, dim=-1, keepdim=True).clamp_min(1.0e-6)
+
+
+def _compute_wheel_contact_diagnostics(env):
+    """Return local terrain slope and wheel contact-point slip diagnostics."""
+    wheel_state = env.rigid_body_state[:, env.feet_indices, :]
+    wheel_position = wheel_state[..., 0:3]
+    wheel_velocity = wheel_state[..., 7:10]
+    wheel_angular_velocity = wheel_state[..., 10:13]
+    normal = _sample_ground_normals(env, wheel_position)
+
+    radius = float(env.cfg.asset.foot_radius)
+    contact_offset = -radius * normal
+    contact_point_velocity = wheel_velocity + torch.cross(
+        wheel_angular_velocity, contact_offset, dim=-1
+    )
+
+    forward = quat_apply(env.base_quat, env.forward_vec)
+    forward = forward.unsqueeze(1).expand_as(normal)
+    tangent = forward - (forward * normal).sum(dim=-1, keepdim=True) * normal
+    tangent = tangent / torch.norm(tangent, dim=-1, keepdim=True).clamp_min(1.0e-6)
+    longitudinal_slip = (contact_point_velocity * tangent).sum(dim=-1)
+
+    contact = env.contact_forces[:, env.feet_indices, 2] > 1.0
+    contact_weight = contact.float()
+    contact_count = contact_weight.sum(dim=1)
+    mean_abs_slip = torch.where(
+        contact_count > 0,
+        (longitudinal_slip.abs() * contact_weight).sum(dim=1)
+        / contact_count.clamp_min(1.0),
+        torch.full_like(contact_count, float("nan")),
+    )
+    slope_per_wheel = torch.rad2deg(
+        torch.acos(normal[..., 2].clamp(-1.0, 1.0))
+    )
+    mean_slope = torch.where(
+        contact_count > 0,
+        (slope_per_wheel * contact_weight).sum(dim=1)
+        / contact_count.clamp_min(1.0),
+        slope_per_wheel.mean(dim=1),
+    )
+    return {
+        "ground_slope_deg": mean_slope,
+        "wheel_contact_count": contact_count,
+        "wheel_slip_speed": mean_abs_slip,
+        "wheel_slip_left": longitudinal_slip[:, 0],
+        "wheel_slip_right": longitudinal_slip[:, 1],
+    }
 
 
 def _git_state():
@@ -137,7 +304,7 @@ def _apply_saved_env_cfg(env_cfg, train_cfg, args, log_root):
 
     # --- env dimensions (drives actor/critic input width) ---
     se = saved_env.get("env", {}) if isinstance(saved_env.get("env"), dict) else {}
-    for k in ("num_observations", "num_critic_observations"):
+    for k in ("num_observations", "num_critic_observations", "obs_history_length"):
         if se.get(k) is not None:
             _ovr(env_cfg.env, k, int(se[k]))
     # --- env flags affecting obs structure ---
@@ -145,12 +312,46 @@ def _apply_saved_env_cfg(env_cfg, train_cfg, args, log_root):
     # 字段缺失（older runs）：use_torques_in_obs 的默认是 True（该 flag 2026-05-24 才加，
     # 之前所有 ckpt 都有 raw torques）；其他 flag 若缺失则不动 in-tree 默认。
     _flag_defaults_when_missing = {"use_torques_in_obs": True}
-    for k in ("use_qs_in_obs", "use_residual_learning", "use_torques_in_obs"):
+    for k in (
+        "use_qs_in_obs",
+        "use_residual_learning",
+        "use_torques_in_obs",
+        "encoder_include_torques",
+    ):
         sv = se.get(k)
         if sv is not None:
             _ovr(env_cfg.env, k, bool(sv))
         elif k in _flag_defaults_when_missing:
             _ovr(env_cfg.env, k, _flag_defaults_when_missing[k])
+    # These features did not exist in the May payload checkpoints. Missing
+    # fields therefore mean disabled, which preserves their saved obs layout.
+    for k in ("use_gait_stepping", "use_gait_phase", "use_jump"):
+        _ovr(env_cfg.env, k, bool(se.get(k, False)))
+
+    # Restore the payload schedule used by the checkpoint. The in-tree jump
+    # config currently disables random loads, while the May 2026 estimator
+    # experiments used per-env 2--4 kg cyclic loads.
+    sd = saved_env.get("domain_rand", {})
+    if isinstance(sd, dict):
+        for k in (
+            "add_random_load",
+            "per_env_load_mass",
+            "add_load_range",
+            "load_start_time_s",
+            "load_duration_range_s",
+            "load_interval_range_s",
+            "load_contact_grace_s",
+            "load_on_body_on_steps",
+            "load_on_body_off_steps",
+            "motor_mass_exponent",
+            "motor_nominal_masses_kg",
+            "motor_power_envelope",
+            "motor_specific_power_w_per_kg",
+            "motor_power_exponent",
+            "motor_power_min_speed_rad_s",
+        ):
+            if k in sd:
+                _ovr(env_cfg.domain_rand, k, sd[k])
 
     # --- algorithm flag affecting encoder interpretation ---
     if saved_tr is not None:
@@ -178,6 +379,171 @@ def _apply_saved_env_cfg(env_cfg, train_cfg, args, log_root):
             print(f"       - {s}")
     else:
         print(f"[PLAY] in-tree cfg already matches saved cfg; no overrides needed")
+
+
+def _apply_history_length_override(env_cfg, train_cfg, args):
+    """Change GRU unroll length without changing its learned recurrent weights."""
+    requested = int(getattr(args, "history_length", -1) or -1)
+    if requested <= 0:
+        return
+    if not bool(getattr(train_cfg.MLP_Encoder, "is_gru", False)):
+        raise ValueError("--history_length is only supported for the GRU encoder")
+    trained_length = int(train_cfg.MLP_Encoder.obs_history_length)
+    trained_input_dim = int(train_cfg.MLP_Encoder.num_input_dim)
+    if trained_input_dim % trained_length != 0:
+        raise ValueError(
+            f"encoder input dim {trained_input_dim} is not divisible by "
+            f"saved history length {trained_length}"
+        )
+    per_step_dim = trained_input_dim // trained_length
+    env_cfg.env.obs_history_length = requested
+    train_cfg.MLP_Encoder.obs_history_length = requested
+    train_cfg.MLP_Encoder.num_input_dim = per_step_dim * requested
+    print(
+        "[PLAY] inference-only history ablation: "
+        f"trained H={trained_length}, play H={requested}, "
+        f"per-step dim={per_step_dim}, flat dim={per_step_dim * requested}"
+    )
+
+
+_FIXED_DESIGN_ARGS = (
+    "design_thigh",
+    "design_shank",
+    "design_abad",
+    "design_hip",
+    "design_knee",
+    "design_wheel",
+)
+
+
+def _configure_fixed_play_design(env_cfg, args):
+    """Configure and return an exact (thigh, shank, abad, hip, knee, wheel) design."""
+    values = tuple(float(getattr(args, name, -1.0)) for name in _FIXED_DESIGN_ARGS)
+    supplied = tuple(value > 0.0 for value in values)
+    if any(supplied) and not all(supplied):
+        missing = [
+            f"--{name}"
+            for name, is_supplied in zip(_FIXED_DESIGN_ARGS, supplied)
+            if not is_supplied
+        ]
+        raise ValueError(
+            "A fixed play design requires all six positive --design_* values; "
+            f"missing: {', '.join(missing)}"
+        )
+    if not any(supplied):
+        return None
+
+    power_mode = str(
+        getattr(args, "design_power_model", "saved") or "saved"
+    ).lower()
+    if power_mode not in ("saved", "on", "off"):
+        raise ValueError("--design_power_model must be saved, on, or off")
+
+    thigh, shank, abad, hip, knee, wheel = values
+    design_key = ",".join(f"{value:.9f}" for value in values)
+    digest = hashlib.sha1(design_key.encode("ascii")).hexdigest()[:10]
+    task_name = "".join(
+        char if char.isalnum() else "_" for char in str(args.task)
+    )
+    seed = int(
+        getattr(args, "seed", None)
+        if getattr(args, "seed", None) is not None
+        else getattr(env_cfg, "seed", 0)
+    )
+
+    env_cfg.domain_rand.randomize_morphology = True
+    env_cfg.domain_rand.design_anchor_fraction = 0.0
+    env_cfg.domain_rand.morphology_regenerate = True
+    env_cfg.domain_rand.morphology_num_buckets = 1
+    env_cfg.domain_rand.morphology_thigh_scale_range = [thigh, thigh]
+    env_cfg.domain_rand.morphology_shank_scale_range = [shank, shank]
+    env_cfg.domain_rand.morphology_prefix = f"play_{task_name}_{digest}"
+    env_cfg.domain_rand.morphology_seed = seed
+
+    motor_values = (abad, hip, knee, wheel)
+    env_cfg.domain_rand.randomize_motor_design = True
+    env_cfg.domain_rand.motor_group_torque_scale_ranges = [
+        [value, value] for value in motor_values
+    ]
+    env_cfg.domain_rand.motor_torque_scale_range = [
+        min(motor_values),
+        max(motor_values),
+    ]
+    env_cfg.domain_rand.motor_mass_exponent = float(
+        getattr(env_cfg.domain_rand, "motor_mass_exponent", 1.0)
+    )
+    env_cfg.domain_rand.motor_design_seed = seed
+    if power_mode != "saved":
+        env_cfg.domain_rand.motor_power_envelope = power_mode == "on"
+
+    print(
+        "[PLAY] requested fixed six-dimensional design "
+        f"(thigh, shank, abad, hip, knee, wheel)={values}; "
+        f"power_model={power_mode} "
+        f"(enabled={bool(getattr(env_cfg.domain_rand, 'motor_power_envelope', False))})"
+    )
+    return values
+
+
+def _configure_real_play_slope(env_cfg, args):
+    """Configure the same +X ascending planar terrain used by physical evaluation."""
+    slope_deg = float(getattr(args, "real_slope_deg", 0.0) or 0.0)
+    if abs(slope_deg) <= 1.0e-9:
+        return None
+    if slope_deg <= 0.0 or slope_deg >= 45.0:
+        raise ValueError("--real_slope_deg must be in (0, 45)")
+    if bool(getattr(args, "flat_terrain", False)):
+        raise ValueError("--real_slope_deg and --flat_terrain are mutually exclusive")
+    if abs(float(getattr(args, "slope_deg", 0.0) or 0.0)) > 1.0e-9:
+        raise ValueError(
+            "--real_slope_deg cannot be combined with legacy gravity-tilt --slope_deg"
+        )
+
+    length = float(getattr(args, "real_slope_length", 120.0) or 120.0)
+    width = float(getattr(args, "real_slope_width", 6.0) or 6.0)
+    if length <= 0.0 or width <= 0.0:
+        raise ValueError("--real_slope_length and --real_slope_width must be positive")
+
+    env_cfg.terrain.mesh_type = "trimesh"
+    env_cfg.terrain.curriculum = False
+    env_cfg.terrain.selected = False
+    env_cfg.terrain.horizontal_scale = 0.1
+    env_cfg.terrain.evaluation_slope_degrees = [slope_deg]
+    env_cfg.terrain.evaluation_spawn_xy_jitter = 0.0
+    env_cfg.terrain.evaluation_reset_xy_jitter = 0.15
+    env_cfg.terrain.num_rows = 1
+    env_cfg.terrain.num_cols = 1
+    env_cfg.terrain.max_init_terrain_level = 0
+    env_cfg.terrain.terrain_length = length
+    env_cfg.terrain.terrain_width = width
+    env_cfg.terrain.border_size = 5.0
+    env_cfg.terrain.static_friction = 0.8
+    env_cfg.terrain.dynamic_friction = 0.8
+    env_cfg.terrain.restitution = 0.0
+    print(
+        "[PLAY] REAL SLOPE terrain: "
+        f"{slope_deg:g} deg ascending along +world-X, "
+        f"length={length:g} m, width={width:g} m"
+    )
+    return slope_deg
+
+
+def _configure_attached_play_payload(env_cfg, args):
+    """Attach one fixed payload using the final physical-capability protocol."""
+    mass = float(getattr(args, "attached_payload_mass", -1.0))
+    if mass < 0.0:
+        return None
+    env_cfg.domain_rand.add_random_load = False
+    env_cfg.domain_rand.attached_payload = True
+    env_cfg.domain_rand.attached_payload_mass_range = [mass, mass]
+    env_cfg.domain_rand.attached_payload_eval_masses = [mass]
+    env_cfg.domain_rand.attached_payload_offset_range_x = [0.0, 0.0]
+    env_cfg.domain_rand.attached_payload_offset_range_y = [0.0, 0.0]
+    env_cfg.domain_rand.attached_payload_offset_range_z = [0.10, 0.10]
+    print(
+        f"[PLAY] fixed attached payload={mass:g} kg at base-relative z=0.10 m"
+    )
+    return mass
 
 
 def _cmd_tag(vx, vy, yaw, eps=0.05):
@@ -317,6 +683,7 @@ def _collect_run_verify(env, train_cfg, args, log_root):
         "use_torques_in_obs":         bool(getattr(cur_env_cfg.env, "use_torques_in_obs", True)),
         "use_load_residual_estimation": bool(getattr(train_cfg.algorithm, "use_load_residual_estimation", False)),
         "num_observations":           int(getattr(cur_env_cfg.env, "num_observations", -1)),
+        "obs_history_length":         int(getattr(cur_env_cfg.env, "obs_history_length", -1)),
         "extra_loss_load_boost":      float(getattr(train_cfg.algorithm, "extra_loss_load_boost", float("nan"))),
         "seed":                       int(getattr(cur_env_cfg, "seed", -1)),
         "num_envs":                   int(getattr(cur_env_cfg.env, "num_envs", -1)),
@@ -329,6 +696,7 @@ def _collect_run_verify(env, train_cfg, args, log_root):
             "use_torques_in_obs":         _dig(saved_env, "env", "use_torques_in_obs"),
             "use_load_residual_estimation": _dig(saved_tr,  "algorithm", "use_load_residual_estimation"),
             "num_observations":           _dig(saved_env, "env", "num_observations"),
+            "obs_history_length":         _dig(saved_env, "env", "obs_history_length"),
             "extra_loss_load_boost":      _dig(saved_tr,  "algorithm", "extra_loss_load_boost"),
             "seed":                       _dig(saved_env, "seed"),
             "num_envs":                   _dig(saved_env, "env", "num_envs"),
@@ -356,7 +724,8 @@ def _collect_run_verify(env, train_cfg, args, log_root):
         f"qs={cur['use_qs_in_obs']} resid_learn={cur['use_residual_learning']} "
         f"torq={cur['use_torques_in_obs']} "
         f"resid_est={cur['use_load_residual_estimation']} "
-        f"n_obs={cur['num_observations']} lb={cur['extra_loss_load_boost']:g} "
+        f"n_obs={cur['num_observations']} H={cur['obs_history_length']} "
+        f"lb={cur['extra_loss_load_boost']:g} "
         f"seed={cur['seed']} n_envs={cur['num_envs']} "
         f"commit={commit}{'-dirty' if dirty else ''} "
         f"tag={getattr(args, 'exp_tag', '') or '-'}"
@@ -396,7 +765,7 @@ def _print_run_verify_block(v):
     print(f"  {'-'*32} {'-'*16} {'-'*16} {'-'*6}")
     for k in ["use_qs_in_obs", "use_residual_learning", "use_torques_in_obs",
               "use_load_residual_estimation", "num_observations",
-              "extra_loss_load_boost", "seed", "num_envs"]:
+              "obs_history_length", "extra_loss_load_boost", "seed", "num_envs"]:
         sv, cv = saved.get(k), cur.get(k)
         sv_s = "N/A" if sv is None else str(sv)
         cv_s = str(cv)
@@ -409,6 +778,8 @@ def _print_run_verify_block(v):
         # num_envs / seed mismatches are informational, not critical
         if k in ("num_envs", "seed") and sv is not None and sv != cv:
             mark = " (i)"
+        if k == "obs_history_length" and sv is not None and sv != cv:
+            mark = " (a)"
         print(f"  {k:<32} {sv_s:<16} {cv_s:<16} {mark}")
     print(f"")
     if v["mismatches"]:
@@ -652,6 +1023,7 @@ def play(args):
         train_cfg.runner.experiment_name,
     )
     _apply_saved_env_cfg(env_cfg, train_cfg, args, _log_root_for_align)
+    _apply_history_length_override(env_cfg, train_cfg, args)
     # override some parameters for testing
     env_cfg.env.episode_length_s = 60
     # 显式 --num_envs 则尊重其值(可>30,用于统计更平滑);未显式则默认上限 30(交互式)
@@ -681,8 +1053,10 @@ def play(args):
             f"border={env_cfg.terrain.border_size}m, max_init_level={env_cfg.terrain.max_init_terrain_level}"
         )
 
-    env_cfg.noise.add_noise = True
+    env_cfg.noise.add_noise = not bool(getattr(args, "no_noise", False))
     env_cfg.noise.noise_level = 0.5
+    if not env_cfg.noise.add_noise:
+        print("[PLAY] observation noise disabled")
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.randomize_restitution = False
     env_cfg.domain_rand.randomize_base_com = False
@@ -696,6 +1070,7 @@ def play(args):
     env_cfg.domain_rand.randomize_default_dof_pos = False
     env_cfg.domain_rand.randomize_action_delay = False
     env_cfg.domain_rand.load_debug = True
+    _fixed_design = _configure_fixed_play_design(env_cfg, args)
 
     # CLI override: load mass range (for OOD experiments). Negative means no override.
     _lm_min = float(getattr(args, "load_mass_min", -1.0) or -1.0)
@@ -761,6 +1136,9 @@ def play(args):
         env_cfg.domain_rand.load_interval_range_s = [_lint, _lint]
         print(f"[PLAY] LOAD-CYCLE(sync): on={_ldur}s every {_lint}s, start={env_cfg.domain_rand.load_start_time_s}s")
 
+    _attached_payload_mass = _configure_attached_play_payload(env_cfg, args)
+    _real_slope_deg = _configure_real_play_slope(env_cfg, args)
+
     # Ch5 斜坡标定：向前倾斜重力 slope_deg 度模拟坡度（平地+倾斜重力 ≡ 坡上）
     _slope_deg = float(getattr(args, "slope_deg", 0.0) or 0.0)
     if abs(_slope_deg) > 1e-6:
@@ -770,6 +1148,74 @@ def play(args):
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    if bool(getattr(args, "highlight_load", False)):
+        load_color = gymapi.Vec3(0.95, 0.28, 0.05)
+        for env_handle, load_handle in zip(env.envs, env.load_handles):
+            env.gym.set_rigid_body_color(
+                env_handle,
+                load_handle,
+                0,
+                gymapi.MESH_VISUAL,
+                load_color,
+            )
+        print("[PLAY] visible load actor highlighted in orange (rendering only)")
+    if _fixed_design is not None:
+        actual_morphology = env.env_morphology[0].detach().cpu().numpy()
+        actual_motors = env.env_motor_group_scale[0].detach().cpu().numpy()
+        actual_design = np.concatenate((actual_morphology, actual_motors))
+        if not np.allclose(
+            actual_design,
+            np.asarray(_fixed_design, dtype=np.float64),
+            rtol=0.0,
+            atol=1.0e-6,
+        ):
+            raise RuntimeError(
+                "fixed play design verification failed: "
+                f"requested={_fixed_design}, actual={actual_design.tolist()}"
+            )
+        print(
+            "[PLAY] VERIFIED actual six-dimensional design="
+            f"{tuple(float(value) for value in actual_design)}"
+        )
+    if _attached_payload_mass is not None:
+        actual_payload = float(env.attached_payload_mass[0].item())
+        if not np.isclose(actual_payload, _attached_payload_mass, atol=1.0e-6):
+            raise RuntimeError(
+                "attached payload verification failed: "
+                f"requested={_attached_payload_mass}, actual={actual_payload}"
+            )
+        print(f"[PLAY] VERIFIED attached payload={actual_payload:g} kg")
+    if _real_slope_deg is not None:
+        actual_slopes = np.asarray(
+            env.cfg.terrain.evaluation_slope_degrees, dtype=np.float64
+        )
+        if actual_slopes.shape != (1,) or not np.isclose(
+            actual_slopes[0], _real_slope_deg
+        ):
+            raise RuntimeError(
+                "real slope verification failed: "
+                f"requested={_real_slope_deg}, actual={actual_slopes.tolist()}"
+            )
+        print(
+            f"[PLAY] VERIFIED real terrain slope={actual_slopes[0]:g} deg "
+            "ascending along +world-X"
+        )
+    _balance_body_masses, _balance_body_local_com = _collect_robot_body_properties(env)
+    _balance_robot_mass = _balance_body_masses.sum(dim=1)
+    print(
+        "[PLAY] whole-body balance logging enabled: "
+        f"robot mass range={float(_balance_robot_mass.min()):.4f}.."
+        f"{float(_balance_robot_mass.max()):.4f} kg"
+    )
+    _jump_dist = float(getattr(args, "jump_dist", -1.0) or -1.0)
+    _jump_height = float(getattr(args, "jump_height", -1.0) or -1.0)
+    if getattr(env.cfg.env, "use_jump", False):
+        if _jump_height >= 0.0:
+            env.cfg.commands.jump_height_cmd_range = [_jump_height, _jump_height]
+            print(f"[PLAY] fixed jump_height_cmd h*={_jump_height:.3f} m")
+        if getattr(env.cfg.env, "use_jump_distance", False) and _jump_dist >= 0.0:
+            env.cfg.commands.jump_dist_cmd_range = [_jump_dist, _jump_dist]
+            print(f"[PLAY] fixed jump_dist_cmd d*={_jump_dist:.3f} m")
 
     # Ch5 斜坡标定：obs 的"向下"方向也倾斜，与物理重力一致（否则 projected_gravity 与物理不符）
     if abs(_slope_deg) > 1e-6:
@@ -1028,14 +1474,13 @@ def play(args):
                 )
                 env.gym.write_viewer_image_to_file(env.viewer, filename)
                 img_idx += 1
-        if MOVE_CAMERA:
+        if MOVE_CAMERA and bool(getattr(args, "follow_camera", False)):
             camera_offset = np.array(env_cfg.viewer.pos)
             target_position = np.array(
                 env.base_position[robot_index, :].to(device="cpu")
             )
-            target_position[2] = 0
             camera_position = target_position + camera_offset
-            # env.set_camera(camera_position, target_position)
+            env.set_camera(camera_position, target_position)
 
         if i < stop_state_log:
             # 实时计算真实负载质量：负载在机体上时才计入
@@ -1109,8 +1554,8 @@ def play(args):
                     + current_true_load_mass * actual_load_y
                 ) / actual_total_mass_safe
 
-                est_payload_mass = min(payload_mass_est, 20.0)
-                ref_payload_mass = min(current_true_load_mass, 10.0)
+                est_payload_mass = payload_mass_est
+                ref_payload_mass = current_true_load_mass
 
                 est_load_y = min(load_y_est, 0.5)
                 ref_load_y = min(actual_load_y, 0.5)
@@ -1189,6 +1634,15 @@ def play(args):
                 else:
                     _actual_lx = torch.zeros(_N, device=_dev)
                     _actual_ly = torch.zeros(_N, device=_dev)
+                    _load_pos = torch.zeros(_N, 3, device=_dev)
+
+                _ip_state = _compute_inverted_pendulum_state(
+                    env,
+                    _balance_body_masses,
+                    _balance_body_local_com,
+                    _true_mass,
+                    _load_pos,
+                )
 
                 full_dict = {
                     "payload_mass": load_est["payload_mass"],     # Model C load mass (filtered, kg)
@@ -1204,6 +1658,51 @@ def play(args):
                     "command_x": env.commands[:, 0],
                     "command_yaw": env.commands[:, 2],
                 }
+                full_dict.update(_ip_state)
+                full_dict.update(_compute_wheel_contact_diagnostics(env))
+
+                # World-frame velocities are exported so acceleration can be
+                # differentiated offline without mixing in body-frame rotation.
+                _base_root = env.root_states[env.actor_indices]
+                full_dict["base_world_lin_vel_x"] = _base_root[:, 7]
+                full_dict["base_world_lin_vel_y"] = _base_root[:, 8]
+                full_dict["base_world_lin_vel_z"] = _base_root[:, 9]
+                full_dict["base_world_ang_vel_x"] = _base_root[:, 10]
+                full_dict["base_world_ang_vel_y"] = _base_root[:, 11]
+                full_dict["base_world_ang_vel_z"] = _base_root[:, 12]
+                full_dict["contact_force_z_left"] = env.contact_forces[:, env.feet_indices[0], 2]
+                full_dict["contact_force_z_right"] = env.contact_forces[:, env.feet_indices[1], 2]
+                if hasattr(env, "terrain_types"):
+                    full_dict["terrain_type"] = env.terrain_types.float()
+                if hasattr(env, "terrain_levels"):
+                    full_dict["terrain_level"] = env.terrain_levels.float()
+
+                for _key in (
+                    "payload_mass_raw",
+                    "payload_mass_left",
+                    "payload_mass_right",
+                    "mass_moment_arm_left",
+                    "mass_moment_arm_right",
+                    "mass_denominator_left",
+                    "mass_denominator_right",
+                    "load_torque_left",
+                    "load_torque_right",
+                ):
+                    if _key in load_est:
+                        full_dict[f"qs_{_key}"] = load_est[_key]
+
+                for _name, _fallback in (
+                    ("abad_L_Joint", 0),
+                    ("hip_L_Joint", 1),
+                    ("knee_L_Joint", 2),
+                    ("abad_R_Joint", 4),
+                    ("hip_R_Joint", 5),
+                    ("knee_R_Joint", 6),
+                ):
+                    _idx = env.dof_names.index(_name) if _name in env.dof_names else _fallback
+                    _short = _name.replace("_Joint", "").lower()
+                    full_dict[f"joint_pos_{_short}"] = env.dof_pos[:, _idx]
+                    full_dict[f"joint_torque_{_short}"] = env.torques[:, _idx]
 
                 # 姿态/高度（实验B：控制稳定性指标，per-env）
                 _bq = env.base_quat  # [N,4] xyzw
@@ -1426,6 +1925,7 @@ def play(args):
                 "load_duration_s_used": float(getattr(env.cfg.domain_rand, "load_duration_range_s", [0.0, 0.0])[0]),
                 "load_interval_s_used": float(getattr(env.cfg.domain_rand, "load_interval_range_s", [0.0, 0.0])[0]),
                 "load_mass_range_used": list(getattr(env.cfg.domain_rand, "add_load_range", [-1, -1])),
+                "per_env_load_mass": bool(getattr(env.cfg.domain_rand, "per_env_load_mass", False)),
                 "load_offset_x": float(_lox if _lox > -90 else np.nan),
                 "load_offset_y": float(_loy if _loy > -90 else np.nan),
                 "slope_deg": float(_slope_deg),
@@ -1438,6 +1938,18 @@ def play(args):
                 "use_torques_in_obs": bool(getattr(env.cfg.env, "use_torques_in_obs", True)),
                 "use_load_residual_estimation": bool(
                     getattr(train_cfg.algorithm, "use_load_residual_estimation", False)
+                ),
+                "obs_history_length": int(getattr(env.cfg.env, "obs_history_length", -1)),
+                "history_context_s": float(
+                    getattr(env.cfg.env, "obs_history_length", -1) * env.dt
+                ),
+                "history_ablation_inference_only": bool(
+                    int(getattr(args, "history_length", -1) or -1) > 0
+                ),
+                "ip_pitch_definition": (
+                    "atan2(COM forward offset from contact-force-weighted wheel-center support, "
+                    "COM height above support); robot_ip excludes payload, system_ip includes "
+                    "payload only while load_on_body"
                 ),
                 "plot_dir": plot_dir,
                 "verify": _sanitize_for_mat(verify),
@@ -1464,7 +1976,7 @@ def play(args):
 
 
 if __name__ == "__main__":
-    EXPORT_POLICY = True
+    EXPORT_POLICY = os.getenv("PLAY_EXPORT_POLICY", "1") != "0"
     RECORD_FRAMES = False
     MOVE_CAMERA = True
     args = get_args()

@@ -1,0 +1,5 @@
+label,thigh_scale,shank_scale,motor_scale,role
+nominal,1.0,1.0,1.0,normalization reference
+short_mid,0.8,0.8,0.9571,short-leg finalist
+nominal_weak,1.0,1.0,0.6,weak-motor finalist
+nominal_strong,1.0,1.0,1.6,strong-motor control

@@ -27,7 +27,86 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
+import os
+
 from legged_gym.envs.base.base_config import BaseConfig
+
+
+_JUMPFWD_FIXED_BOOTSTRAP = os.getenv("JUMPFWD_FIXED_BOOTSTRAP", "0") == "1"
+_JUMPFWD_PROJECT_ALL_LEGS = os.getenv("JUMPFWD_PROJECT_ALL_LEGS", "0") == "1"
+_JUMPFWD_COMMAND_EDGES = os.getenv("JUMPFWD_COMMAND_EDGES", "0") == "1"
+_JUMPFWD_COMMAND_OBS_SCALE = float(os.getenv("JUMPFWD_COMMAND_OBS_SCALE", "2.0"))
+_JUMPFWD_KNEE_HEIGHT_RESIDUAL = float(os.getenv("JUMPFWD_KNEE_HEIGHT_RESIDUAL", "0.0"))
+_JUMPFWD_KNEE_HEIGHT_BIAS = float(os.getenv("JUMPFWD_KNEE_HEIGHT_BIAS", "0.0"))
+_JUMPFWD_HIP_DISTANCE_RESIDUAL = float(os.getenv("JUMPFWD_HIP_DISTANCE_RESIDUAL", "0.0"))
+_JUMPFWD_HIP_DISTANCE_BIAS = float(os.getenv("JUMPFWD_HIP_DISTANCE_BIAS", "0.0"))
+_JUMPFWD_HIP_DISTANCE_VEL_RESIDUAL = float(os.getenv("JUMPFWD_HIP_DISTANCE_VEL_RESIDUAL", "0.0"))
+_JUMPFWD_HIP_DISTANCE_VEL_BIAS = float(os.getenv("JUMPFWD_HIP_DISTANCE_VEL_BIAS", "0.0"))
+_JUMPFWD_HIP_LANDING_RESIDUAL = float(os.getenv("JUMPFWD_HIP_LANDING_RESIDUAL", "0.0"))
+_JUMPFWD_HIP_LANDING_BIAS = float(os.getenv("JUMPFWD_HIP_LANDING_BIAS", "0.0"))
+_JUMPFWD_RESIDUAL_WARMUP_STEPS = int(os.getenv("JUMPFWD_RESIDUAL_WARMUP_STEPS", "0"))
+_JUMPFWD_RESIDUAL_REFERENCE_STAGE = os.getenv("JUMPFWD_RESIDUAL_REFERENCE_STAGE", "command")
+_JUMPFWD_RESIDUAL_SIGNAL_CLIP = float(os.getenv("JUMPFWD_RESIDUAL_SIGNAL_CLIP", "1.0"))
+_JUMPFWD_RESUME_NOISE_STD = float(os.getenv("JUMPFWD_RESUME_NOISE_STD", "0.0"))
+_JUMPFWD_REGULARIZER_RELAX = float(os.getenv("JUMPFWD_REGULARIZER_RELAX", "0.15"))
+_JUMPFWD_TAKEOFF_ANGLE_SIGMA = float(os.getenv("JUMPFWD_TAKEOFF_ANGLE_SIGMA", "0.035"))
+_JUMPFWD_ENTROPY_COEF = float(os.getenv("JUMPFWD_ENTROPY_COEF", "0.02"))
+_JUMPFWD_SAVE_INTERVAL = int(os.getenv("JUMPFWD_SAVE_INTERVAL", "500"))
+_JUMP_LOAD_ESTIMATION = os.getenv("JUMP_LOAD_ESTIMATION", "0") == "1"
+_JUMP_LOAD_MODE = os.getenv("JUMP_LOAD_MODE", "attached")
+_JUMP_LOAD_MIN_KG = float(os.getenv("JUMP_LOAD_MIN_KG", "1.0"))
+_JUMP_LOAD_MAX_KG = float(os.getenv("JUMP_LOAD_MAX_KG", "6.0"))
+_JUMP_LOAD_OFFSET_XY = float(os.getenv("JUMP_LOAD_OFFSET_XY", "0.02"))
+_JUMPFWD_KNEE_HEIGHT_RESIDUAL_BASE = float(os.getenv(
+    "JUMPFWD_KNEE_HEIGHT_RESIDUAL_BASE", str(_JUMPFWD_KNEE_HEIGHT_RESIDUAL)
+))
+_JUMPFWD_KNEE_HEIGHT_BIAS_BASE = float(os.getenv(
+    "JUMPFWD_KNEE_HEIGHT_BIAS_BASE", str(_JUMPFWD_KNEE_HEIGHT_BIAS)
+))
+_JUMPFWD_HIP_DISTANCE_RESIDUAL_BASE = float(os.getenv(
+    "JUMPFWD_HIP_DISTANCE_RESIDUAL_BASE", str(_JUMPFWD_HIP_DISTANCE_RESIDUAL)
+))
+_JUMPFWD_HIP_DISTANCE_BIAS_BASE = float(os.getenv(
+    "JUMPFWD_HIP_DISTANCE_BIAS_BASE", str(_JUMPFWD_HIP_DISTANCE_BIAS)
+))
+_JUMPFWD_HIP_LANDING_RESIDUAL_BASE = float(os.getenv(
+    "JUMPFWD_HIP_LANDING_RESIDUAL_BASE", str(_JUMPFWD_HIP_LANDING_RESIDUAL)
+))
+_JUMPFWD_HIP_LANDING_BIAS_BASE = float(os.getenv(
+    "JUMPFWD_HIP_LANDING_BIAS_BASE", str(_JUMPFWD_HIP_LANDING_BIAS)
+))
+_JUMPFWD_RESIDUAL_PROFILE = os.getenv("JUMPFWD_RESIDUAL_PROFILE", "step")
+_JUMPFWD_HIP_RAMP_END_S = float(os.getenv("JUMPFWD_HIP_RAMP_END_S", "0.30"))
+_JUMPFWD_HIP_RELEASE_START_S = float(os.getenv("JUMPFWD_HIP_RELEASE_START_S", "0.45"))
+_JUMPFWD_HIP_RELEASE_END_S = float(os.getenv("JUMPFWD_HIP_RELEASE_END_S", "0.65"))
+_JUMPFWD_KNEE_RAMP_START_S = float(os.getenv("JUMPFWD_KNEE_RAMP_START_S", "0.18"))
+_JUMPFWD_KNEE_RAMP_END_S = float(os.getenv("JUMPFWD_KNEE_RAMP_END_S", "0.42"))
+_JUMPFWD_TRAJECTORY = os.getenv("JUMPFWD_TRAJECTORY", "0") == "1"
+_JUMPFWD_TRAJECTORY_STRENGTH = float(os.getenv("JUMPFWD_TRAJECTORY_STRENGTH", "1.0"))
+_JUMPFWD_TRAJECTORY_RL_SCALE = float(os.getenv("JUMPFWD_TRAJECTORY_RL_SCALE", "0.15"))
+_JUMPFWD_TRAJECTORY_CROUCH_LENGTH = float(os.getenv("JUMPFWD_TRAJECTORY_CROUCH_LENGTH", "0.30"))
+_JUMPFWD_TRAJECTORY_TAKEOFF_LENGTH_MIN = float(os.getenv("JUMPFWD_TRAJECTORY_TAKEOFF_LENGTH_MIN", "0.48"))
+_JUMPFWD_TRAJECTORY_TAKEOFF_LENGTH_MAX = float(os.getenv("JUMPFWD_TRAJECTORY_TAKEOFF_LENGTH_MAX", "0.56"))
+_JUMPFWD_TRAJECTORY_TAKEOFF_ANGLE_MIN = float(os.getenv("JUMPFWD_TRAJECTORY_TAKEOFF_ANGLE_MIN", "0.55"))
+_JUMPFWD_TRAJECTORY_TAKEOFF_ANGLE_MAX = float(os.getenv("JUMPFWD_TRAJECTORY_TAKEOFF_ANGLE_MAX", "0.95"))
+_JUMPFWD_TRAJECTORY_CROUCH_END_S = float(os.getenv("JUMPFWD_TRAJECTORY_CROUCH_END_S", "0.18"))
+_JUMPFWD_TRAJECTORY_PUSH_END_S = float(os.getenv("JUMPFWD_TRAJECTORY_PUSH_END_S", "0.48"))
+_JUMPFWD_COMMAND_STAGE = "fixed" if _JUMPFWD_FIXED_BOOTSTRAP else os.getenv(
+    "JUMPFWD_COMMAND_STAGE", "default"
+)
+_JUMPFWD_COMMAND_RANGES = {
+    "fixed": ([0.12, 0.12], [0.08, 0.08]),
+    "narrow": ([0.10, 0.16], [0.05, 0.14]),
+    "medium": ([0.10, 0.24], [0.05, 0.30]),
+    "wide": ([0.10, 0.30], [0.05, 0.50]),
+    # Preserve the active random-run/evaluation definition unless a stage is explicit.
+    "default": ([0.16, 0.30], [0.08, 0.30]),
+}
+if _JUMPFWD_COMMAND_STAGE not in _JUMPFWD_COMMAND_RANGES:
+    raise ValueError(f"Unknown JUMPFWD_COMMAND_STAGE={_JUMPFWD_COMMAND_STAGE!r}")
+if _JUMPFWD_COMMAND_OBS_SCALE <= 0.0:
+    raise ValueError("JUMPFWD_COMMAND_OBS_SCALE must be positive")
+_JUMPFWD_HEIGHT_RANGE, _JUMPFWD_DISTANCE_RANGE = _JUMPFWD_COMMAND_RANGES[_JUMPFWD_COMMAND_STAGE]
 
 
 class BipedCfgWF(BaseConfig):
@@ -66,6 +145,12 @@ class BipedCfgWF(BaseConfig):
         # Set True together with domain_rand.randomize_motor_design. Default off -> no change.
         use_motor_design_in_critic = False
         _motor_critic_dims = 1 if use_motor_design_in_critic else 0
+        # Optional co-design context appended to the policy command vector. The six
+        # centered values are [thigh, shank, abad, hip, knee, wheel]. Keeping this
+        # outside obs/history preserves the saved encoder input contract.
+        use_hardware_context_in_policy = False
+        hardware_context_morph_scale = 5.0
+        hardware_context_motor_scale = 2.0
         num_critic_observations = 7 + _morph_critic_dims + _motor_critic_dims + num_observations
         num_height_samples = 117
         num_actions = 8
@@ -176,6 +261,7 @@ class BipedCfgWF(BaseConfig):
             "wheel_L_Joint": 0.0,
             "wheel_R_Joint": 0.0,
         }
+        dof_pos_randomization_range = [-0.5, 0.5]
 
     class control:
         action_scale_pos = 0.25
@@ -281,7 +367,7 @@ class BipedCfgWF(BaseConfig):
         # (mass sampled from add_load_range). When False, all envs share one
         # globally sampled mass (legacy pre-2026-05-23 behavior; only useful
         # for reproducing old baselines).
-        per_env_load_mass = True
+        per_env_load_mass = _JUMP_LOAD_ESTIMATION and _JUMP_LOAD_MODE == "free"
         randomize_base_com = True
         # load_enable_iter = 1000    #000 
         rand_com_vec = [0.03, 0.02, 0.03]
@@ -332,13 +418,30 @@ class BipedCfgWF(BaseConfig):
         morphology_regenerate = True   # (re)generate morph_*.urdf at startup from asset.file
         morphology_prefix = "morph"
         morphology_seed = 0            # seed for sampling the bucket scales (reproducible URDF set)
-        # --- Motor-torque co-design (Path A): per-env motor "size" = torque-limit scale + mass cost ---
-        # When True, each env samples a motor_torque_scale k in motor_torque_scale_range; the joint
-        # torque LIMITS scale by k, and per the ENCOS cost curve (legged_gym/utils/motor_cost.py) the
-        # extra motor mass is added to each actuated joint's link (a real "no free torque" trade-off).
-        # Default False -> nominal motors, behavior unchanged. 1-D design variable for the simplest pipeline.
+        # Exact nominal designs reserved during co-design training. Zero preserves
+        # the legacy fully-randomized assignment.
+        design_anchor_fraction = 0.0
+        # --- Motor-torque co-design: output capability scale + relative actuator mass cost ---
+        # The legacy global range keeps old 3-D runs reproducible.  Formal 6-D runs set
+        # motor_group_torque_scale_ranges to four independent [lo,hi] pairs ordered as
+        # [abad, hip, knee, wheel].  The same group value is shared by the left/right actuator.
+        # Motor mass follows m(k)=m0*k**motor_mass_exponent, anchored at the robot's nominal
+        # actuator-module masses; no absolute ENCOS torque-to-mass lookup is used.
         randomize_motor_design = False
         motor_torque_scale_range = [0.6, 1.6]
+        motor_group_names = ["abad", "hip", "knee", "wheel"]
+        motor_group_torque_scale_ranges = None
+        # Engineering anchors from the available robot BOM/CAD lineage.  They are actuator-module
+        # masses (motor + reduction), not whole-link masses.  Keep explicit for paper sensitivity.
+        motor_nominal_masses_kg = [1.35, 1.35, 0.89, 0.365]
+        motor_mass_exponent = 1.0
+        # Optional baseline-anchored constant-torque/constant-power envelope.
+        # Keep disabled by default so existing checkpoints and experiments retain
+        # the legacy constant peak-torque behavior.
+        motor_power_envelope = False
+        motor_specific_power_w_per_kg = 450.0
+        motor_power_exponent = 1.0
+        motor_power_min_speed_rad_s = 1.0e-3
         motor_design_seed = 0
 
     class scenario:
@@ -615,10 +718,32 @@ class BipedCfgWFJump(BipedCfgWF):
         fail_to_terminal_time_s = 1.0      # 0.5→1.0 早期给倾斜容差, 让策略活到用上跳跃信号
 
     class domain_rand(BipedCfgWF.domain_rand):
-        add_random_load = False        # 跳跃无负载
+        add_random_load = _JUMP_LOAD_ESTIMATION and _JUMP_LOAD_MODE == "free"
+        add_load_range = [_JUMP_LOAD_MIN_KG, _JUMP_LOAD_MAX_KG]
+        per_env_load_mass = _JUMP_LOAD_ESTIMATION and _JUMP_LOAD_MODE == "free"
+        load_start_time_s = 0.5
+        load_duration_range_s = [3.0, 4.0]
+        load_interval_range_s = [4.5, 6.0]
+        load_contact_grace_s = 0.25
+        load_on_body_position_only = _JUMP_LOAD_ESTIMATION and _JUMP_LOAD_MODE == "free"
+        load_drop_terminal = _JUMP_LOAD_ESTIMATION and _JUMP_LOAD_MODE == "free"
+        load_offset_range_x = [-_JUMP_LOAD_OFFSET_XY, _JUMP_LOAD_OFFSET_XY]
+        load_offset_range_y = [-_JUMP_LOAD_OFFSET_XY, _JUMP_LOAD_OFFSET_XY]
+        load_offset_range_z = [0.10, 0.10]
+        attached_payload = _JUMP_LOAD_ESTIMATION and _JUMP_LOAD_MODE == "attached"
+        attached_payload_mass_range = [_JUMP_LOAD_MIN_KG, _JUMP_LOAD_MAX_KG]
+        attached_payload_offset_range_x = [-_JUMP_LOAD_OFFSET_XY, _JUMP_LOAD_OFFSET_XY]
+        attached_payload_offset_range_y = [-_JUMP_LOAD_OFFSET_XY, _JUMP_LOAD_OFFSET_XY]
+        attached_payload_offset_range_z = [0.10, 0.10]
         randomize_morphology = False   # 标称机器人
         randomize_motor_design = False
         push_robots = False            # 先不推(跳跃已够难), 稳了再开
+        # The jump actor starts from a known bilateral pose; large independent offsets
+        # hide the physical abad zero from the policy.
+        randomize_default_dof_pos = False
+
+    class init_state(BipedCfgWF.init_state):
+        dof_pos_randomization_range = [0.0, 0.0]
 
     class scenario(BipedCfgWF.scenario):
         partition = False              # 无 co-design 场景分区
@@ -628,6 +753,12 @@ class BipedCfgWFJump(BipedCfgWF):
         jump_interval_s = [2.0, 3.5]   # 事件模式: 两次跳跃触发之间的 IDLE 待命时长(随机); 窗口概念已删
         jump_height_cmd_range = [0.15, 0.45]   # ★指定跳高目标范围(base 相对站高峰值, m)
         resampling_time = 4.0
+
+        class ranges(BipedCfgWF.commands.ranges):
+            # 跳跃分支只有 h*/d* 命令；把遗留的行走/转向命令清零，和 play 行为一致。
+            lin_vel_x = [0.0, 0.0]
+            lin_vel_y = [0.0, 0.0]
+            ang_vel_yaw = [0.0, 0.0]
 
     class rewards(BipedCfgWF.rewards):
         # ★全新 scales(不继承父类的滚/迈奖励): roll/step/no_jump/base_height/lin_vel_z 都不列=不激活
@@ -672,3 +803,213 @@ class BipedCfgPPOWFJump(BipedCfgPPOWF):
         run_name = "jump"
         experiment_name = "WF_TRON1A"
         max_iterations = 8000
+
+
+# ============================================================================
+# 前跳(立定跳远): 2D 命令 [h*, d*], use_jump_distance 门控。继承指定跳高、纯增量加距离。
+# ★指定跳高配置 BipedCfgWFJump 一个字不动 -> 照样复现。参考 Cassie RSS'23 + TU Delft 2401.16337 + 2510.24584。
+# ============================================================================
+class BipedCfgWFJumpFwd(BipedCfgWFJump):
+    class env(BipedCfgWFJump.env):
+        use_jump_distance = True             # 开启前跳(obs 加 jump_dist_cmd)
+        num_observations = 31                # 30 + jump_dist_cmd 1
+        num_critic_observations = 7 + 31     # =38
+
+    class commands(BipedCfgWFJump.commands):
+        # Fixed low target is only a from-scratch skill bootstrap. Normal runs and
+        # evaluation keep the full 2-D command range for the x=y objective.
+        jump_height_cmd_range = list(_JUMPFWD_HEIGHT_RANGE)
+        jump_dist_cmd_range = list(_JUMPFWD_DISTANCE_RANGE)
+        jump_sample_edges = _JUMPFWD_COMMAND_EDGES
+        jump_obs_scale = _JUMPFWD_COMMAND_OBS_SCALE
+
+    class control(BipedCfgWF.control):
+        # Parameterize side-sway in the physical mirror subspace from the start:
+        # a_L=-a_R keeps bilateral roll control but removes common-mode side lean.
+        jump_project_abad_symmetry = True
+        # Optional continuation stage: mirror hip/knee targets as well, preventing
+        # one leg from extending farther without removing sagittal propulsion.
+        jump_project_leg_symmetry = _JUMPFWD_PROJECT_ALL_LEGS
+        jump_abad_projection_strength = 1.0
+        jump_abad_recenter = False
+        jump_abad_recenter_gain = 0.0
+        jump_knee_height_residual = _JUMPFWD_KNEE_HEIGHT_RESIDUAL
+        jump_knee_height_bias = _JUMPFWD_KNEE_HEIGHT_BIAS
+        jump_knee_height_residual_base = _JUMPFWD_KNEE_HEIGHT_RESIDUAL_BASE
+        jump_knee_height_bias_base = _JUMPFWD_KNEE_HEIGHT_BIAS_BASE
+        jump_hip_distance_residual = _JUMPFWD_HIP_DISTANCE_RESIDUAL
+        jump_hip_distance_bias = _JUMPFWD_HIP_DISTANCE_BIAS
+        jump_hip_distance_residual_base = _JUMPFWD_HIP_DISTANCE_RESIDUAL_BASE
+        jump_hip_distance_bias_base = _JUMPFWD_HIP_DISTANCE_BIAS_BASE
+        jump_hip_distance_vel_residual = _JUMPFWD_HIP_DISTANCE_VEL_RESIDUAL
+        jump_hip_distance_vel_bias = _JUMPFWD_HIP_DISTANCE_VEL_BIAS
+        jump_hip_landing_residual = _JUMPFWD_HIP_LANDING_RESIDUAL
+        jump_hip_landing_bias = _JUMPFWD_HIP_LANDING_BIAS
+        jump_hip_landing_residual_base = _JUMPFWD_HIP_LANDING_RESIDUAL_BASE
+        jump_hip_landing_bias_base = _JUMPFWD_HIP_LANDING_BIAS_BASE
+        jump_residual_profile = _JUMPFWD_RESIDUAL_PROFILE
+        jump_hip_ramp_end_s = _JUMPFWD_HIP_RAMP_END_S
+        jump_hip_release_start_s = _JUMPFWD_HIP_RELEASE_START_S
+        jump_hip_release_end_s = _JUMPFWD_HIP_RELEASE_END_S
+        jump_knee_ramp_start_s = _JUMPFWD_KNEE_RAMP_START_S
+        jump_knee_ramp_end_s = _JUMPFWD_KNEE_RAMP_END_S
+        jump_residual_warmup_steps = _JUMPFWD_RESIDUAL_WARMUP_STEPS
+        jump_residual_height_ref_range = (
+            list(_JUMPFWD_COMMAND_RANGES[_JUMPFWD_RESIDUAL_REFERENCE_STAGE][0])
+            if _JUMPFWD_RESIDUAL_REFERENCE_STAGE in _JUMPFWD_COMMAND_RANGES else None
+        )
+        jump_residual_distance_ref_range = (
+            list(_JUMPFWD_COMMAND_RANGES[_JUMPFWD_RESIDUAL_REFERENCE_STAGE][1])
+            if _JUMPFWD_RESIDUAL_REFERENCE_STAGE in _JUMPFWD_COMMAND_RANGES else None
+        )
+        jump_residual_signal_clip = _JUMPFWD_RESIDUAL_SIGNAL_CLIP
+        # Default-off model trajectory: deterministic crouch/push/tuck/preland/compress
+        # reference with a small learned residual around mirrored sagittal IK targets.
+        jump_use_explicit_trajectory = _JUMPFWD_TRAJECTORY
+        jump_trajectory_strength = _JUMPFWD_TRAJECTORY_STRENGTH
+        jump_trajectory_rl_scale = _JUMPFWD_TRAJECTORY_RL_SCALE
+        jump_trajectory_segment_length = 0.30
+        jump_trajectory_zero_half_angle = 0.5235987755982988
+        jump_trajectory_stance_length = 0.37
+        jump_trajectory_stance_angle = 0.20
+        jump_trajectory_crouch_length = _JUMPFWD_TRAJECTORY_CROUCH_LENGTH
+        jump_trajectory_crouch_angle = 0.10
+        jump_trajectory_takeoff_length_range = [
+            _JUMPFWD_TRAJECTORY_TAKEOFF_LENGTH_MIN,
+            _JUMPFWD_TRAJECTORY_TAKEOFF_LENGTH_MAX,
+        ]
+        jump_trajectory_takeoff_angle_range = [
+            _JUMPFWD_TRAJECTORY_TAKEOFF_ANGLE_MIN,
+            _JUMPFWD_TRAJECTORY_TAKEOFF_ANGLE_MAX,
+        ]
+        jump_trajectory_tuck_length = 0.30
+        jump_trajectory_tuck_angle = 0.0
+        jump_trajectory_preland_length = 0.46
+        jump_trajectory_preland_angle_range = [0.20, 0.40]
+        jump_trajectory_blend_in_s = 0.08
+        jump_trajectory_crouch_end_s = _JUMPFWD_TRAJECTORY_CROUCH_END_S
+        jump_trajectory_push_end_s = _JUMPFWD_TRAJECTORY_PUSH_END_S
+        jump_trajectory_tuck_s = 0.16
+        jump_trajectory_preland_vz_scale = 1.0
+        jump_trajectory_landing_hold_s = 0.20
+
+    class rewards(BipedCfgWFJump.rewards):
+        class scales:
+            # —— 主奖励(竖直+水平 两个一次性) ——
+            jump_apex        = 220.0   # 提高轮胎净空主奖，防止为距离精度牺牲整体弹道高度
+            jump_land_dist   = 150.0   # ★前跳主奖: 腾空段前向位移匹配 d*(一次性)
+            jump_height_error = -5.0   # 温和的轮胎净空 command-actual 平方误差引导
+            jump_dist_error = -5.0     # 温和的轮心跳距 command-actual 平方误差引导
+            # —— 稠密引导 ——
+            jump_est_height  = 40.0    # command-conditioned 轮胎净空抛体引导
+            jump_est_dist    = 45.0    # v8: 降低前向主导, 避免过斜出射
+            jump_fwd_vel     = 18.0
+            # —— 模型控制相位模板: 低姿态蓄力 -> 蹬腿伸展 -> 空中收腿 -> 落地前伸腿 ——
+            jump_crouch_low = 1.5
+            jump_crouch_extend = 25.0
+            jump_push_up = 100.0
+            jump_push_vz_cmd = 80.0
+            jump_push_fwd_cmd = 60.0
+            jump_takeoff_vz = 100.0    # 按h*跟踪机身竖直出射速度，不再只过固定阈值
+            jump_takeoff_leg_extend = 150.0
+            jump_bad_takeoff = -60.0
+            jump_no_takeoff = -180.0
+            jump_crouch_overtime = -20.0
+            jump_takeoff_angle = 28.0
+            jump_air_tuck = 22.0
+            jump_preland_extend = 24.0
+            jump_landing_compress = 20.0
+            jump_land_leg_sync = -12.0
+            # —— 姿态/对称/反侧摆作弊 ——
+            jump_centered = 8.0
+            jump_takeoff_sym = 10.0
+            jump_mirror_pose = 5.0
+            jump_leg_sync = -2.0
+            jump_upright_air = 1.5
+            jump_lateral_stability = -24.0
+            jump_abad_still = -1.0
+            jump_lateral_velocity = -2.0
+            jump_yaw_stability = -1.0
+            jump_lateral_drift = -20.0
+            # —— ★防滚三件套 ——
+            jump_wheel_spin  = -2.0    # CROUCH/FLIGHT 惩罚轮自转
+            jump_ground_roll = -3.0    # IDLE/CROUCH 惩罚助跑滚动(前向动量只能来自蹬地)
+            jump_land_brake  = 8.0     # LANDED 刹停锁轮(保落点精度、不滚走)
+            # —— 单跳/站住 ——
+            jump_relaunch    = -8.0
+            jump_stand       = 8.0     # v6: 纠正 v5 真蹬腿后低站高
+            jump_posture     = 8.0
+            jump_stance      = 5.0
+            jump_idle_low_height = -14.0
+            keep_balance     = 1.0
+            # —— 安全/正则 ——
+            orientation = -2.0
+            ang_vel_xy = -0.1
+            torques = -0.00008
+            dof_acc = -5.0e-8
+            action_rate = -0.01
+            action_smooth = -0.01
+            dof_pos_limits = -2.0
+            collision = -5.0
+            foot_landing_vel = -0.15
+        jump_height_track_sigma = 0.01   # 先保留约10cm正奖励盆地，避免策略以不跳规避事件
+        jump_dist_track_sigma = 0.01
+        jump_height_error_scale = 0.05
+        jump_dist_error_scale = 0.10
+        jump_dist_long_gain = 0.5       # 保留长距离覆盖，但减轻对高 d* 的固定偏置
+        jump_stand_height_sigma = 0.010
+        jump_posture_height_sigma = 0.030
+        jump_idle_height_margin = 0.03
+        jump_idle_height_error_scale = 0.12
+        jump_landed_timeout_s = 0.8
+        jump_roll_term_dist = 0.20     # CROUCH 起飞前 base 水平位移超此值(滚而不跳) -> 终止(0.15→0.20 给蹬地起跳留行程)
+        jump_relaunch_terminal = True  # 前跳必须一次完成: 第一次落地后持续二次腾空直接终止, 防多跳刷落点/速度奖励
+        jump_crouch_height_drop_target = 0.08
+        jump_takeoff_leg_gain_target = 0.06
+        jump_takeoff_height_gain_target = 0.06
+        jump_takeoff_leg_vel_target = 0.35
+        jump_takeoff_crouch_time_target = 0.20
+        jump_takeoff_quality_min = 0.20
+        jump_push_vz_target = 0.8
+        jump_push_vz_from_command = True
+        jump_push_vz_sigma = 0.04
+        jump_push_fwd_sigma = 0.04
+        jump_takeoff_vz_target = 0.8
+        jump_takeoff_vz_command_gain = 0.8
+        jump_takeoff_vz_track_sigma = 0.16
+        jump_crouch_low_reward_s = 0.35
+        jump_push_start_s = 0.10
+        jump_push_end_s = 0.80
+        jump_takeoff_deadline_s = 0.75
+        jump_crouch_timeout_s = 1.05
+        jump_regularizer_relax = _JUMPFWD_REGULARIZER_RELAX
+        jump_center_lat_scale = 0.55
+        jump_center_roll_scale = 0.25
+        jump_takeoff_angle_sigma = _JUMPFWD_TAKEOFF_ANGLE_SIGMA
+        jump_takeoff_angle_gain = 0.75
+        jump_air_tuck_len_delta = 0.10
+        jump_preland_extend_delta = 0.10
+        jump_landing_compress_delta = 0.05
+        jump_lateral_ratio_limit = 0.45
+        jump_roll_soft_limit = 0.20
+        jump_lateral_vel_scale = 0.35
+        jump_abad_upright_scale = 0.30
+        jump_abad_common_scale = 0.25
+        jump_yaw_rate_scale = 0.60
+        jump_wheel_diff_scale = 4.0
+        jump_land_lateral_scale = 0.08
+
+
+class BipedCfgPPOWFJumpFwd(BipedCfgPPOWFJump):
+    class MLP_Encoder(BipedCfgPPOWFJump.MLP_Encoder):
+        num_input_dim = (31 + 31 - 8) * 10   # =540 (jump obs=31: base28 + cmd_jump + height_cmd + dist_cmd)
+
+    class algorithm(BipedCfgPPOWFJump.algorithm):
+        entropy_coef = _JUMPFWD_ENTROPY_COEF
+
+    class runner(BipedCfgPPOWFJump.runner):
+        run_name = "jumpfwd"
+        experiment_name = "WF_TRON1A"
+        max_iterations = 8000
+        resume_noise_std = _JUMPFWD_RESUME_NOISE_STD
+        save_interval = _JUMPFWD_SAVE_INTERVAL

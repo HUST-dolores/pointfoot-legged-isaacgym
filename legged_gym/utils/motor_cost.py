@@ -1,12 +1,15 @@
-"""Motor torque<->mass cost model for motor-torque co-design (Path A).
+"""Motor mass surrogates used by motor-torque co-design.
 
-Fitted to the ENCOS 电机质量-扭矩曲线 (peak / rated torque vs motor mass, read off the figure).
-Used to couple the motor-torque DESIGN VARIABLE to a real mass cost: choosing a larger joint
-torque limit (effort) requires a heavier motor, whose extra mass is added to that joint's link.
-This is what makes motor co-design a genuine trade-off (no "free torque").
+The formal six-dimensional study uses a dimensionless, baseline-anchored model:
 
-Reference anchors (current WF_TRON1A): leg joints effort 80 N·m peak -> ~690 g motor;
-wheel joints effort 40 N·m -> ~400 g.
+    m(k) = m0 * k**alpha
+
+Here ``m0`` is the mass of the robot's nominal actuator module and ``k`` scales
+the actuator's capability while the reduction architecture remains fixed.
+Power-envelope experiments additionally use a baseline-anchored output-power
+model ``P(k)=m0*specific_power*k**alpha_p``.  The ENCOS fit below is retained
+only for reproducing earlier exploratory three-dimensional runs.  It must not
+be used to infer the absolute mass of an arbitrary robot actuator.
 """
 
 import numpy as np
@@ -21,6 +24,83 @@ import numpy as np
 _PEAK_COEF = [-1.34e-08, 6.39933e-05, 0.0517332803, 18.9899468433]   # 峰值扭矩 (peak torque)
 _RATED_COEF = [-4.9e-09, 2.24916e-05, 0.01444226, 6.3800799692]      # 额定扭矩 (rated/continuous torque)
 _MASS_MIN_G, _MASS_MAX_G = 384.0, 3100.0
+
+
+def relative_motor_mass_kg(nominal_mass_kg, scale, exponent=1.0):
+    """Return actuator mass under a dimensionless capability scale.
+
+    Args:
+        nominal_mass_kg: Mass of the robot's actual nominal actuator module.
+        scale: Peak/continuous output-torque capability multiplier.
+        exponent: Mass-to-capability elasticity.  ``1`` is the formal linear
+            model; nearby values are used for sensitivity analysis.
+    """
+    nominal_mass_kg = float(nominal_mass_kg)
+    scale = float(scale)
+    exponent = float(exponent)
+    if nominal_mass_kg <= 0.0:
+        raise ValueError("nominal_mass_kg must be positive")
+    if scale <= 0.0:
+        raise ValueError("motor capability scale must be positive")
+    if exponent <= 0.0:
+        raise ValueError("motor mass exponent must be positive")
+    return nominal_mass_kg * scale**exponent
+
+
+def relative_motor_mass_delta_kg(nominal_mass_kg, scale, exponent=1.0):
+    """Mass increment relative to the robot's nominal actuator at ``scale=1``."""
+    return (
+        relative_motor_mass_kg(nominal_mass_kg, scale, exponent)
+        - float(nominal_mass_kg)
+    )
+
+
+def relative_motor_power_w(
+    nominal_mass_kg,
+    scale,
+    specific_power_w_per_kg=450.0,
+    exponent=1.0,
+):
+    """Return the baseline-anchored continuous mechanical output power."""
+    nominal_mass_kg = float(nominal_mass_kg)
+    scale = float(scale)
+    specific_power_w_per_kg = float(specific_power_w_per_kg)
+    exponent = float(exponent)
+    if nominal_mass_kg <= 0.0:
+        raise ValueError("nominal_mass_kg must be positive")
+    if scale <= 0.0:
+        raise ValueError("motor capability scale must be positive")
+    if specific_power_w_per_kg <= 0.0:
+        raise ValueError("specific_power_w_per_kg must be positive")
+    if exponent <= 0.0:
+        raise ValueError("motor power exponent must be positive")
+    return nominal_mass_kg * specific_power_w_per_kg * scale**exponent
+
+
+def available_motor_torque_nm(
+    nominal_peak_torque_nm,
+    nominal_mass_kg,
+    scale,
+    output_speed_rad_s,
+    specific_power_w_per_kg=450.0,
+    power_exponent=1.0,
+    min_speed_rad_s=1.0e-3,
+):
+    """Return the scalar constant-torque/constant-power output limit."""
+    nominal_peak_torque_nm = float(nominal_peak_torque_nm)
+    min_speed_rad_s = float(min_speed_rad_s)
+    if nominal_peak_torque_nm <= 0.0:
+        raise ValueError("nominal_peak_torque_nm must be positive")
+    if min_speed_rad_s <= 0.0:
+        raise ValueError("min_speed_rad_s must be positive")
+    peak_limit = nominal_peak_torque_nm * float(scale)
+    power_limit = relative_motor_power_w(
+        nominal_mass_kg,
+        scale,
+        specific_power_w_per_kg,
+        power_exponent,
+    ) / max(abs(float(output_speed_rad_s)), min_speed_rad_s)
+    return min(peak_limit, power_limit)
 
 
 def peak_torque_for_mass(mass_g):
@@ -47,8 +127,10 @@ def motor_mass_kg(peak_torque_nm):
 
 
 def motor_mass_delta_kg(base_effort_nm, scale):
-    """Extra motor mass (kg, can be negative) when a joint's peak-torque limit is scaled from
-    base_effort_nm to base_effort_nm * scale, per the ENCOS cost curve (relative to the nominal motor).
+    """Legacy ENCOS absolute-curve delta used by exploratory three-dimensional runs.
+
+    Extra motor mass (kg, can be negative) when a joint's peak-torque limit is scaled from
+    base_effort_nm to base_effort_nm * scale, per the ENCOS cost curve.
 
     Args:
         base_effort_nm: the joint's nominal peak-torque limit (URDF effort), e.g. 80 for legs, 40 for wheels.
