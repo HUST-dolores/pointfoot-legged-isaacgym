@@ -29,6 +29,7 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import copy
+import math
 
 import torch
 import torch.nn as nn
@@ -82,6 +83,8 @@ class PPO:
         reference_policy_coef=0.0,
         reference_policy_context_dim=0,
         reference_policy_anchor_tol=1.0e-6,
+        encoder_kl_limit=None,
+        encoder_kl_sample_size=1024,
         device="cpu",
     ):
         self.device = device
@@ -104,6 +107,13 @@ class PPO:
         self.reference_actor_critic = None
 
         self.encoder = encoder
+        if encoder_kl_limit is not None and (not math.isfinite(encoder_kl_limit) or encoder_kl_limit<=0):
+            raise ValueError('encoder_kl_limit must be finite and positive')
+        if type(encoder_kl_sample_size) is not int or encoder_kl_sample_size<1:
+            raise ValueError('encoder_kl_sample_size must be a positive integer')
+        self.encoder_kl_limit = encoder_kl_limit  # opt-in; legacy/default path unchanged
+        self.encoder_kl_sample_size = encoder_kl_sample_size
+        self.encoder_base_learning_rate = est_learning_rate
 
         # PPO components
         self.actor_critic = actor_critic
@@ -233,31 +243,35 @@ class PPO:
         critic_obs = torch.cat((critic_obs, commands), dim=-1)
         # act
         encoder_out = self.encode_for_policy(obs_history, obs)
-        self.transition.actions = self.actor_critic.act(
+        actions = self.actor_critic.act(
             torch.cat((encoder_out, obs, commands), dim=-1)
         ).detach()
+        self.transition.actions = actions.clone()
 
         # evaluate
         if self.critic_take_latent:
             critic_obs = torch.cat((critic_obs, encoder_out), dim=-1)
-        self.transition.values = self.actor_critic.evaluate(critic_obs).detach()
+        self.transition.values = self.actor_critic.evaluate(critic_obs).detach().clone()
 
         # storage
         self.transition.actions_log_prob = self.actor_critic.get_actions_log_prob(
             self.transition.actions
-        ).detach()
-        self.transition.action_mean = self.actor_critic.action_mean.detach()
-        self.transition.action_sigma = self.actor_critic.action_std.detach()
+        ).detach().clone()
+        self.transition.action_mean = self.actor_critic.action_mean.detach().clone()
+        self.transition.action_sigma = self.actor_critic.action_std.detach().clone()
         # need to record obs and critic_obs before env.step()
-        self.transition.observations = obs
-        self.transition.critic_obs = critic_obs
-        self.transition.observation_history = obs_history
-        self.transition.commands = commands
-        return self.transition.actions
+        # env.step may reset selected environments IN PLACE before storage
+        # receives this transition. Retain the actual pre-action inputs, not
+        # references to history/observation/command buffers rewritten by reset.
+        self.transition.observations = obs.detach().clone()
+        self.transition.critic_obs = critic_obs.detach().clone()
+        self.transition.observation_history = obs_history.detach().clone()
+        self.transition.commands = commands.detach().clone()
+        return actions
 
     def process_env_step(self, rewards, dones, infos, next_obs=None):
         self.transition.rewards = rewards.clone()
-        self.transition.dones = dones
+        self.transition.dones = dones.detach().clone()
         # Bootstrapping on time outs
         if "time_outs" in infos:
             self.transition.rewards += self.gamma_used * torch.squeeze(
@@ -429,6 +443,10 @@ class PPO:
         mean_eval_load_present_frac = 0.0
         mean_eval_mass_target_abs = 0.0
         mean_eval_com_target_norm = 0.0
+        encoder_guard_metrics = {}
+        encoder_guard = None
+        if self.extra_optimizer is not None and self.encoder_kl_limit is not None:
+            encoder_guard = self._begin_encoder_policy_guard()
         
         if self.extra_optimizer is not None:
             generator = self.storage.encoder_mini_batch_generator(
@@ -555,7 +573,13 @@ class PPO:
                 num_updates_extra += 1
                 mean_extra_loss += extra_loss.item()
 
-        mean_value_loss /= num_updates
+        if encoder_guard is not None:
+            encoder_guard_metrics = self._finish_encoder_policy_guard(encoder_guard)
+
+        # A KL early-stop may reject every minibatch. Report zero updates
+        # explicitly rather than dividing by zero or fabricating an update.
+        update_denominator = max(1, num_updates)
+        mean_value_loss /= update_denominator
         if num_updates_extra > 0:
             mean_extra_loss /= num_updates_extra
             mean_eval_vel_mse /= max(1, num_updates_extra)
@@ -564,13 +588,15 @@ class PPO:
             mean_eval_load_present_frac /= max(1, num_updates_extra)
             mean_eval_mass_target_abs /= max(1, num_updates_extra)
             mean_eval_com_target_norm /= max(1, num_updates_extra)
-        mean_surrogate_loss /= num_updates
-        mean_kl /= num_updates
-        mean_reference_policy_loss /= num_updates
-        mean_reference_anchor_frac /= num_updates
+        mean_surrogate_loss /= update_denominator
+        mean_kl /= update_denominator
+        mean_reference_policy_loss /= update_denominator
+        mean_reference_anchor_frac /= update_denominator
         self.storage.clear()
         
         extra_metrics = {
+            **encoder_guard_metrics,
+            "policy_updates": num_updates,
             "vel_mse": mean_eval_vel_mse,
             "mass_mse": mean_eval_mass_mse,
             "com_mse": mean_eval_com_mse,
@@ -582,3 +608,48 @@ class PPO:
         }
 
         return (mean_value_loss, mean_extra_loss, mean_surrogate_loss, mean_kl, extra_metrics)
+
+    def _begin_encoder_policy_guard(self):
+        """Snapshot AFTER actor updates; only bound additional encoder-induced KL.
+
+        Uses a deterministic spread of stored ordinary observations/history.
+        No teacher target, ground truth or new policy input is used by the guard.
+        This is a sampled mean bound, not a bound on every possible state.
+        """
+        with torch.inference_mode():
+            observations = self.storage.observations.flatten(0,1)
+            count = len(observations)
+            sample_count = min(count,self.encoder_kl_sample_size)
+            indices = torch.linspace(0,count-1,sample_count,device=self.device).long()
+            obs = observations[indices]
+            history = self.storage.observation_history.flatten(0,1)[indices]
+            commands = self.storage.commands.flatten(0,1)[indices]
+            latent = self.encode_for_policy(history,obs)
+            mu = self.actor_critic.act_inference(torch.cat((latent,obs,commands),dim=-1)).clone()
+            sigma = self.actor_critic.logstd.exp().clone()
+        return {'observations':obs,'history':history,'commands':commands,'mu':mu,'sigma':sigma,
+                'encoder_state':copy.deepcopy(self.encoder.state_dict()),
+                'optimizer_state':copy.deepcopy(self.extra_optimizer.state_dict())}
+
+    def _finish_encoder_policy_guard(self,snapshot):
+        with torch.inference_mode():
+            latent = self.encode_for_policy(snapshot['history'],snapshot['observations'])
+            mu = self.actor_critic.act_inference(torch.cat((latent,snapshot['observations'],snapshot['commands']),dim=-1))
+            kl = ((mu-snapshot['mu']).square()/(2*snapshot['sigma'].square())).sum(-1).mean()
+            finite = bool(torch.isfinite(kl))
+            value = float(kl) if finite else None
+        reject = not finite or value>self.encoder_kl_limit
+        if reject:
+            # Roll back Adam moments AND weights; rejected gradients must not
+            # silently change the next accepted update through optimizer state.
+            self.encoder.load_state_dict(snapshot['encoder_state'])
+            self.extra_optimizer.load_state_dict(snapshot['optimizer_state'])
+            for group in self.extra_optimizer.param_groups:
+                group['lr'] = max(1.0e-8,group['lr']*.5)
+        elif value<self.encoder_kl_limit*.25:
+            for group in self.extra_optimizer.param_groups:
+                group['lr'] = min(self.encoder_base_learning_rate,group['lr']*1.05)
+        return {'encoder_policy_kl_proposed':value,'encoder_update_rejected':reject,
+                'encoder_policy_kl_applied':0.0 if reject else value,
+                'encoder_guard_samples':len(snapshot['mu']),
+                'encoder_learning_rate':self.extra_optimizer.param_groups[0]['lr']}

@@ -68,6 +68,18 @@ elif robot_type == "WF_TRON1A":
     task_registry.register("wheelfoot_jump", BipedWFJump, BipedCfgWFJump(), BipedCfgPPOWFJump())
     # jump-forward 分支: 前跳(立定跳远, 2D命令[h*,d*], use_jump_distance门控)
     task_registry.register("wheelfoot_jump_forward", BipedWFJump, BipedCfgWFJumpFwd(), BipedCfgPPOWFJumpFwd())
+    from legged_gym.envs.wheelfoot_ship.wheelfoot_ship import BipedWFShip
+    from legged_gym.envs.wheelfoot_ship.wheelfoot_ship_config import BipedCfgWFShip, BipedCfgPPOWFShip
+    task_registry.register("wheelfoot_ship", BipedWFShip, BipedCfgWFShip(), BipedCfgPPOWFShip())
+    from legged_gym.envs.wheelfoot_ship.wheelfoot_ship_prior import BipedWFShipPrior
+    from legged_gym.envs.wheelfoot_ship.wheelfoot_ship_prior_config import BipedCfgWFShipPrior, BipedCfgPPOWFShipPrior
+    task_registry.register("wheelfoot_ship_prior", BipedWFShipPrior, BipedCfgWFShipPrior(), BipedCfgPPOWFShipPrior())
+    from legged_gym.envs.wheelfoot_ship.wheelfoot_ship_mobility import BipedWFShipMobility
+    from legged_gym.envs.wheelfoot_ship.wheelfoot_ship_mobility_config import (
+        BipedCfgWFShipRoll, BipedCfgWFShipStep, BipedCfgPPOWFShipMobility,
+    )
+    task_registry.register("wheelfoot_ship_roll", BipedWFShipMobility, BipedCfgWFShipRoll(), BipedCfgPPOWFShipMobility())
+    task_registry.register("wheelfoot_ship_step", BipedWFShipMobility, BipedCfgWFShipStep(), BipedCfgPPOWFShipMobility())
 
 else:
     print("\033[1m\033[31mError: Input ROBOT_TYPE={}".format(robot_type), 

@@ -794,9 +794,11 @@ class BaseTask:
         # mass Isaac Gym uses for force computation — confirmed by α→0 + γ_sum≈mean
         # signature in lstsq fit).
         if not randomize_load_mass_per_env:
-            self.load_asset = self.gym.create_box(self.sim, 0.1, 0.1, 0.1, load_asset_options)
+            self.load_asset = self._create_auxiliary_asset(load_asset_options)
             load_rigid_shape_props = self.gym.get_asset_rigid_shape_properties(self.load_asset)
-            load_rigid_shape_props[0].friction = 0.5
+            load_rigid_shape_props[0].friction = float(
+                getattr(self.cfg.domain_rand, "load_friction", 0.5)
+            )
             self.gym.set_asset_rigid_shape_properties(self.load_asset, load_rigid_shape_props)
         else:
             self.load_asset = None  # per-env assets built inside the loop below
@@ -869,8 +871,7 @@ class BaseTask:
             self.envs.append(env_handle)
             self.actor_handles.append(actor_handle)
         #    Create load actor (hidden initially)
-            load_pose = gymapi.Transform()
-            load_pose.p = gymapi.Vec3(0.0, 0.0, -100.0) # Far away
+            load_pose = self._auxiliary_start_pose(i)
             if randomize_load_mass_per_env:
                 # Sample per-env mass and build a dedicated load asset for this env.
                 # Setting AssetOptions.density before create_box makes Isaac Gym use
@@ -2010,6 +2011,12 @@ class BaseTask:
             len(env_ids_int32),
         )
         
+    def _auxiliary_start_pose(self, env_id):
+        """Default payload is hidden; moving supports override before prepare_sim."""
+        pose = gymapi.Transform()
+        pose.p = gymapi.Vec3(0.0, 0.0, -100.0)
+        return pose
+
     def _reset_dofs(self, env_ids):
         """Resets DOF position and velocities of selected environmments
         Positions are randomly selected within 0.5:1.5 x default positions.
@@ -2022,6 +2029,10 @@ class BaseTask:
         self.dof_pos[env_ids] = self.default_dof_pos[env_ids, :] + torch_rand_float(
             dof_rand_range[0], dof_rand_range[1], (len(env_ids), self.num_dof), device=self.device
         )
+        # compute_dof_vel can rebind dof_vel to a position-difference estimate.
+        # Always clear the actual Gym state sent to the physical reset setter,
+        # as well as the observation/controller cache.
+        self.dof_state.view(self.num_envs,self.num_dof,2)[env_ids,:,1] = 0.0
         self.dof_vel[env_ids] = 0.0
 
         # # env_ids_int32 = env_ids.to(dtype=torch.int32)
@@ -2739,6 +2750,10 @@ class BaseTask:
             device=self.device,
             requires_grad=False,
         )
+
+    def _create_auxiliary_asset(self, options):
+        """Default auxiliary actor is a payload; specialized tasks may replace it."""
+        return self.gym.create_box(self.sim, 0.1, 0.1, 0.1, options)
 
     def _get_env_origins(self):
         """Sets environment origins. On rough terrain the origins are defined by the terrain platforms.

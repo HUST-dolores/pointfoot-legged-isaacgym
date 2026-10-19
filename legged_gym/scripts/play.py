@@ -1007,6 +1007,11 @@ def _compute_experiment_metrics(logger, dt):
 
 
 def play(args):
+    # Ship policies use the very same saved-config inference/measurement loop
+    # as batch evaluation. Never apply flat/payload play overrides to a deck.
+    if args.task in ('wheelfoot_ship','wheelfoot_ship_prior','wheelfoot_ship_roll','wheelfoot_ship_step'):
+        from legged_gym.utils.ship_playback import run_unified_ship_play
+        return run_unified_ship_play(args)
     # 单关节测试模式：通过位置控制让指定关节缓慢旋转，观察动力学
     test_joint_mode = getattr(args, 'test_joint_mode', False)
     test_joint_name = getattr(args, 'test_joint_name', None)

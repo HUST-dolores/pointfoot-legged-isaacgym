@@ -259,6 +259,7 @@ class BipedWF(BaseTask):
                 self._push_robots()
             self._apply_sustained_ext_force()  # 实验A：持续外力（默认关闭，不影响训练）
             self._apply_scenario_forces()      # co-design 场景外力（坡=水平力/负载=向下力，默认关闭）
+            self._before_physics_substep()
             self.gym.simulate(self.sim)
             if self.device == "cpu":
                 self.gym.fetch_results(self.sim, True)
@@ -278,6 +279,10 @@ class BipedWF(BaseTask):
             self.critic_obs_buf # make sure critic_obs update in every for loop
         )
         
+    def _before_physics_substep(self):
+        """Optional prescribed moving-support update, once per physics step."""
+        pass
+
     def _action_clip(self, actions):
         self.actions = actions
         

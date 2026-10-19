@@ -162,6 +162,12 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
 
 def get_args():
     custom_parameters = [
+        {"name":"--ship_motion_scale","type":float,"default":1.0,
+         "help":"Ship-only unified play amplitude multiplier: 0 static, .25 mild, 1 full; saved sensors/noise retained."},
+        {"name":"--ship_eval_steps","type":int,"default":3000,
+         "help":"Ship-only fixed policy steps (3000 = 60 simulated seconds)."},
+        {"name":"--ship_eval_output","type":str,
+         "help":"New output directory for unified ship play results and verified protocol."},
         {
             "name": "--task",
             "type": str,
