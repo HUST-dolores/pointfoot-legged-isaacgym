@@ -57,3 +57,23 @@ runs
 # other
 *.egg-info
 __pycache__
+
+# Local test caches and credentials (source/config examples remain trackable).
+.pytest_cache/
+/.env
+/.env.*
+!/.env.example
+/.aws/
+/.ssh/
+/.codex/
+/.agents/
+
+# Generated paper assets; keep plotting scripts and input manifests in Git.
+/legged_gym/scripts/figs_chx/out/
+/legged_gym/scripts/figs_chx/papermodify_*.pdf
+
+# Automatically generated playback/training variants, not canonical robot models.
+/resources/robots/WF_TRON1A/urdf/play_*.urdf
+/resources/robots/WF_TRON1A/urdf/play_*_manifest.json
+/resources/robots/WF_TRON1A/urdf/phystrain_*.urdf
+/resources/robots/WF_TRON1A/urdf/phystrain_*_manifest.json
