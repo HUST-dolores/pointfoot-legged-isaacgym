@@ -63,6 +63,15 @@ python legged_gym/scripts/play.py --task=wheelfoot_flat \
 | `--load_offset_x` | float | -99.0 | **Ch5 偏心负载**：固定负载质心 x 偏置（m，前+），产生 ∝ m·offset 的倾覆力矩（测 CoM 估计）。`-99` = 关（用训练随机偏置）。 |
 | `--load_offset_y` | float | -99.0 | **Ch5 偏心负载**：固定负载质心 y 偏置（m，左+）。`-99` = 关。 |
 | `--keep_load` | flag | False | **Ch5 推-恢复**：施加 ext-force 时**仍保留真实负载**（覆盖 Exp A 的"力则无载"默认），让负载+力共存。 |
+| `--load_friction` | float | -1.0 | **滑动负载调试**：覆盖负载箱子的材料摩擦系数。小值如 `0.02` 更容易在机器人上表面滑动；`<0` = 用 cfg 默认 `0.5`。 |
+| `--deck_friction` | float | -1.0 | **滑动负载调试**：只覆盖机器人上平台/平板的摩擦系数。推荐和 `--load_friction 0` 一起用，不影响轮地摩擦。 |
+| `--robot_friction` | float | -1.0 | **滑动压力测试**：覆盖机器人所有刚体 shape 的摩擦。会同时影响轮地接触，只用于确认“能不能滑”，不用于正式控制评估。 |
+| `--load_force_x/y/z` | float | 0.0 | **滑动负载诊断**：直接对负载 actor 施加外力（N），配合 `--load_force_start/stop` 验证低摩擦接触是否真的能滑。 |
+| `--load_force_frame` | str | env | 外力坐标系：`env`=世界/环境坐标；`body`=机器人平台坐标。验证沿平台滑移时优先用 `body`。 |
+| `--load_kick_vx/y/z` | float | 0.0 | **滑动负载诊断**：一次性给负载 actor 加线速度（m/s）。比外力更直接，用来判断“负载本身能不能独立滑动”。 |
+| `--load_kick_time` | float | 1.0 | velocity kick 的触发时间；只有负载已生成且每个 env 尚未 kick 过时才生效。 |
+| `--load_kick_frame` | str | env | kick 坐标系：`env`=世界/环境坐标；`body`=机器人平台坐标。验证沿平台滑移时优先用 `body`。 |
+| `--debug_load_contacts` | flag | False | **接触诊断**：GPU pipeline 下周期性打印负载净接触力、相对位姿/速度和接触 body 排名；CPU pipeline 下可打印接触对。 |
 | `--no_load` | flag | False | **Exp B 基线**：`add_random_load=False`，完全不挂负载，用于隔离"负载引起的控制退化"。 |
 
 > 固定同质量对比（C3b/C5b/A2）：`--load_mass_min 26 --load_mass_max 26`。
@@ -77,7 +86,7 @@ python legged_gym/scripts/play.py --task=wheelfoot_flat \
 | `--load_dur` | float | -1.0 | 负载 ON 持续时长（s）→ `load_duration_range_s=[dur,dur]`，**所有 env 同步**加/卸。`<0` = 关。 |
 | `--load_int` | float | -1.0 | 负载生成周期（s）→ `load_interval_range_s=[int,int]`；off 相 = int−dur。 |
 | `--load_start` | float | -1.0 | 首次加载时刻（s）。`<0` = 用 cfg（0.5）。 |
-| `--load_hold` | flag | False | **Ch5**：负载**全程恒定**（`load_duration_range_s=[1e6,1e6]`，不循环），使倾倒由负载本身决定而非瞬态。 |
+| `--load_hold` | flag | False | **Ch5**：启用负载并让负载**全程恒定**（`load_duration_range_s=[1e6,1e6]`，不循环），使倾倒由负载本身决定而非瞬态。`--no_load` 或 Exp A 纯外力模式除外。 |
 
 > Exp A 的力/载对齐用固定阶跃：0.5s 起、开 6s、周期 10s（`--load_start 0.5 --load_dur 6 --load_int 10`）。
 > 斜坡/急停/漂移这类"稳态"实验用 `--load_hold`。

@@ -177,6 +177,7 @@ class BipedWF(BaseTask):
                 self._push_robots()
             self._apply_sustained_ext_force()  # 实验A：持续外力（默认关闭，不影响训练）
             self._apply_scenario_forces()      # co-design 场景外力（坡=水平力/负载=向下力，默认关闭）
+            self._apply_load_ext_force()       # play/debug：给负载本体施加水平力以验证滑动
             self.gym.simulate(self.sim)
             if self.device == "cpu":
                 self.gym.fetch_results(self.sim, True)

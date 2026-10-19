@@ -28,10 +28,17 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-from legged_gym import LEGGED_GYM_ROOT_DIR
 import os
+import sys
 import json
 import subprocess
+
+_SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+_REPO_ROOT = os.path.dirname(os.path.dirname(_SCRIPT_DIR))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from legged_gym import LEGGED_GYM_ROOT_DIR
 
 import isaacgym
 from isaacgym.torch_utils import *
@@ -137,15 +144,26 @@ def _apply_saved_env_cfg(env_cfg, train_cfg, args, log_root):
 
     # --- env dimensions (drives actor/critic input width) ---
     se = saved_env.get("env", {}) if isinstance(saved_env.get("env"), dict) else {}
-    for k in ("num_observations", "num_critic_observations"):
+    for k in ("num_observations", "num_critic_observations", "obs_history_length"):
         if se.get(k) is not None:
             _ovr(env_cfg.env, k, int(se[k]))
     # --- env flags affecting obs structure ---
     # 字段存在：使用 saved 值。
     # 字段缺失（older runs）：use_torques_in_obs 的默认是 True（该 flag 2026-05-24 才加，
-    # 之前所有 ckpt 都有 raw torques）；其他 flag 若缺失则不动 in-tree 默认。
-    _flag_defaults_when_missing = {"use_torques_in_obs": True}
-    for k in ("use_qs_in_obs", "use_residual_learning", "use_torques_in_obs"):
+    # 之前所有 ckpt 都有 raw torques）。gait stepping/phase 是更晚加入的观测维度；
+    # 老 ckpt 的 saved cfg 里没有这些字段，必须关掉，否则会多出 3 维 obs。
+    _flag_defaults_when_missing = {
+        "use_torques_in_obs": True,
+        "use_gait_stepping": False,
+        "use_gait_phase": False,
+    }
+    for k in (
+        "use_qs_in_obs",
+        "use_residual_learning",
+        "use_torques_in_obs",
+        "use_gait_stepping",
+        "use_gait_phase",
+    ):
         sv = se.get(k)
         if sv is not None:
             _ovr(env_cfg.env, k, bool(sv))
@@ -704,6 +722,61 @@ def play(args):
         env_cfg.domain_rand.add_load_range = [_lm_min, _lm_max]
         print(f"[PLAY] override add_load_range = {env_cfg.domain_rand.add_load_range}")
 
+    _load_friction = float(getattr(args, "load_friction", -1.0))
+    if _load_friction >= 0.0:
+        env_cfg.domain_rand.load_friction = _load_friction
+        print(f"[PLAY] override payload load_friction = {_load_friction}")
+
+    _deck_friction = float(getattr(args, "deck_friction", -1.0))
+    if _deck_friction >= 0.0:
+        env_cfg.domain_rand.deck_friction_override = _deck_friction
+        print(f"[PLAY] override top-deck deck_friction_override = {_deck_friction}")
+
+    _robot_friction = float(getattr(args, "robot_friction", -1.0))
+    if _robot_friction >= 0.0:
+        env_cfg.domain_rand.robot_friction_override = _robot_friction
+        print(
+            f"[PLAY] override robot_friction_override = {_robot_friction} "
+            "(debug only: affects wheel-ground contact)"
+        )
+
+    _load_force_vec = [
+        float(getattr(args, "load_force_x", 0.0) or 0.0),
+        float(getattr(args, "load_force_y", 0.0) or 0.0),
+        float(getattr(args, "load_force_z", 0.0) or 0.0),
+    ]
+    _load_force_on = any(abs(v) > 1e-9 for v in _load_force_vec)
+    _load_force_start = float(getattr(args, "load_force_start", 0.8) or 0.0)
+    _load_force_stop = float(getattr(args, "load_force_stop", 1.2) or 0.0)
+    _load_force_frame = str(getattr(args, "load_force_frame", "env") or "env").lower()
+    _load_kick_vec = [
+        float(getattr(args, "load_kick_vx", 0.0) or 0.0),
+        float(getattr(args, "load_kick_vy", 0.0) or 0.0),
+        float(getattr(args, "load_kick_vz", 0.0) or 0.0),
+    ]
+    _load_kick_on = any(abs(v) > 1e-9 for v in _load_kick_vec)
+    _load_kick_time = float(getattr(args, "load_kick_time", 1.0) or 0.0)
+    _load_kick_frame = str(getattr(args, "load_kick_frame", "env") or "env").lower()
+
+    _physx_overrides = {
+        "friction_offset_threshold": float(getattr(args, "physx_friction_offset_threshold", -1.0)),
+        "friction_correlation_distance": float(getattr(args, "physx_friction_correlation_distance", -1.0)),
+        "contact_offset": float(getattr(args, "physx_contact_offset", -1.0)),
+        "rest_offset": float(getattr(args, "physx_rest_offset", -1.0)),
+    }
+    for _name, _value in _physx_overrides.items():
+        if _value >= 0.0:
+            setattr(env_cfg.sim.physx, _name, _value)
+            print(f"[PLAY] override sim.physx.{_name} = {_value}")
+    _physx_iter_overrides = {
+        "num_position_iterations": int(getattr(args, "physx_num_position_iterations", -1)),
+        "num_velocity_iterations": int(getattr(args, "physx_num_velocity_iterations", -1)),
+    }
+    for _name, _value in _physx_iter_overrides.items():
+        if _value >= 0:
+            setattr(env_cfg.sim.physx, _name, _value)
+            print(f"[PLAY] override sim.physx.{_name} = {_value}")
+
     # CLI override: sustained external force (Exp A: 外力 vs 重物辨识). World frame, -Z = downward.
     _eff_kg = float(getattr(args, "ext_force_down_kg", 0.0) or 0.0)
     _eff_kg_min = float(getattr(args, "ext_force_down_kg_min", 0.0) or 0.0)
@@ -745,6 +818,8 @@ def play(args):
 
     # Ch5 斜坡标定：负载全程恒定（不 on/off 循环），使翻倒由负载决定而非瞬态
     if bool(getattr(args, "load_hold", False)):
+        if not bool(getattr(args, "no_load", False)) and not (_ext_force_on and not _keep_load):
+            env_cfg.domain_rand.add_random_load = True
         env_cfg.domain_rand.load_start_time_s = 0.5
         env_cfg.domain_rand.load_duration_range_s = [1.0e6, 1.0e6]
         env_cfg.domain_rand.load_interval_range_s = [1.0e6, 1.0e6]
@@ -787,6 +862,35 @@ def play(args):
         env.load_offset_range["y"] = (oy, oy)
         env.load_offset_range["z"] = (0.10, 0.10)
         print(f"[PLAY] ECCENTRIC load offset fixed: x={ox} y={oy} (z=0.10)")
+
+    if _load_force_on:
+        env.load_ext_force_enable = True
+        env.load_ext_force_vec = to_torch(_load_force_vec, device=env.device)
+        env.load_ext_force_start_s = _load_force_start
+        env.load_ext_force_stop_s = _load_force_stop
+        env.load_ext_force_frame = _load_force_frame
+        print(
+            f"[PLAY] LOAD-FORCE diagnostic: force={_load_force_vec} N "
+            f"frame={_load_force_frame} on load body, "
+            f"t=[{_load_force_start}, {_load_force_stop}] s"
+        )
+
+    if _load_kick_on:
+        env.load_kick_enable = True
+        env.load_kick_vec = to_torch(_load_kick_vec, device=env.device)
+        env.load_kick_time_s = _load_kick_time
+        env.load_kick_frame = _load_kick_frame
+        if hasattr(env, "load_kick_done"):
+            env.load_kick_done[:] = False
+        print(
+            f"[PLAY] LOAD-KICK diagnostic: delta_v={_load_kick_vec} m/s "
+            f"frame={_load_kick_frame} on load actor, t={_load_kick_time} s"
+        )
+
+    if bool(getattr(args, "debug_load_contacts", False)):
+        env.debug_load_contacts = True
+        env.debug_contact_every = max(1, int(getattr(args, "debug_contact_every", 50) or 50))
+        print(f"[PLAY] LOAD-CONTACT debug: env0 every {env.debug_contact_every} steps")
 
     # Ch5 测试时估计消融:篡改喂进 obs 的负载估计(权重不变),验证"估计→控制"的因果
     _cmode = str(getattr(args, "corrupt_estimate", "none") or "none")
@@ -1422,6 +1526,31 @@ def play(args):
                 "load_mass_range_used": list(getattr(env.cfg.domain_rand, "add_load_range", [-1, -1])),
                 "load_offset_x": float(_lox if _lox > -90 else np.nan),
                 "load_offset_y": float(_loy if _loy > -90 else np.nan),
+                "load_friction": float(getattr(env.cfg.domain_rand, "load_friction", np.nan)),
+                "deck_friction_override": float(getattr(env.cfg.domain_rand, "deck_friction_override", np.nan)),
+                "robot_friction_override": float(getattr(env.cfg.domain_rand, "robot_friction_override", np.nan)),
+                "load_force_vec": list(_load_force_vec),
+                "load_force_frame": str(_load_force_frame),
+                "load_force_start_s": float(_load_force_start),
+                "load_force_stop_s": float(_load_force_stop),
+                "load_kick_vec": list(_load_kick_vec),
+                "load_kick_frame": str(_load_kick_frame),
+                "load_kick_time_s": float(_load_kick_time),
+                "debug_load_contacts": bool(getattr(args, "debug_load_contacts", False)),
+                "physx_fric_off_thr": float(
+                    getattr(env.sim_params.physx, "friction_offset_threshold", np.nan)
+                ),
+                "physx_fric_corr_dist": float(
+                    getattr(env.sim_params.physx, "friction_correlation_distance", np.nan)
+                ),
+                "physx_contact_offset": float(getattr(env.sim_params.physx, "contact_offset", np.nan)),
+                "physx_rest_offset": float(getattr(env.sim_params.physx, "rest_offset", np.nan)),
+                "physx_pos_iters": int(
+                    getattr(env.sim_params.physx, "num_position_iterations", -1)
+                ),
+                "physx_vel_iters": int(
+                    getattr(env.sim_params.physx, "num_velocity_iterations", -1)
+                ),
                 "slope_deg": float(_slope_deg),
                 "estop_vx": float(_estop_vx),
                 "corrupt_estimate": str(_cmode),

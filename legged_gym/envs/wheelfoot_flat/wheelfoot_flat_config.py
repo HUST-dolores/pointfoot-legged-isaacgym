@@ -266,6 +266,16 @@ class BipedCfgWF(BaseConfig):
         friction_range = [0.2, 1.6]
         randomize_restitution = True
         restitution_range = [0.0, 1.0]
+        # Play/debug: payload-box material friction. Lower values make the load
+        # easier to slide on the robot deck; 0.5 is the historical hard-coded value.
+        load_friction = 0.5
+        # Play/debug: when >=0, overrides only the top deck/plate collision
+        # friction. This keeps wheel-ground friction intact while making the
+        # payload-deck contact more slippery.
+        deck_friction_override = -1.0
+        # Play/debug only. When >=0, overrides all robot rigid-shape friction too.
+        # This also changes wheel-ground contact, so keep it off for normal eval.
+        robot_friction_override = -1.0
         randomize_base_mass = False
         added_mass_range = [-0.1, 0.1]         #
         add_random_load = False  # STEPPING run: isolate walking first (re-enable to add load-carrying later)

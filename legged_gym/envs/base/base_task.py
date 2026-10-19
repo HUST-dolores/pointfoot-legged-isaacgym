@@ -232,6 +232,8 @@ class BaseTask:
 
     def _reset_load_timers(self, env_ids):
         """Reset load timers/state on env reset so loads can spawn again."""
+        if hasattr(self, "load_kick_done"):
+            self.load_kick_done[env_ids] = False
         if not getattr(self.cfg.domain_rand, "add_random_load", False):
             return
         start_s = float(getattr(self.cfg.domain_rand, "load_start_time_s", 0.0))
@@ -529,6 +531,32 @@ class BaseTask:
         self.dof_names = self.gym.get_asset_dof_names(robot_asset)
         self.num_bodies = len(body_names)
         self.num_dofs = len(self.dof_names)
+        self.deck_shape_indices = []
+        try:
+            body_shape_indices = self.gym.get_asset_rigid_body_shape_indices(robot_asset)
+
+            def _body_shape_ids(body_idx):
+                shape_range = body_shape_indices[body_idx]
+                return list(range(shape_range.start, shape_range.start + shape_range.count))
+
+            if "plate_link" in body_names:
+                self.deck_shape_indices = _body_shape_ids(body_names.index("plate_link"))
+            elif "base_Link" in body_names:
+                base_shape_ids = _body_shape_ids(body_names.index("base_Link"))
+                if len(base_shape_ids) >= 2:
+                    # With collapse_fixed_joints=True, plate_link is folded into
+                    # base_Link. In WF_TRON1A URDF the base body collision is
+                    # shape 0 and the top deck/plate collision is shape 1.
+                    self.deck_shape_indices = [base_shape_ids[1]]
+        except Exception as e:
+            self.deck_shape_indices = []
+            print(f"[deck-friction] could not resolve deck shape indices: {e}")
+        deck_friction_override = float(getattr(self.cfg.domain_rand, "deck_friction_override", -1.0))
+        if deck_friction_override >= 0.0:
+            print(
+                f"[deck-friction] deck shape indices={self.deck_shape_indices}; "
+                f"friction={deck_friction_override}"
+            )
         feet_names = [s for s in body_names if self.cfg.asset.foot_name in s]
         penalized_contact_names = []
         for name in self.cfg.asset.penalize_contacts_on:
@@ -662,6 +690,9 @@ class BaseTask:
         # # Create load asset
         load_asset_options = gymapi.AssetOptions()
         load_asset_options.fix_base_link = False
+        load_shape_friction = float(getattr(self.cfg.domain_rand, "load_friction", 0.5))
+        if load_shape_friction != 0.5:
+            print(f"[load-friction] payload rigid-shape friction={load_shape_friction}")
         load_volume = 0.1 * 0.1 * 0.1
         load_mass_range = getattr(self.cfg.domain_rand, "add_load_range", [1.0, 1.0])
         load_mass_min, load_mass_max = float(load_mass_range[0]), float(load_mass_range[1])
@@ -682,7 +713,9 @@ class BaseTask:
         if not randomize_load_mass_per_env:
             self.load_asset = self.gym.create_box(self.sim, 0.1, 0.1, 0.1, load_asset_options)
             load_rigid_shape_props = self.gym.get_asset_rigid_shape_properties(self.load_asset)
-            load_rigid_shape_props[0].friction = 0.5
+            load_rigid_shape_props = self._apply_shape_friction_overrides(
+                load_rigid_shape_props, 0, is_load=True
+            )
             self.gym.set_asset_rigid_shape_properties(self.load_asset, load_rigid_shape_props)
         else:
             self.load_asset = None  # per-env assets built inside the loop below
@@ -732,6 +765,7 @@ class BaseTask:
                 self.cfg.asset.self_collisions,
                 0,
             )
+            self._apply_actor_shape_friction_overrides(env_handle, actor_handle, i, is_load=False)
             dof_props = self._process_dof_props(dof_props_asset, i)
             self.gym.set_actor_dof_properties(env_handle, actor_handle, dof_props)
             actor_idx = self.gym.get_actor_index(env_handle, actor_handle, gymapi.DOMAIN_SIM)
@@ -759,7 +793,7 @@ class BaseTask:
                 _opts.density = load_mass_i / load_volume
                 _asset_i = self.gym.create_box(self.sim, 0.1, 0.1, 0.1, _opts)
                 _shape_props = self.gym.get_asset_rigid_shape_properties(_asset_i)
-                _shape_props[0].friction = 0.5
+                _shape_props = self._apply_shape_friction_overrides(_shape_props, i, is_load=True)
                 self.gym.set_asset_rigid_shape_properties(_asset_i, _shape_props)
                 _asset_for_this = _asset_i
             else:
@@ -769,6 +803,7 @@ class BaseTask:
             load_handle = self.gym.create_actor(
                 env_handle, _asset_for_this, load_pose, f"load_{i}", i, 0, 0
             )
+            self._apply_actor_shape_friction_overrides(env_handle, load_handle, i, is_load=True)
             # print(f"Created load actor in env {i}, handle {load_handle}")
             self.load_handles.append(load_handle)
             self.load_mass_per_env_init.append(load_mass_i)
@@ -875,6 +910,23 @@ class BaseTask:
         Returns:
             [List[gymapi.RigidShapeProperties]]: Modified rigid shape properties
         """
+        props = self._apply_shape_friction_overrides(props, env_id, is_load=False)
+        return props
+
+    def _set_shape_friction(self, shape_prop, friction):
+        shape_prop.friction = float(friction)
+        if float(friction) <= 1e-9:
+            shape_prop.rolling_friction = 0.0
+            shape_prop.torsion_friction = 0.0
+
+    def _apply_shape_friction_overrides(self, props, env_id, is_load=False):
+        """Apply play/debug material overrides to shape properties."""
+        if is_load:
+            load_shape_friction = float(getattr(self.cfg.domain_rand, "load_friction", 0.5))
+            for s in range(len(props)):
+                self._set_shape_friction(props[s], load_shape_friction)
+            return props
+
         if self.cfg.domain_rand.randomize_friction:
             if env_id == 0:
                 # prepare friction randomization
@@ -906,7 +958,43 @@ class BaseTask:
                 )
             for s in range(len(props)):
                 props[s].restitution = self.restitution_coef[env_id]
+        robot_friction_override = float(getattr(self.cfg.domain_rand, "robot_friction_override", -1.0))
+        if robot_friction_override >= 0.0:
+            for s in range(len(props)):
+                self._set_shape_friction(props[s], robot_friction_override)
+        deck_friction_override = float(getattr(self.cfg.domain_rand, "deck_friction_override", -1.0))
+        if deck_friction_override >= 0.0:
+            for s in getattr(self, "deck_shape_indices", []):
+                if 0 <= s < len(props):
+                    self._set_shape_friction(props[s], deck_friction_override)
         return props
+
+    def _apply_actor_shape_friction_overrides(self, env_handle, actor_handle, env_id, is_load=False):
+        """Re-apply material overrides at actor level and print env0 diagnostics.
+
+        Isaac Gym examples use actor-level setters for final rigid-shape
+        material values, so we do this after create_actor to rule out asset
+        properties being superseded.
+        """
+        props = self.gym.get_actor_rigid_shape_properties(env_handle, actor_handle)
+        props = self._apply_shape_friction_overrides(props, env_id, is_load=is_load)
+        self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, props)
+
+        if env_id == 0:
+            if is_load and float(getattr(self.cfg.domain_rand, "load_friction", -1.0)) >= 0.0:
+                p = props[0]
+                print(
+                    "[shape-friction] env0 load shape0 "
+                    f"friction={p.friction} rolling={p.rolling_friction} torsion={p.torsion_friction}"
+                )
+            if (not is_load) and float(getattr(self.cfg.domain_rand, "deck_friction_override", -1.0)) >= 0.0:
+                for s in getattr(self, "deck_shape_indices", []):
+                    if 0 <= s < len(props):
+                        p = props[s]
+                        print(
+                            f"[shape-friction] env0 deck shape{s} "
+                            f"friction={p.friction} rolling={p.rolling_friction} torsion={p.torsion_friction}"
+                        )
     
     def _process_dof_props(self, props, env_id):
         """Callback allowing to store/change/randomize the DOF properties of each environment.
@@ -1533,6 +1621,97 @@ class BaseTask:
             gymapi.ENV_SPACE,
         )
 
+    def _apply_load_ext_force(self):
+        """Apply a diagnostic external force directly to the load actor.
+
+        This is for play/debug only: it creates an explicit tangential
+        excitation so near-zero payload/deck friction can be verified visually.
+        """
+        if not getattr(self, "load_ext_force_enable", False):
+            return
+        if not hasattr(self, "has_load") or not hasattr(self, "load_indices"):
+            return
+
+        start_s = float(getattr(self, "load_ext_force_start_s", 0.0))
+        stop_s = float(getattr(self, "load_ext_force_stop_s", 0.0))
+        t = self.episode_length_buf.float() * self.dt
+        active = t >= start_s
+        if stop_s > start_s:
+            active = active & (t < stop_s)
+        active = active & self.has_load
+        load_body_idx = self.num_bodies
+        self.rigid_body_external_forces[:, load_body_idx, 0:3] = 0.0
+        self.rigid_body_external_torques[:, load_body_idx, 0:3] = 0.0
+        if not active.any():
+            return
+
+        force_cmd = self.load_ext_force_vec.view(1, 3).repeat(self.num_envs, 1)
+        force_frame = str(getattr(self, "load_ext_force_frame", "env") or "env").lower()
+        if force_frame in ("body", "robot", "base"):
+            base_quat = self.root_states[self.actor_indices, 3:7]
+            force_env = quat_apply(base_quat, force_cmd)
+        else:
+            force_env = force_cmd
+        self.rigid_body_external_forces[:, load_body_idx, 0:3] = force_env * active.float().unsqueeze(-1)
+        self.gym.apply_rigid_body_force_tensors(
+            self.sim,
+            gymtorch.unwrap_tensor(self.rigid_body_external_forces.view(-1, 3)),
+            gymtorch.unwrap_tensor(self.rigid_body_external_torques.view(-1, 3)),
+            gymapi.ENV_SPACE,
+        )
+
+    def _apply_load_velocity_kick(self):
+        """Add a one-shot diagnostic velocity to the load actor.
+
+        This separates "can the load move independently?" from the external
+        force tensor path. It is disabled by default and only set by play.py.
+        """
+        if not getattr(self, "load_kick_enable", False):
+            return
+        if not hasattr(self, "has_load") or not hasattr(self, "load_indices"):
+            return
+        if not hasattr(self, "load_kick_done"):
+            self.load_kick_done = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False
+            )
+
+        t = self.episode_length_buf.float() * self.dt
+        kick_time_s = float(getattr(self, "load_kick_time_s", 0.0))
+        active = (t >= kick_time_s) & self.has_load & (~self.load_kick_done)
+        if not active.any():
+            return
+
+        env_ids = active.nonzero(as_tuple=False).flatten()
+        n = env_ids.numel()
+        kick_cmd = self.load_kick_vec.view(1, 3).repeat(n, 1)
+        kick_frame = str(getattr(self, "load_kick_frame", "env") or "env").lower()
+        if kick_frame in ("body", "robot", "base"):
+            base_quat = self.root_states[self.actor_indices[env_ids], 3:7]
+            kick_env = quat_apply(base_quat, kick_cmd)
+        else:
+            kick_env = kick_cmd
+
+        load_actor_ids = self.load_indices[env_ids]
+        self.root_states[load_actor_ids, 7:10] += kick_env
+        load_indices = load_actor_ids.to(torch.int32).view(-1)
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(load_indices),
+            len(load_indices),
+        )
+        self.load_kick_done[env_ids] = True
+
+        if getattr(self, "debug_load_contacts", False) and (env_ids == 0).any():
+            env0_pos = (env_ids == 0).nonzero(as_tuple=False).flatten()[0]
+            print(
+                f"[load-kick] step={int(self.debug_step_counter)} "
+                f"t={float(t[0].item()):.3f}s env=0 frame={kick_frame} "
+                f"delta_v_cmd={self.load_kick_vec.detach().cpu().tolist()} "
+                f"delta_v_env={kick_env[env0_pos].detach().cpu().tolist()} "
+                f"load_vel_env={self.root_states[self.load_indices[0], 7:10].detach().cpu().tolist()}"
+            )
+
     def _compute_mass_com(self, env_ids: torch.Tensor = None, load_on_body_mask: torch.Tensor = None):
         """Update effective base mass/COM when a load is present on the robot."""
         if env_ids is None:
@@ -1851,6 +2030,160 @@ class BaseTask:
             f = forces[idx].tolist()
             name = names[idx] if idx < len(names) else f"body_{idx}"
             print(f"[env {env_id}] body {idx} ({name}): force {f} | norm {n:.4f}")
+
+    def debug_print_load_contacts(self, env_id: int = 0):
+        """Print load contact diagnostics.
+
+        With GPU pipeline, Isaac Gym forbids get_env_rigid_contacts() after the
+        simulation starts, so this falls back to tensor diagnostics. The tensor
+        API exposes net contact forces per body, not exact contact pairs.
+        """
+        if env_id < 0 or env_id >= self.num_envs:
+            print(f"[debug_load_contact] invalid env_id {env_id}")
+            return
+        if not hasattr(self, "body_names"):
+            print("[debug_load_contact] body names not ready")
+            return
+
+        names = list(self.body_names) + ["load"]
+        load_body_idx = self.num_bodies
+
+        if getattr(self.sim_params, "use_gpu_pipeline", False):
+            forces = self.contact_forces[env_id]
+            norms = torch.norm(forces, dim=-1)
+            load_force = forces[load_body_idx]
+
+            env_t = torch.tensor([env_id], dtype=torch.long, device=self.device)
+            has_load = bool(self.has_load[env_id].item()) if hasattr(self, "has_load") else False
+            on_raw = bool(self.is_load_on_body(env_t, apply_hysteresis=False)[0].item())
+            on_smooth = bool(self.is_load_on_body(env_t, apply_hysteresis=True)[0].item())
+
+            base_actor_idx = self.actor_indices[env_id]
+            load_actor_idx = self.load_indices[env_id]
+            base_pos = self.root_states[base_actor_idx, 0:3]
+            load_pos = self.root_states[load_actor_idx, 0:3]
+            base_quat = self.root_states[base_actor_idx, 3:7]
+            qx, qy, qz, qw = base_quat
+            base_roll = torch.atan2(
+                2.0 * (qw * qx + qy * qz),
+                1.0 - 2.0 * (qx * qx + qy * qy),
+            )
+            base_pitch = torch.asin(
+                torch.clamp(2.0 * (qw * qy - qz * qx), -1.0, 1.0)
+            )
+            gravity_body = quat_rotate_inverse(
+                base_quat.unsqueeze(0), self.gravity_vec[env_id].unsqueeze(0)
+            )[0]
+            gravity_tangent_accel = 9.81 * gravity_body[:2]
+            rel_body = quat_rotate_inverse(
+                base_quat.unsqueeze(0), (load_pos - base_pos).unsqueeze(0)
+            )[0]
+            rel_vel_body = quat_rotate_inverse(
+                base_quat.unsqueeze(0),
+                (self.root_states[load_actor_idx, 7:10] - self.root_states[base_actor_idx, 7:10]).unsqueeze(0),
+            )[0]
+            load_force_body = quat_rotate_inverse(base_quat.unsqueeze(0), load_force.unsqueeze(0))[0]
+
+            load_force_active = False
+            load_force_vec = [0.0, 0.0, 0.0]
+            load_force_vec_body = [0.0, 0.0, 0.0]
+            load_force_vec_env = [0.0, 0.0, 0.0]
+            load_force_frame = str(getattr(self, "load_ext_force_frame", "env") or "env").lower()
+            t = float((self.episode_length_buf[env_id].float() * self.dt).item())
+            if getattr(self, "load_ext_force_enable", False):
+                start_s = float(getattr(self, "load_ext_force_start_s", 0.0))
+                stop_s = float(getattr(self, "load_ext_force_stop_s", 0.0))
+                load_force_active = t >= start_s and (stop_s <= start_s or t < stop_s) and has_load
+                force_cmd = self.load_ext_force_vec
+                load_force_vec = [float(x) for x in force_cmd.detach().cpu().tolist()]
+                if load_force_frame in ("body", "robot", "base"):
+                    force_body = force_cmd
+                    force_env = quat_apply(base_quat.unsqueeze(0), force_cmd.view(1, 3))[0]
+                else:
+                    force_env = force_cmd
+                    force_body = quat_rotate_inverse(base_quat.unsqueeze(0), force_cmd.view(1, 3))[0]
+                load_force_vec_body = [float(x) for x in force_body.detach().cpu().tolist()]
+                load_force_vec_env = [float(x) for x in force_env.detach().cpu().tolist()]
+
+            top_k = min(5, int(norms.numel()))
+            top_vals, top_idx = torch.topk(norms, k=top_k)
+            top_parts = []
+            for val, idx in zip(top_vals.detach().cpu().tolist(), top_idx.detach().cpu().tolist()):
+                name = names[idx] if 0 <= idx < len(names) else f"body_{idx}"
+                top_parts.append(f"{name}:{val:.3f}")
+
+            print(
+                f"[debug_load_contact_tensor] step={int(self.debug_step_counter)} env={env_id} "
+                f"t={t:.3f}s "
+                f"has={has_load} on_raw={on_raw} on={on_smooth} "
+                f"rel_body={rel_body.detach().cpu().tolist()} "
+                f"rel_vel_body={rel_vel_body.detach().cpu().tolist()} "
+                f"base_roll_pitch_deg="
+                f"{[float(torch.rad2deg(base_roll).item()), float(torch.rad2deg(base_pitch).item())]} "
+                f"gravity_body={gravity_body.detach().cpu().tolist()} "
+                f"gravity_tangent_accel_xy={gravity_tangent_accel.detach().cpu().tolist()} "
+                f"load_net_contact={load_force.detach().cpu().tolist()} "
+                f"load_net_contact_body={load_force_body.detach().cpu().tolist()} "
+                f"|load_contact|={float(torch.norm(load_force).item()):.3f} "
+                f"load_force_active={load_force_active} "
+                f"load_force_frame={load_force_frame} load_force_vec={load_force_vec} "
+                f"load_force_vec_body={load_force_vec_body} load_force_vec_env={load_force_vec_env} "
+                f"top_contact_norms={top_parts}"
+            )
+            return
+
+        if not hasattr(self, "envs"):
+            print("[debug_contact_pair] env handles not ready")
+            return
+        try:
+            contacts = self.gym.get_env_rigid_contacts(self.envs[env_id])
+        except Exception as e:
+            print(f"[debug_contact_pair] get_env_rigid_contacts failed: {e}")
+            return
+
+        def _contact_field(contact, name, default=0.0):
+            if hasattr(contact, name):
+                return getattr(contact, name)
+            try:
+                return contact[name]
+            except Exception:
+                return default
+
+        def _contact_vec3(value):
+            if hasattr(value, "x"):
+                return [float(value.x), float(value.y), float(value.z)]
+            try:
+                return [float(value[0]), float(value[1]), float(value[2])]
+            except Exception:
+                try:
+                    return [float(value["x"]), float(value["y"]), float(value["z"])]
+                except Exception:
+                    return [0.0, 0.0, 0.0]
+
+        hits = []
+        for c in contacts:
+            b0, b1 = int(_contact_field(c, "body0")), int(_contact_field(c, "body1"))
+            if b0 != load_body_idx and b1 != load_body_idx:
+                continue
+            n0 = names[b0] if 0 <= b0 < len(names) else f"body_{b0}"
+            n1 = names[b1] if 0 <= b1 < len(names) else f"body_{b1}"
+            normal = _contact_vec3(_contact_field(c, "normal"))
+            hits.append(
+                f"{n0}({b0}) <-> {n1}({b1}) "
+                f"friction={float(_contact_field(c, 'friction')):.6g} "
+                f"rolling={float(_contact_field(c, 'rolling_friction')):.6g} "
+                f"torsion={float(_contact_field(c, 'torsion_friction')):.6g} "
+                f"lambda_friction={float(_contact_field(c, 'lambda_friction')):.6g} "
+                f"normal={normal}"
+            )
+
+        print(
+            f"[debug_contact_pair] step={int(self.debug_step_counter)} "
+            f"env={env_id} load_contacts={len(hits)}"
+        )
+        for line in hits[:8]:
+            print(f"  {line}")
+
     def post_physics_step(self):
         """check terminations, compute observations and rewards
         calls self._post_physics_step_callback() for common computations
@@ -1908,6 +2241,7 @@ class BaseTask:
         )
         load_on_body_mask = torch.zeros_like(load_on_body_mask_raw)
         self._maybe_spawn_loads()
+        self._apply_load_velocity_kick()
         load_on_body_mask_raw = self.is_load_on_body(apply_hysteresis=False)
         load_on_body_mask = self.is_load_on_body(apply_hysteresis=True)
 
@@ -1930,6 +2264,10 @@ class BaseTask:
         self.load_hysteresis_agree_last = (
             (load_on_body_mask == load_on_body_mask_raw).float().mean()
         )
+        if getattr(self, "debug_load_contacts", False):
+            every = max(1, int(getattr(self, "debug_contact_every", 50)))
+            if int(self.debug_step_counter) % every == 0:
+                self.debug_print_load_contacts(env_id=0)
         # if self.load_debug and (self.debug_step_counter % 50 == 0):
         #     print(
         #         f"[load-mask] has={self.load_has_load_ratio_last.item():.3f} "
@@ -2301,6 +2639,20 @@ class BaseTask:
         self.ext_force_enable = False
         self.ext_force_vec = torch.zeros(3, device=self.device, requires_grad=False)
         self.ext_force_body_idx = 0  # 0 = base；作用在腿上的力（改 body_idx）留待后续
+        self.load_ext_force_enable = False
+        self.load_ext_force_vec = torch.zeros(3, device=self.device, requires_grad=False)
+        self.load_ext_force_start_s = 0.8
+        self.load_ext_force_stop_s = 1.2
+        self.load_ext_force_frame = "env"
+        self.load_kick_enable = False
+        self.load_kick_vec = torch.zeros(3, device=self.device, requires_grad=False)
+        self.load_kick_time_s = 1.0
+        self.load_kick_frame = "env"
+        self.load_kick_done = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False
+        )
+        self.debug_load_contacts = False
+        self.debug_contact_every = 50
         self.projected_gravity = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         self.base_height = torch.zeros_like(self.root_states[self.actor_indices, 2])
         if self.cfg.terrain.measure_heights or self.cfg.terrain.critic_measure_heights:
