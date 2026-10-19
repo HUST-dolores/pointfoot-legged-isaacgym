@@ -1,0 +1,298 @@
+{
+  "date": "2026-10-16",
+  "timezone": "Asia/Shanghai",
+  "status": "plan_and_static_audit_only",
+  "repo_commit": "f8d2cf14c8899e9c0d117d4612df85f0562e5066",
+  "audit_scope": "file existence, hashes, saved configurations; no checkpoint execution",
+  "checkpoint_order": [
+    "rl_s1",
+    "rl_s2",
+    "mg_s1",
+    "mg_s2"
+  ],
+  "checkpoints": [
+    {
+      "policy_id": "rl_s1",
+      "method": "RL-only",
+      "training_repeat": 1,
+      "training_seed": 20250705,
+      "checkpoint": 16000,
+      "saved_dimensions": [
+        31,
+        38,
+        540
+      ],
+      "files": [
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-13-14_rlonly_loadest/model_16000.pt",
+          "bytes": 4889075,
+          "sha256": "b70edefff0a9dd1d62ac8e0741cbb34497fef5f713e5656ef45545b649a3243c"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-13-14_rlonly_loadest/env_cfg.json",
+          "bytes": 14183,
+          "sha256": "bfca93ef07a57f794048b12fa58c6aae072a325a09fe5247cca2d51d46b2c9c3"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-13-14_rlonly_loadest/train_cfg.json",
+          "bytes": 2489,
+          "sha256": "41552d73803dea46fc804eb61b7f2c225d8e706ec29982b2d626ec442e5e341b"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-13-14_rlonly_loadest/wheelfoot_flat.py",
+          "bytes": 65315,
+          "sha256": "39c46ad6023dc066c8ca279ef410ffde2006684e35f56962fb27906ff041e552"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-13-14_rlonly_loadest/wheelfoot_flat_config.py",
+          "bytes": 28776,
+          "sha256": "63427e7ce46ee58c2832dd74486121ec95af47a15f191c4cb8f52c5ec35a983b"
+        }
+      ]
+    },
+    {
+      "policy_id": "rl_s2",
+      "method": "RL-only",
+      "training_repeat": 2,
+      "training_seed": 20250706,
+      "checkpoint": 16000,
+      "saved_dimensions": [
+        31,
+        38,
+        540
+      ],
+      "files": [
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-21-33_rlonly_loadest_s2/model_16000.pt",
+          "bytes": 4889075,
+          "sha256": "aba845b4d56b86dc2a8719c17a721da1f54c02f3b1112bbb83c229a3ae2969e7"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-21-33_rlonly_loadest_s2/env_cfg.json",
+          "bytes": 14183,
+          "sha256": "4330f350d62d18a4cfbdfb3ef1864f24af70b3eb92031275b2c81efa2b8ba6df"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-21-33_rlonly_loadest_s2/train_cfg.json",
+          "bytes": 2492,
+          "sha256": "ee9033b49047de87478f3e3e1698f5ccf390824b2a59a150a85cea070fa77b70"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-21-33_rlonly_loadest_s2/wheelfoot_flat.py",
+          "bytes": 65315,
+          "sha256": "39c46ad6023dc066c8ca279ef410ffde2006684e35f56962fb27906ff041e552"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_15-21-33_rlonly_loadest_s2/wheelfoot_flat_config.py",
+          "bytes": 28779,
+          "sha256": "686fd37260c28e7b2622b84b6734b5f432eabd21495e50ed85550ec8ee200ead"
+        }
+      ]
+    },
+    {
+      "policy_id": "mg_s1",
+      "method": "Model-guided",
+      "training_repeat": 1,
+      "training_seed": 20250705,
+      "checkpoint": 11000,
+      "saved_dimensions": [
+        51,
+        58,
+        940
+      ],
+      "files": [
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-30-43_mg_e1_s1/model_11000.pt",
+          "bytes": 5196275,
+          "sha256": "1d57700d25707a6167095cf6bbbb611a6749e63aa8b0d91e9295ae7dabd05bcf"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-30-43_mg_e1_s1/env_cfg.json",
+          "bytes": 14180,
+          "sha256": "b119f962b51deeedf00ecc49dc186853eb02599d0c3c5b247622fb78250ce16a"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-30-43_mg_e1_s1/train_cfg.json",
+          "bytes": 2482,
+          "sha256": "ed16ac1b4bc1804ca9c45a79a2655c8841831b6e17d1bbb063e3d1efb2997f32"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-30-43_mg_e1_s1/wheelfoot_flat.py",
+          "bytes": 65315,
+          "sha256": "39c46ad6023dc066c8ca279ef410ffde2006684e35f56962fb27906ff041e552"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-30-43_mg_e1_s1/wheelfoot_flat_config.py",
+          "bytes": 28736,
+          "sha256": "b104b6ae12612116e47d7fc31af0869e6a5b8699b4a20e7c888f648d4260db84"
+        }
+      ]
+    },
+    {
+      "policy_id": "mg_s2",
+      "method": "Model-guided",
+      "training_repeat": 2,
+      "training_seed": 20250706,
+      "checkpoint": 16000,
+      "saved_dimensions": [
+        51,
+        58,
+        940
+      ],
+      "files": [
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-33-51_mg_e1_s2/model_16000.pt",
+          "bytes": 5196275,
+          "sha256": "8fcf3d7e5d510abcdcd00000f5875736b7576def2634d459b34f92783793beac"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-33-51_mg_e1_s2/env_cfg.json",
+          "bytes": 14180,
+          "sha256": "27e77653294b226cb65ccdec74ecff444cd08516ccfc8a9b85783bcdb0cd3cd8"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-33-51_mg_e1_s2/train_cfg.json",
+          "bytes": 2482,
+          "sha256": "52fa58d96b264fdee6c8dce238b9d09e87ba7b9bdada6fc1ed346f30706ce717"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-33-51_mg_e1_s2/wheelfoot_flat.py",
+          "bytes": 65315,
+          "sha256": "39c46ad6023dc066c8ca279ef410ffde2006684e35f56962fb27906ff041e552"
+        },
+        {
+          "path": "/home/xu/limx_rl/pointfoot-legged-gym/logs/wheelfoot_flat/WF_TRON1A/Jul05_23-33-51_mg_e1_s2/wheelfoot_flat_config.py",
+          "bytes": 28736,
+          "sha256": "e9ea4195af1d10932d92771c6bdbc88bc5fe5766f2633dedb7ed7c69a87d6d2c"
+        }
+      ]
+    }
+  ],
+  "configuration_differences": {
+    "env_cfg": {
+      "env.num_critic_observations": [
+        38,
+        38,
+        58,
+        58
+      ],
+      "env.num_observations": [
+        31,
+        31,
+        51,
+        51
+      ],
+      "env.use_qs_in_obs": [
+        false,
+        false,
+        true,
+        true
+      ],
+      "env.use_residual_learning": [
+        false,
+        false,
+        true,
+        true
+      ],
+      "env.use_torques_in_obs": [
+        false,
+        false,
+        true,
+        true
+      ],
+      "seed": [
+        20250705,
+        20250706,
+        20250705,
+        20250706
+      ]
+    },
+    "train_cfg": {
+      "MLP_Encoder.num_input_dim": [
+        540,
+        540,
+        940,
+        940
+      ],
+      "algorithm.use_load_residual_estimation": [
+        false,
+        false,
+        true,
+        true
+      ],
+      "runner.run_name": [
+        "rlonly_loadest",
+        "rlonly_loadest_s2",
+        "mg_e1_s1",
+        "mg_e1_s2"
+      ],
+      "seed": [
+        20250705,
+        20250706,
+        20250705,
+        20250706
+      ]
+    }
+  },
+  "current_sources_audit_only_not_training_snapshot": [
+    {
+      "path": "/home/xu/limx_rl/pointfoot-legged-gym/legged_gym/envs/base/base_task.py",
+      "bytes": 132797,
+      "sha256": "55d5c675264d54fc9b4e1491ac24750efc88a89ba594d26735c4956999180723"
+    },
+    {
+      "path": "/home/xu/limx_rl/pointfoot-legged-gym/legged_gym/envs/wheelfoot_flat/wheelfoot_flat.py",
+      "bytes": 150859,
+      "sha256": "60ce31d124f27c0adf7e9620d1bc67538275249a6a6375e65cc11f7f53486249"
+    },
+    {
+      "path": "/home/xu/limx_rl/pointfoot-legged-gym/legged_gym/algorithm/ppo.py",
+      "bytes": 25272,
+      "sha256": "19820f87321aed2f0921156ccd31d172534bbb0f193f089b957d93b0fcfe30b3"
+    },
+    {
+      "path": "/home/xu/limx_rl/pointfoot-legged-gym/legged_gym/algorithm/on_policy_runner.py",
+      "bytes": 22486,
+      "sha256": "41055c59d655f720f432f3e77cc6a98d6659db3174d919577a9e1f37da88e79b"
+    },
+    {
+      "path": "/home/xu/limx_rl/pointfoot-legged-gym/legged_gym/algorithm/mlp_encoder.py",
+      "bytes": 13651,
+      "sha256": "319f5676054a2e51f50c27f79af0fc5fb04fc2b7660f93782c28e48ffa96d2af"
+    },
+    {
+      "path": "/home/xu/limx_rl/pointfoot-legged-gym/legged_gym/scripts/play.py",
+      "bytes": 98461,
+      "sha256": "52b9262437cccb74b8e516a0b16805be496c4a18d74ca8ac8098d35cff95e82f"
+    },
+    {
+      "path": "/home/xu/limx_rl/pointfoot-legged-gym/legged_gym/scripts/analyze_payload_motion_metrics.py",
+      "bytes": 15410,
+      "sha256": "33d285d371c576e2240ce399343c58365f94678c29e0525eff81e3d432ddc189"
+    },
+    {
+      "path": "/home/xu/limx_rl/pointfoot-legged-gym/legged_gym/scripts/measure_load_estimation_walk.py",
+      "bytes": 8891,
+      "sha256": "b2ff67c369dacaa7202be81d84f17fc52cd8bed303c9d0949cc1987e1803778b"
+    },
+    {
+      "path": "/home/xu/limx_rl/pointfoot-legged-gym/resources/robots/WF_TRON1A/urdf/robot.urdf",
+      "bytes": 21882,
+      "sha256": "f63df1a20f3e76211c153b5d5ffc0f9f966e7590ae91f43d399af1c8ad773005"
+    }
+  ],
+  "planned_batch_count": 24,
+  "planned_trajectories": 720,
+  "planned_control_transitions": 1440000,
+  "aggregate_environment_hours_not_wallclock_eta": 8.0,
+  "independent_training_repeats_per_method": 2,
+  "evaluation_seeds": [
+    12345,
+    20261016,
+    20261017
+  ],
+  "scenario_noise_tables_generated": false,
+  "simulator_preflight_completed": false,
+  "evaluations_started": false,
+  "new_measurement_results": false
+}
